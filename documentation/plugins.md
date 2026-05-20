@@ -447,7 +447,7 @@ shares: {
 }
 ```
 
-### `rest`
+### `api`
 
 Exposes a lightweight HTTP API over the Mikser pipeline. Useful for headless CMS workflows, live preview, and programmatic content management.
 
@@ -519,7 +519,7 @@ Renders an entity in memory without writing any file. Returns the rendered outpu
 **Config:**
 
 ```js
-rest: {
+api: {
   port: 3001,          // Port to listen on. Default: 3001
   token: 'secret',     // Bearer token for auth. Default: none (open)
   pageSize: 10,        // Default page size for GET /entities. Default: 10
@@ -529,7 +529,7 @@ rest: {
 
 **Authentication:**
 
-When `rest.token` is set, write operations require a Bearer token. Read-only endpoints are always open.
+When `api.token` is set, write operations require a Bearer token. Read-only endpoints are always open.
 
 | Method | Auth required |
 |--------|--------------|

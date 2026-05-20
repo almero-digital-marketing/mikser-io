@@ -150,8 +150,8 @@ await runtime.start()
 ## On-demand Rendering (library use)
 
 When you embed mikser inside another Node.js service — say, generating
-PDFs on request — use the same primitives the REST plugin uses, without
-needing the REST plugin itself:
+PDFs on request — use the same primitives the API plugin uses, without
+needing the API plugin itself:
 
 ```js
 import {

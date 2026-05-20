@@ -289,11 +289,11 @@ export default {
 }
 ```
 
-### `rest`
+### `api`
 
 ```js
 export default {
-  rest: {
+  api: {
     port: 3001,           // Port to listen on. Default: 3001
     token: 'my-secret',   // Bearer token required on all requests. Default: none (open)
     pageSize: 10,         // Default page size for GET /entities. Default: 10

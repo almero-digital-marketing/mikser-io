@@ -1,4 +1,4 @@
-// Public, transport-agnostic primitives that the REST plugin's HTTP
+// Public, transport-agnostic primitives that the API plugin's HTTP
 // endpoints are thin wrappers over. Library users embedding mikser
 // programmatically can import these directly.
 
@@ -12,7 +12,7 @@ import { updateEntity as defaultUpdateEntity } from './lifecycle.js'
  * concurrent calls into the minimum number of `runtime.process()` cycles.
  * The returned binding is stateful — each call to useRenderer() owns its
  * own pending queue and `completed`-hook lifecycle. Mount once per
- * consumer (the REST plugin mounts one; a library service mounts its own).
+ * consumer (the API plugin mounts one; a library service mounts its own).
  *
  * @example
  *   const { render } = useRenderer(runtime)

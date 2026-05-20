@@ -106,7 +106,7 @@ import { runtime } from 'mikser-io'
 | `runtime.addHook(name, fn)` | Register a hook callback dynamically; returns the function for later removal |
 | `runtime.removeHook(name, fn)` | Remove a previously registered hook callback |
 
-`addHook` / `removeHook` are useful when you need a **one-shot** hook that cleans itself up, or when you need to wire hooks from outside the normal plugin lifecycle (e.g. the REST plugin registers a `completed` hook per render request and removes it when the promise settles):
+`addHook` / `removeHook` are useful when you need a **one-shot** hook that cleans itself up, or when you need to wire hooks from outside the normal plugin lifecycle (e.g. the API plugin registers a `completed` hook per render request and removes it when the promise settles):
 
 ```js
 const hook = runtime.addHook('completed', async (entry) => {
