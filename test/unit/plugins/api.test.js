@@ -179,7 +179,7 @@ describe('api plugin: /render endpoint (integration)', () => {
         })
         try {
             const { port } = server.address()
-            const response = await fetch(`http://127.0.0.1:${port}/mikser/render`, {
+            const response = await fetch(`http://127.0.0.1:${port}/api/render`, {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
                 body: JSON.stringify({
@@ -243,7 +243,7 @@ describe('api plugin: /render endpoint (integration)', () => {
             const { port } = server.address()
             const ids = ['/docs/a.md', '/docs/b.md', '/docs/c.md', '/docs/d.md', '/docs/e.md']
             const responses = await Promise.all(
-                ids.map(id => fetch(`http://127.0.0.1:${port}/mikser/render`, {
+                ids.map(id => fetch(`http://127.0.0.1:${port}/api/render`, {
                     method: 'POST',
                     headers: { 'content-type': 'application/json' },
                     body: JSON.stringify({ id, collection: 'documents', type: 'document' }),
@@ -292,7 +292,7 @@ describe('api plugin: /render endpoint (integration)', () => {
         })
         try {
             const { port } = server.address()
-            const response = await fetch(`http://127.0.0.1:${port}/mikser/render`, {
+            const response = await fetch(`http://127.0.0.1:${port}/api/render`, {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
                 body: JSON.stringify({ id: '/docs/x.md' }),
@@ -329,7 +329,7 @@ describe('api plugin: /render endpoint (integration)', () => {
         })
         try {
             const { port } = server.address()
-            const response = await fetch(`http://127.0.0.1:${port}/mikser/render`, {
+            const response = await fetch(`http://127.0.0.1:${port}/api/render`, {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
                 body: JSON.stringify({ id: '/docs/x.md' }),

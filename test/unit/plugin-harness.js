@@ -54,19 +54,26 @@ export function createHarness({
         notice: mklog('notice'),
     }
 
+    let nextId = 1
+    const journalEntries = journal.map(e => ({ id: nextId++, output: null, context: {}, options: {}, ...e }))
+
+    function addEntry({ entity, operation, context = {}, options = {} }) {
+        journalEntries.push({ id: nextId++, entity, operation, context, options, output: null })
+    }
+
     const runtime = {
         options: { workingFolder: '/tmp/test-mikser', plugins: [], ...options },
         config,
         state,
         hooks,
         engine: { logger },
-    }
-
-    let nextId = 1
-    const journalEntries = journal.map(e => ({ id: nextId++, output: null, context: {}, options: {}, ...e }))
-
-    function addEntry({ entity, operation, context = {}, options = {} }) {
-        journalEntries.push({ id: nextId++, entity, operation, context, options, output: null })
+        // Real lifecycle.js attaches these to the runtime via side-effect
+        // on import. The harness doesn't load that module, so reproduce
+        // them here against the in-memory journal.
+        create: async (entity) => addEntry({ operation: OPERATION.CREATE, entity }),
+        update: async (entity) => addEntry({ operation: OPERATION.UPDATE, entity }),
+        delete: async ({ id, collection, type }) =>
+            addEntry({ operation: OPERATION.DELETE, entity: { id, collection, type } }),
     }
     function updateEntry({ id, entity, output }) {
         const entry = journalEntries.find(e => e.id === id)

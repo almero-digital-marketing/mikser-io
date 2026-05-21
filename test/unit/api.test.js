@@ -7,11 +7,15 @@ import path from 'node:path'
 import { useRenderer, useCollection } from '../../src/api.js'
 
 // Build a minimal runtime-like object exposing the surface useRenderer
-// uses: hooks.completed (array), and a process() the test controls.
-function createFakeRuntime({ process }) {
+// uses: hooks.completed (array), and process() + update() the test
+// controls. (In a real mikser run lifecycle.js attaches `update` to the
+// runtime singleton on import; tests with a fake runtime supply their
+// own.)
+function createFakeRuntime({ process, update = async () => { } } = {}) {
     return {
         hooks: { completed: [] },
         process,
+        update,
     }
 }
 
@@ -19,6 +23,7 @@ describe('api: useRenderer', () => {
     it('resolves a single render request when the hook fires its correlation id', async () => {
         const updates = []
         const runtime = createFakeRuntime({
+            update: async (entity) => updates.push(entity),
             process: async () => {
                 const last = updates[updates.length - 1]
                 for (const cb of [...runtime.hooks.completed]) {
@@ -26,9 +31,8 @@ describe('api: useRenderer', () => {
                 }
             },
         })
-        const updateEntity = async (entity) => updates.push(entity)
 
-        const { render } = useRenderer(runtime, { updateEntity })
+        const { render } = useRenderer(runtime)
         const { output, entity } = await render({ id: '/a.md', collection: 'documents' })
         assert.equal(output.result, 'rendered html')
         assert.ok(entity._correlationId)
@@ -37,6 +41,7 @@ describe('api: useRenderer', () => {
     it('routes outputs to the right correlation id in a concurrent batch', async () => {
         const updates = []
         const runtime = createFakeRuntime({
+            update: async (entity) => updates.push(entity),
             process: async () => {
                 // simulate a real cycle: 20 ms of work, then resolve everyone
                 await new Promise(r => setTimeout(r, 20))
@@ -51,9 +56,8 @@ describe('api: useRenderer', () => {
                 updates.length = 0
             },
         })
-        const updateEntity = async (entity) => updates.push(entity)
 
-        const { render } = useRenderer(runtime, { updateEntity })
+        const { render } = useRenderer(runtime)
         const ids = ['/a', '/b', '/c', '/d', '/e']
         const results = await Promise.all(ids.map(id => render({ id })))
         for (let i = 0; i < ids.length; i++) {
@@ -65,6 +69,7 @@ describe('api: useRenderer', () => {
         let cycleCount = 0
         const updates = []
         const runtime = createFakeRuntime({
+            update: async (e) => updates.push(e),
             process: async () => {
                 cycleCount++
                 await new Promise(r => setTimeout(r, 30))
@@ -76,9 +81,7 @@ describe('api: useRenderer', () => {
                 updates.length = 0
             },
         })
-        const { render } = useRenderer(runtime, {
-            updateEntity: async (e) => updates.push(e),
-        })
+        const { render } = useRenderer(runtime)
 
         const N = 6
         await Promise.all(Array.from({ length: N }, (_, i) => render({ id: `/e${i}` })))
@@ -89,10 +92,7 @@ describe('api: useRenderer', () => {
         const runtime = createFakeRuntime({
             process: () => new Promise(() => { }), // never resolves
         })
-        const { render } = useRenderer(runtime, {
-            updateEntity: async () => { },
-            defaultTimeout: 40,
-        })
+        const { render } = useRenderer(runtime, { defaultTimeout: 40 })
         await assert.rejects(() => render({ id: '/x' }), /Render timeout/)
     })
 
@@ -100,9 +100,7 @@ describe('api: useRenderer', () => {
         const runtime = createFakeRuntime({
             process: async () => { /* no-op */ },
         })
-        const { render } = useRenderer(runtime, {
-            updateEntity: async () => { },
-        })
+        const { render } = useRenderer(runtime)
         await assert.rejects(() => render({ id: '/y' }), /did not complete/)
     })
 
@@ -114,9 +112,7 @@ describe('api: useRenderer', () => {
                 }
             },
         })
-        const { render } = useRenderer(runtime, {
-            updateEntity: async () => { },
-        })
+        const { render } = useRenderer(runtime)
         await assert.rejects(() => render({ id: '/z' }))
         assert.equal(runtime.hooks.completed.length, 0, 'should not leak hooks across batches')
     })
@@ -125,10 +121,7 @@ describe('api: useRenderer', () => {
         const runtime = createFakeRuntime({
             process: () => new Promise(() => { }),
         })
-        const { render } = useRenderer(runtime, {
-            updateEntity: async () => { },
-            defaultTimeout: 60_000,
-        })
+        const { render } = useRenderer(runtime, { defaultTimeout: 60_000 })
         const start = Date.now()
         await assert.rejects(() => render({ id: '/x' }, { timeout: 30 }), /Render timeout/)
         const elapsed = Date.now() - start

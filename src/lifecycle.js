@@ -34,6 +34,15 @@ export async function updateEntity(entity) {
     }
 }
 
+// Expose the three entity operations as methods on the runtime so library
+// code (useRenderer, custom plugins) can call `runtime.update(entity)`
+// instead of importing and threading the standalone functions. The
+// imports above already pulled the runtime singleton into scope; this is
+// just a single assignment per name.
+runtime.create = createEntity
+runtime.update = updateEntity
+runtime.delete = deleteEntity
+
 export async function postprocessEntity(entity, options = {}, context = {}) {
     const logger = useLogger()
     const entry = { operation: OPERATION.POSTPROCESS, entity, options, context }

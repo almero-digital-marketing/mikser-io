@@ -27,6 +27,7 @@ onInitialized(() => {
 })
 
 export function trackProgress(name, total) {
+    if (!name || !total) return
     const logger = useLogger()
     logger.debug('%s started: %d', name, total)
     progress.bar?.stop()
@@ -54,7 +55,7 @@ export function stopProgress() {
         logger.warn('%s unfinished: %d', name, total - value)
     } else {
         const time = Math.round((Date.now() - progress.stamp) / 1000)
-        logger.info('%s: %s', name, formatTime(time, { autopaddingChar: '' }))
+        logger.info('%s finished: %d %s', name, total, formatTime(time, { autopaddingChar: '' }))
     }
     progress = {}
 }

@@ -5,7 +5,7 @@
 import { randomUUID } from 'node:crypto'
 import { writeFile, unlink, mkdir } from 'node:fs/promises'
 import path from 'node:path'
-import { updateEntity as defaultUpdateEntity } from './lifecycle.js'
+import './lifecycle.js' // side-effect: attaches runtime.create / update / delete
 
 /**
  * Bind to the runtime and return an on-demand renderer that pipelines
@@ -20,14 +20,10 @@ import { updateEntity as defaultUpdateEntity } from './lifecycle.js'
  *
  * @param {object} runtime                  - the mikser runtime singleton
  * @param {object} [opts]
- * @param {Function} [opts.updateEntity]    - override lifecycle.updateEntity (mostly for testing)
- * @param {number}   [opts.defaultTimeout]  - per-render timeout in ms (default 30_000)
+ * @param {number} [opts.defaultTimeout]    - per-render timeout in ms (default 30_000)
  * @returns {{ render: (entity, { timeout? }?) => Promise<{ output, entity }> }}
  */
-export function useRenderer(runtime, {
-    updateEntity = defaultUpdateEntity,
-    defaultTimeout = 30_000,
-} = {}) {
+export function useRenderer(runtime, { defaultTimeout = 30_000 } = {}) {
     let pending = []
     let cycleRunning = false
 
@@ -61,7 +57,7 @@ export function useRenderer(runtime, {
 
         try {
             for (const item of batch) {
-                await updateEntity(item.entity).catch(item.reject)
+                await runtime.update(item.entity).catch(item.reject)
             }
             await runtime.process()
         } catch (err) {

@@ -68,7 +68,6 @@ export default ({
     runtime,
     onLoaded,
     useLogger,
-    updateEntity,
     findEntities,
 }) => {
     onLoaded(async () => {
@@ -92,10 +91,9 @@ export default ({
         }
 
         // Reuse the transport-agnostic primitives from src/api.js so the
-        // library entry point and the API endpoints share the exact same
+        // library entry point and the Api endpoints share the exact same
         // batching/timeouts/error semantics.
         const { render } = useRenderer(runtime, {
-            updateEntity,
             defaultTimeout: runtime.config.api?.renderTimeout ?? 30_000,
         })
 
@@ -121,7 +119,7 @@ export default ({
                     hasPrev: page > 1,
                 })
             } catch (err) {
-                logger.error('API list error: %s', err.message)
+                logger.error('Api list error: %s', err.message)
                 res.status(500).json({ error: err.message })
             }
         })
@@ -132,7 +130,7 @@ export default ({
                 await useCollection(runtime, collection).write(relativePath, content)
                 res.status(202).json({ ok: true })
             } catch (err) {
-                logger.error('API update error: %s', err.message)
+                logger.error('Api update error: %s', err.message)
                 res.status(/Unknown collection/.test(err.message) ? 400 : 500).json({ error: err.message })
             }
         })
@@ -143,7 +141,7 @@ export default ({
                 await useCollection(runtime, collection).remove(relativePath)
                 res.status(202).json({ ok: true })
             } catch (err) {
-                logger.error('API delete error: %s', err.message)
+                logger.error('Api delete error: %s', err.message)
                 res.status(/Unknown collection/.test(err.message) ? 400 : 500).json({ error: err.message })
             }
         })
@@ -153,7 +151,7 @@ export default ({
                 const { output, entity } = await render(req.body)
                 await sendRenderOutput(res, output, entity)
             } catch (err) {
-                logger.error('API render error: %s', err.message)
+                logger.error('Api render error: %s', err.message)
                 if (!res.headersSent) {
                     res.status(500).json({ error: err.message })
                 }
@@ -165,11 +163,12 @@ export default ({
 
         if (ownApp) {
             const port = runtime.config.api?.port ?? 3001
+            const url = runtime.config.api?.url ?? 'http://localhost'
             app.listen(port, () => {
-                logger.info('API plugin listening on port %d', port)
+                logger.info('Api listening: %s:%d%s', url, port, base)
             })
         } else {
-            logger.info('API plugin mounted on %s', base)
+            logger.info('Api mounted: %s', base)
         }
     })
 }
