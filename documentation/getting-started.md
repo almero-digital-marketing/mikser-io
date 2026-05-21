@@ -174,6 +174,10 @@ const documents = useCollection(runtime, 'documents')
 
 // 1) Render an entity on demand. Concurrent calls coalesce into the
 //    same process() cycle; the worker pool renders the batch in parallel.
+//    By default the entity is treated as transient — after the render
+//    resolves, mikser deletes it from the catalog and unlinks the output.
+//    Pass { persistent: true } to keep the entity for later renders or
+//    catalog queries.
 const { output, entity } = await render({
   id: '/documents/en/report.md',
   type: 'document',
@@ -198,6 +202,18 @@ const docs = await findEntities({ collection: 'documents' })
 where `render(entity, opts?)` resolves with `{ output, entity }`.
 Concurrent calls coalesce into the same `process()` cycle automatically;
 parallelism within the cycle is governed by `runtime.options.threads`.
+
+`render` options:
+
+- `timeout` — per-call timeout in ms (default 30_000).
+- `persistent` — keep the entity in the catalog after the render. Default
+  is `false`, which queues a cleanup that removes the entity from the
+  catalog and unlinks its output file. Use `persistent: true` for
+  content you intend to re-render or query later via `findEntities`.
+
+When the API plugin is mounted, `persistent` is read straight off the
+JSON body: `POST /api/render` with `{ ..., persistent: true }` keeps the
+entity, otherwise it's cleaned up after the response is sent.
 
 `useCollection(runtime, name)` binds to a single collection's source
 folder and returns `{ name, folder, write, remove }` for filesystem-level

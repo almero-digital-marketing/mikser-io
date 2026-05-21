@@ -11,11 +11,12 @@ import { useRenderer, useCollection } from '../../src/api.js'
 // controls. (In a real mikser run lifecycle.js attaches `update` to the
 // runtime singleton on import; tests with a fake runtime supply their
 // own.)
-function createFakeRuntime({ process, update = async () => { } } = {}) {
+function createFakeRuntime({ process, update = async () => { }, delete: del = async () => { } } = {}) {
     return {
         hooks: { completed: [] },
         process,
         update,
+        delete: del,
     }
 }
 
@@ -84,7 +85,11 @@ describe('api: useRenderer', () => {
         const { render } = useRenderer(runtime)
 
         const N = 6
-        await Promise.all(Array.from({ length: N }, (_, i) => render({ id: `/e${i}` })))
+        // persistent: true so the test isolates render-batching behavior
+        // from the cleanup cycle that transient renders would otherwise
+        // add.
+        await Promise.all(Array.from({ length: N },
+            (_, i) => render({ id: `/e${i}` }, { persistent: true })))
         assert.ok(cycleCount < N, `expected < ${N} cycles, got ${cycleCount}`)
     })
 
@@ -115,6 +120,60 @@ describe('api: useRenderer', () => {
         const { render } = useRenderer(runtime)
         await assert.rejects(() => render({ id: '/z' }))
         assert.equal(runtime.hooks.completed.length, 0, 'should not leak hooks across batches')
+    })
+
+    it('transient by default — fires runtime.delete for the entity after the render', async () => {
+        const deletes = []
+        const updates = []
+        const runtime = createFakeRuntime({
+            update: async (e) => updates.push(e),
+            delete: async (spec) => deletes.push(spec),
+            process: async () => {
+                for (const upd of updates) {
+                    for (const cb of [...runtime.hooks.completed]) {
+                        await cb({ entity: upd, output: { result: 'rendered' } })
+                    }
+                }
+                updates.length = 0
+            },
+        })
+
+        const { render } = useRenderer(runtime)
+        await render({ id: '/transient', type: 'document', collection: 'documents' })
+
+        // Give the fire-and-forget cleanup process() a tick to run
+        await new Promise(r => setImmediate(r))
+
+        assert.equal(deletes.length, 1)
+        assert.equal(deletes[0].id, '/transient')
+        assert.equal(deletes[0].collection, 'documents')
+        assert.equal(deletes[0].type, 'document')
+    })
+
+    it('persistent: true — keeps the entity (no runtime.delete)', async () => {
+        const deletes = []
+        const updates = []
+        const runtime = createFakeRuntime({
+            update: async (e) => updates.push(e),
+            delete: async (spec) => deletes.push(spec),
+            process: async () => {
+                for (const upd of updates) {
+                    for (const cb of [...runtime.hooks.completed]) {
+                        await cb({ entity: upd, output: { result: 'rendered' } })
+                    }
+                }
+                updates.length = 0
+            },
+        })
+
+        const { render } = useRenderer(runtime)
+        await render(
+            { id: '/persistent', type: 'document', collection: 'documents' },
+            { persistent: true },
+        )
+        await new Promise(r => setImmediate(r))
+
+        assert.equal(deletes.length, 0)
     })
 
     it('respects a per-call timeout override', async () => {

@@ -87,13 +87,20 @@ export function useRenderer(runtime, { defaultTimeout = 30_000 } = {}) {
      * `runtime.process()` cycle — within that cycle, mikser's worker pool
      * renders the batch in parallel.
      *
-     * @param {object} entity                - any entity-shaped object
+     * By default the entity is treated as transient: after the render
+     * resolves, a follow-up DELETE is queued for the next cycle, which
+     * removes it from the catalog and unlinks its output via the manifest
+     * cleanup. Pass `persistent: true` to keep the entity around (useful
+     * if you'll re-render it later, or query it via `findEntities`).
+     *
+     * @param {object} entity                  - any entity-shaped object
      * @param {object} [opts]
-     * @param {number} [opts.timeout]        - override the default timeout
+     * @param {number}  [opts.timeout]         - override the default timeout
+     * @param {boolean} [opts.persistent=false] - keep in catalog/manifest after render
      * @returns {Promise<{output, entity}>}
      */
-    function render(entity, { timeout = defaultTimeout } = {}) {
-        return new Promise((resolve, reject) => {
+    async function render(entity, { timeout = defaultTimeout, persistent = false } = {}) {
+        const result = await new Promise((resolve, reject) => {
             const correlationId = randomUUID()
             pending.push({
                 entity: { ...entity, _correlationId: correlationId },
@@ -105,6 +112,24 @@ export function useRenderer(runtime, { defaultTimeout = 30_000 } = {}) {
             })
             if (!cycleRunning) setImmediate(runBatch)
         })
+
+        if (!persistent) {
+            // Schedule the cleanup but don't make the caller wait for it.
+            // The DELETE entry hits the next process() cycle, where the
+            // engine's manifest hook (engine.js: onAfterRender) unlinks
+            // the output file and prunes the manifest. Concurrent
+            // transient renders' cleanups naturally batch into one cycle.
+            await runtime.delete({
+                id: result.entity.id,
+                collection: result.entity.collection,
+                type: result.entity.type,
+            })
+            // Fire-and-forget — if it errors, log via the runtime logger
+            // rather than failing the user's request.
+            runtime.process().catch(() => { })
+        }
+
+        return result
     }
 
     return { render }

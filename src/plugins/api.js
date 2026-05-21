@@ -148,7 +148,12 @@ export default ({
 
         router.post('/render', auth, async (req, res) => {
             try {
-                const { output, entity } = await render(req.body)
+                // Pull `persistent` out as a control flag; everything else
+                // is treated as the entity. Default is transient — the
+                // entity is deleted and its output unlinked after the
+                // render. Send `persistent: true` to keep it.
+                const { persistent, ...entityShape } = req.body
+                const { output, entity } = await render(entityShape, { persistent })
                 await sendRenderOutput(res, output, entity)
             } catch (err) {
                 logger.error('Api render error: %s', err.message)

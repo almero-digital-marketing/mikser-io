@@ -246,7 +246,10 @@ describe('api plugin: /render endpoint (integration)', () => {
                 ids.map(id => fetch(`http://127.0.0.1:${port}/api/render`, {
                     method: 'POST',
                     headers: { 'content-type': 'application/json' },
-                    body: JSON.stringify({ id, collection: 'documents', type: 'document' }),
+                    // persistent: true keeps the entity (no cleanup cycle),
+                    // so this test isolates the request-batching invariant
+                    // from the unrelated transient-cleanup pass.
+                    body: JSON.stringify({ id, collection: 'documents', type: 'document', persistent: true }),
                 }))
             )
 
