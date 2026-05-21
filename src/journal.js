@@ -69,7 +69,13 @@ export async function* useJournal(name, operations, signal) {
 export async function clearJournal(aborted) {
     await journal('operations').del()
     if (!aborted) {
-        if (runtime.options.watch !== true) {
+        // Tear down the sqlite connection only when this is genuinely a
+        // one-shot run that's about to exit. Watch mode and any plugin
+        // that keeps the process alive (e.g. the API plugin's HTTP server)
+        // sets `persistent` so subsequent cycles can still write to the
+        // journal — without this, the second /render request would crash
+        // with "Unable to acquire a connection".
+        if (runtime.options.watch !== true && runtime.options.persistent !== true) {
             journal.destroy()
         }
     }
