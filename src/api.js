@@ -87,19 +87,20 @@ export function useRenderer(runtime, { defaultTimeout = 30_000 } = {}) {
      * `runtime.process()` cycle — within that cycle, mikser's worker pool
      * renders the batch in parallel.
      *
-     * By default the entity is treated as transient: after the render
-     * resolves, a follow-up DELETE is queued for the next cycle, which
-     * removes it from the catalog and unlinks its output via the manifest
-     * cleanup. Pass `persistent: true` to keep the entity around (useful
-     * if you'll re-render it later, or query it via `findEntities`).
+     * By default the entity is **not** kept in the catalog: after the
+     * render resolves, the catalog row is pruned so it doesn't accumulate.
+     * The rendered output file is always kept on disk — the bytes are the
+     * work product. Pass `catalog: true` to also keep the catalog row,
+     * useful if you'll re-render the same entity later or query it via
+     * `findEntities`.
      *
-     * @param {object} entity                   - any entity-shaped object
+     * @param {object} entity                - any entity-shaped object
      * @param {object} [opts]
-     * @param {number}  [opts.timeout]          - override the default timeout
-     * @param {boolean} [opts.persistent=false] - keep the catalog row after render
+     * @param {number}  [opts.timeout]       - override the default timeout
+     * @param {boolean} [opts.catalog=false] - keep the catalog row after render
      * @returns {Promise<{output, entity}>}
      */
-    async function render(entity, { timeout = defaultTimeout, persistent = false } = {}) {
+    async function render(entity, { timeout = defaultTimeout, catalog = false } = {}) {
         const result = await new Promise((resolve, reject) => {
             const correlationId = randomUUID()
             pending.push({
@@ -113,13 +114,13 @@ export function useRenderer(runtime, { defaultTimeout = 30_000 } = {}) {
             if (!cycleRunning) setImmediate(runBatch)
         })
 
-        if (!persistent) {
-            // Transient cleanup: remove the entity from the catalog so it
-            // doesn't accumulate, but LEAVE the rendered output file on
-            // disk. The bytes are the work product; the catalog row was
-            // just transient metadata. We deliberately bypass the
-            // journal/DELETE path here (which would also unlink the file
-            // via engine.js's manifest cleanup) and remove directly.
+        if (!catalog) {
+            // Prune the catalog row so it doesn't accumulate, but LEAVE
+            // the rendered output file on disk — the bytes are the work
+            // product. We deliberately bypass the journal/DELETE path
+            // here (which would also unlink the file via engine.js's
+            // manifest cleanup) and splice the entity out of the
+            // in-memory catalog directly.
             const entities = runtime.catalog?.data?.entities
             if (entities) {
                 const idx = entities.findIndex(e => e.id === result.entity.id)

@@ -148,12 +148,13 @@ export default ({
 
         router.post('/render', auth, async (req, res) => {
             try {
-                // Pull `persistent` out as a control flag; everything else
-                // is treated as the entity. Default is transient — the
-                // entity is deleted and its output unlinked after the
-                // render. Send `persistent: true` to keep it.
-                const { persistent, ...entityShape } = req.body
-                const { output, entity } = await render(entityShape, { persistent })
+                // Pull `catalog` out as a control flag; everything else
+                // is treated as the entity. Default is NOT to keep the
+                // catalog row (the rendered output stays on disk either
+                // way). Send `catalog: true` to keep the row, e.g. if
+                // you'll re-render or query the entity later.
+                const { catalog, ...entityShape } = req.body
+                const { output, entity } = await render(entityShape, { catalog })
                 await sendRenderOutput(res, output, entity)
             } catch (err) {
                 logger.error('Api render error: %s', err.message)

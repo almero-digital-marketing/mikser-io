@@ -146,9 +146,9 @@ describe('api: useRenderer', () => {
         assert.equal(entities.length, 0)
     })
 
-    it('persistent: true — keeps the catalog row', async () => {
+    it('catalog: true — keeps the catalog row', async () => {
         const updates = []
-        const entities = [{ id: '/persistent', collection: 'documents' }]
+        const entities = [{ id: '/kept', collection: 'documents' }]
         const runtime = createFakeRuntime({
             entities,
             update: async (e) => updates.push(e),
@@ -164,12 +164,12 @@ describe('api: useRenderer', () => {
 
         const { render } = useRenderer(runtime)
         await render(
-            { id: '/persistent', type: 'document', collection: 'documents' },
-            { persistent: true },
+            { id: '/kept', type: 'document', collection: 'documents' },
+            { catalog: true },
         )
 
         assert.equal(entities.length, 1)
-        assert.equal(entities[0].id, '/persistent')
+        assert.equal(entities[0].id, '/kept')
     })
 
     it('respects a per-call timeout override', async () => {
