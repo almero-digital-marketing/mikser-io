@@ -9,6 +9,7 @@ export default async ({ options }) => ({
 		'assets',
 		'render-hbs',
 		'render-liquid',
+		'render-eta',
 		'render-href',
 		'render-resource',
 		'render-asset',

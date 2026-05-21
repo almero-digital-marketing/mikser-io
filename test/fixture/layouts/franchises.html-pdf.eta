@@ -1,0 +1,22 @@
+<% /* Regression fixture for the multi-dot layout name bug. render-eta
+   used to strip the .eta from `franchises.html-pdf.eta`, leaving
+   `franchises.html-pdf`, which Eta then treated as already having an
+   extension and failed to resolve. This layout exercises the fix. */ %>
+<% it.log('🏢 Rendering franchise report', it.document.id) %>
+<!DOCTYPE html>
+<html lang="<%= it.document.meta.lang %>">
+<head>
+  <meta charset="utf-8" />
+  <title><%= it.document.meta.title %></title>
+  <style>
+    @page { size: A4; margin: 24mm; }
+    body { font: 11pt/1.4 'Helvetica', sans-serif; color: #0A0907; }
+    h1 { color: #FF3F00; }
+  </style>
+</head>
+<body>
+  <h1><%= it.document.meta.title %></h1>
+  <p>Franchise: <strong><%= it.document.meta.franchise %></strong></p>
+  <p><%= it.document.meta.body %></p>
+</body>
+</html>

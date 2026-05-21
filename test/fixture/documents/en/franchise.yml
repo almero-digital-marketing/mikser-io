@@ -1,0 +1,8 @@
+layout: franchises
+lang: en
+title: ACME Franchise Q2 Report
+franchise: ACME Coffee Co.
+body: |
+  Multi-dot layout names like `franchises.html-pdf.eta` used to break
+  render-eta because the name-resolution heuristic stripped `.eta` and
+  then Eta refused to re-append it.
