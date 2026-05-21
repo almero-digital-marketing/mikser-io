@@ -11,12 +11,13 @@ import { useRenderer, useCollection } from '../../src/api.js'
 // controls. (In a real mikser run lifecycle.js attaches `update` to the
 // runtime singleton on import; tests with a fake runtime supply their
 // own.)
-function createFakeRuntime({ process, update = async () => { }, delete: del = async () => { } } = {}) {
+function createFakeRuntime({ process, update = async () => { }, delete: del = async () => { }, entities = [] } = {}) {
     return {
         hooks: { completed: [] },
         process,
         update,
         delete: del,
+        catalog: { data: { entities } },
     }
 }
 
@@ -85,11 +86,7 @@ describe('api: useRenderer', () => {
         const { render } = useRenderer(runtime)
 
         const N = 6
-        // persistent: true so the test isolates render-batching behavior
-        // from the cleanup cycle that transient renders would otherwise
-        // add.
-        await Promise.all(Array.from({ length: N },
-            (_, i) => render({ id: `/e${i}` }, { persistent: true })))
+        await Promise.all(Array.from({ length: N }, (_, i) => render({ id: `/e${i}` })))
         assert.ok(cycleCount < N, `expected < ${N} cycles, got ${cycleCount}`)
     })
 
@@ -122,12 +119,14 @@ describe('api: useRenderer', () => {
         assert.equal(runtime.hooks.completed.length, 0, 'should not leak hooks across batches')
     })
 
-    it('transient by default — fires runtime.delete for the entity after the render', async () => {
-        const deletes = []
+    it('transient by default — removes the entity from the catalog after the render', async () => {
         const updates = []
+        // Seed the catalog with an existing entry (simulating that the
+        // persist phase wrote it during the cycle).
+        const entities = [{ id: '/transient', collection: 'documents' }]
         const runtime = createFakeRuntime({
+            entities,
             update: async (e) => updates.push(e),
-            delete: async (spec) => deletes.push(spec),
             process: async () => {
                 for (const upd of updates) {
                     for (const cb of [...runtime.hooks.completed]) {
@@ -141,21 +140,18 @@ describe('api: useRenderer', () => {
         const { render } = useRenderer(runtime)
         await render({ id: '/transient', type: 'document', collection: 'documents' })
 
-        // Give the fire-and-forget cleanup process() a tick to run
-        await new Promise(r => setImmediate(r))
-
-        assert.equal(deletes.length, 1)
-        assert.equal(deletes[0].id, '/transient')
-        assert.equal(deletes[0].collection, 'documents')
-        assert.equal(deletes[0].type, 'document')
+        // Catalog row gone — but no fake "delete" or "process" calls
+        // happened: the cleanup is in-memory removal, not a DELETE journal
+        // entry that would also unlink the file.
+        assert.equal(entities.length, 0)
     })
 
-    it('persistent: true — keeps the entity (no runtime.delete)', async () => {
-        const deletes = []
+    it('persistent: true — keeps the catalog row', async () => {
         const updates = []
+        const entities = [{ id: '/persistent', collection: 'documents' }]
         const runtime = createFakeRuntime({
+            entities,
             update: async (e) => updates.push(e),
-            delete: async (spec) => deletes.push(spec),
             process: async () => {
                 for (const upd of updates) {
                     for (const cb of [...runtime.hooks.completed]) {
@@ -171,9 +167,9 @@ describe('api: useRenderer', () => {
             { id: '/persistent', type: 'document', collection: 'documents' },
             { persistent: true },
         )
-        await new Promise(r => setImmediate(r))
 
-        assert.equal(deletes.length, 0)
+        assert.equal(entities.length, 1)
+        assert.equal(entities[0].id, '/persistent')
     })
 
     it('respects a per-call timeout override', async () => {

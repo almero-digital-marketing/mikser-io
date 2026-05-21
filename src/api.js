@@ -93,10 +93,10 @@ export function useRenderer(runtime, { defaultTimeout = 30_000 } = {}) {
      * cleanup. Pass `persistent: true` to keep the entity around (useful
      * if you'll re-render it later, or query it via `findEntities`).
      *
-     * @param {object} entity                  - any entity-shaped object
+     * @param {object} entity                   - any entity-shaped object
      * @param {object} [opts]
-     * @param {number}  [opts.timeout]         - override the default timeout
-     * @param {boolean} [opts.persistent=false] - keep in catalog/manifest after render
+     * @param {number}  [opts.timeout]          - override the default timeout
+     * @param {boolean} [opts.persistent=false] - keep the catalog row after render
      * @returns {Promise<{output, entity}>}
      */
     async function render(entity, { timeout = defaultTimeout, persistent = false } = {}) {
@@ -114,19 +114,17 @@ export function useRenderer(runtime, { defaultTimeout = 30_000 } = {}) {
         })
 
         if (!persistent) {
-            // Schedule the cleanup but don't make the caller wait for it.
-            // The DELETE entry hits the next process() cycle, where the
-            // engine's manifest hook (engine.js: onAfterRender) unlinks
-            // the output file and prunes the manifest. Concurrent
-            // transient renders' cleanups naturally batch into one cycle.
-            await runtime.delete({
-                id: result.entity.id,
-                collection: result.entity.collection,
-                type: result.entity.type,
-            })
-            // Fire-and-forget — if it errors, log via the runtime logger
-            // rather than failing the user's request.
-            runtime.process().catch(() => { })
+            // Transient cleanup: remove the entity from the catalog so it
+            // doesn't accumulate, but LEAVE the rendered output file on
+            // disk. The bytes are the work product; the catalog row was
+            // just transient metadata. We deliberately bypass the
+            // journal/DELETE path here (which would also unlink the file
+            // via engine.js's manifest cleanup) and remove directly.
+            const entities = runtime.catalog?.data?.entities
+            if (entities) {
+                const idx = entities.findIndex(e => e.id === result.entity.id)
+                if (idx >= 0) entities.splice(idx, 1)
+            }
         }
 
         return result
