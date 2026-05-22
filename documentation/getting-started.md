@@ -174,11 +174,12 @@ const documents = useCollection(runtime, 'documents')
 
 // 1) Render an entity on demand. Concurrent calls coalesce into the
 //    same process() cycle; the worker pool renders the batch in parallel.
-//    By default the catalog row is pruned after the render so it
-//    doesn't accumulate; the rendered output file is always kept on
-//    disk (the bytes are the work product). Pass { catalog: true } to
-//    also keep the catalog row, e.g. if you'll re-render or query the
-//    entity via findEntities later.
+//    By default the entity stays in the catalog after the render —
+//    that's what mikser's normal lifecycle does (anything persisted is
+//    queryable via findEntities). For on-demand renders where the
+//    bytes are the work product and you don't want the metadata row to
+//    accumulate, pass { catalog: false } to opt out. The rendered
+//    output file is kept on disk either way.
 const { output, entity } = await render({
   id: '/documents/en/report.md',
   type: 'document',
@@ -208,13 +209,18 @@ parallelism within the cycle is governed by `runtime.options.threads`.
 
 - `timeout` — per-call timeout in ms (default 30_000).
 - `catalog` — keep the entity in the catalog after the render. Default
-  is `false`, which prunes only the catalog row; the rendered output
-  file is always kept on disk. Use `catalog: true` if you intend to
-  re-render the same entity or query it via `findEntities` later.
+  is `true` (matches mikser's normal persist behavior — every entity that
+  goes through a cycle ends up queryable). Pass `catalog: false` to opt
+  out and have the catalog row pruned after the render, useful for
+  on-demand renders where the rendered bytes are the work product and
+  the metadata row would just accumulate. The rendered output file is
+  kept on disk either way. Strict equality — only the literal `false`
+  opts out; ambiguous inputs (`null`, `"false"`, `0`) keep the default.
 
 When the API plugin is mounted, `catalog` is read straight off the JSON
-body: `POST /api/render` with `{ ..., catalog: true }` keeps the catalog
-row, otherwise it's pruned after the response is sent.
+body: `POST /api/render` with `{ ..., catalog: false }` prunes the
+catalog row; without the flag (or with any non-`false` value) the row
+is kept.
 
 `useCollection(runtime, name)` binds to a single collection's source
 folder and returns `{ name, folder, write, remove }` for filesystem-level

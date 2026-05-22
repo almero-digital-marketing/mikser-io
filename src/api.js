@@ -87,20 +87,21 @@ export function useRenderer(runtime, { defaultTimeout = 30_000 } = {}) {
      * `runtime.process()` cycle — within that cycle, mikser's worker pool
      * renders the batch in parallel.
      *
-     * By default the entity is **not** kept in the catalog: after the
-     * render resolves, the catalog row is pruned so it doesn't accumulate.
-     * The rendered output file is always kept on disk — the bytes are the
-     * work product. Pass `catalog: true` to also keep the catalog row,
-     * useful if you'll re-render the same entity later or query it via
-     * `findEntities`.
+     * By default the entity stays in the catalog after the render — that
+     * matches the rest of mikser's lifecycle: any entity that goes through
+     * the persist phase is queryable via `findEntities` afterward. Pass
+     * `catalog: false` to opt out and have the catalog row pruned after
+     * the render resolves (useful for on-demand renders where the bytes
+     * are the work product and the metadata row would just accumulate).
+     * The rendered output file is always kept on disk either way.
      *
      * @param {object} entity                - any entity-shaped object
      * @param {object} [opts]
      * @param {number}  [opts.timeout]       - override the default timeout
-     * @param {boolean} [opts.catalog=false] - keep the catalog row after render
+     * @param {boolean} [opts.catalog=true]  - keep the catalog row after render
      * @returns {Promise<{output, entity}>}
      */
-    async function render(entity, { timeout = defaultTimeout, catalog = false } = {}) {
+    async function render(entity, { timeout = defaultTimeout, catalog = true } = {}) {
         const result = await new Promise((resolve, reject) => {
             const correlationId = randomUUID()
             pending.push({
@@ -114,13 +115,15 @@ export function useRenderer(runtime, { defaultTimeout = 30_000 } = {}) {
             if (!cycleRunning) setImmediate(runBatch)
         })
 
-        if (!catalog) {
-            // Prune the catalog row so it doesn't accumulate, but LEAVE
-            // the rendered output file on disk — the bytes are the work
-            // product. We deliberately bypass the journal/DELETE path
-            // here (which would also unlink the file via engine.js's
-            // manifest cleanup) and splice the entity out of the
-            // in-memory catalog directly.
+        if (catalog === false) {
+            // Explicit opt-out: prune the catalog row so it doesn't
+            // accumulate. The rendered output file stays on disk — the
+            // bytes are the work product. We deliberately bypass the
+            // journal/DELETE path here (which would also unlink the file
+            // via engine.js's manifest cleanup) and splice the entity
+            // out of the in-memory catalog directly. Strict equality so
+            // ambiguous inputs (null, "false", 0) fall through to the
+            // default of keeping the row.
             const entities = runtime.catalog?.data?.entities
             if (entities) {
                 const idx = entities.findIndex(e => e.id === result.entity.id)

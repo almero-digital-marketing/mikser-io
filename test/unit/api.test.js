@@ -119,35 +119,10 @@ describe('api: useRenderer', () => {
         assert.equal(runtime.hooks.completed.length, 0, 'should not leak hooks across batches')
     })
 
-    it('transient by default — removes the entity from the catalog after the render', async () => {
+    it('keeps the catalog row by default (matches mikser persist behavior)', async () => {
         const updates = []
         // Seed the catalog with an existing entry (simulating that the
         // persist phase wrote it during the cycle).
-        const entities = [{ id: '/transient', collection: 'documents' }]
-        const runtime = createFakeRuntime({
-            entities,
-            update: async (e) => updates.push(e),
-            process: async () => {
-                for (const upd of updates) {
-                    for (const cb of [...runtime.hooks.completed]) {
-                        await cb({ entity: upd, output: { result: 'rendered' } })
-                    }
-                }
-                updates.length = 0
-            },
-        })
-
-        const { render } = useRenderer(runtime)
-        await render({ id: '/transient', type: 'document', collection: 'documents' })
-
-        // Catalog row gone — but no fake "delete" or "process" calls
-        // happened: the cleanup is in-memory removal, not a DELETE journal
-        // entry that would also unlink the file.
-        assert.equal(entities.length, 0)
-    })
-
-    it('catalog: true — keeps the catalog row', async () => {
-        const updates = []
         const entities = [{ id: '/kept', collection: 'documents' }]
         const runtime = createFakeRuntime({
             entities,
@@ -163,13 +138,60 @@ describe('api: useRenderer', () => {
         })
 
         const { render } = useRenderer(runtime)
-        await render(
-            { id: '/kept', type: 'document', collection: 'documents' },
-            { catalog: true },
-        )
+        await render({ id: '/kept', type: 'document', collection: 'documents' })
 
         assert.equal(entities.length, 1)
         assert.equal(entities[0].id, '/kept')
+    })
+
+    it('catalog: false — explicit opt-out prunes the catalog row', async () => {
+        const updates = []
+        const entities = [{ id: '/transient', collection: 'documents' }]
+        const runtime = createFakeRuntime({
+            entities,
+            update: async (e) => updates.push(e),
+            process: async () => {
+                for (const upd of updates) {
+                    for (const cb of [...runtime.hooks.completed]) {
+                        await cb({ entity: upd, output: { result: 'rendered' } })
+                    }
+                }
+                updates.length = 0
+            },
+        })
+
+        const { render } = useRenderer(runtime)
+        await render(
+            { id: '/transient', type: 'document', collection: 'documents' },
+            { catalog: false },
+        )
+
+        // Catalog row gone — but no fake "delete" or "process" calls
+        // happened: the cleanup is in-memory removal, not a DELETE journal
+        // entry that would also unlink the file.
+        assert.equal(entities.length, 0)
+    })
+
+    it('catalog: only the literal false triggers cleanup (strict)', async () => {
+        for (const value of [null, undefined, 0, '', 'false', 'no']) {
+            const entities = [{ id: '/strict', collection: 'documents' }]
+            const updates = []
+            const runtime = createFakeRuntime({
+                entities,
+                update: async (e) => updates.push(e),
+                process: async () => {
+                    for (const upd of updates) {
+                        for (const cb of [...runtime.hooks.completed]) {
+                            await cb({ entity: upd, output: { result: 'r' } })
+                        }
+                    }
+                    updates.length = 0
+                },
+            })
+            const { render } = useRenderer(runtime)
+            await render({ id: '/strict', type: 'document', collection: 'documents' }, { catalog: value })
+            assert.equal(entities.length, 1, `catalog: ${JSON.stringify(value)} should keep the row`)
+        }
     })
 
     it('respects a per-call timeout override', async () => {

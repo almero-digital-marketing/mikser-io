@@ -149,10 +149,11 @@ export default ({
         router.post('/render', auth, async (req, res) => {
             try {
                 // Pull `catalog` out as a control flag; everything else
-                // is treated as the entity. Default is NOT to keep the
-                // catalog row (the rendered output stays on disk either
-                // way). Send `catalog: true` to keep the row, e.g. if
-                // you'll re-render or query the entity later.
+                // is treated as the entity. Default is to KEEP the
+                // catalog row (matches mikser's normal persist behavior).
+                // Send `catalog: false` to opt out and have the row
+                // pruned after the render — useful for on-demand
+                // renders where the bytes are the work product.
                 const { catalog, ...entityShape } = req.body
                 const { output, entity } = await render(entityShape, { catalog })
                 await sendRenderOutput(res, output, entity)
