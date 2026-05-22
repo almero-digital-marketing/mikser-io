@@ -223,18 +223,27 @@ Both flags use strict equality. Only the literal `false` opts out;
 ambiguous inputs (`null`, `"false"`, `0`, missing) fall through to the
 default. This avoids surprises from stringly-typed JSON bodies.
 
-When the API plugin is mounted, both flags are read straight off the
-JSON body. Example: a service that returns a PDF to the caller and
-doesn't want either the catalog row or the disk file:
+When the API plugin is mounted, the body shape mirrors the JS API:
+entity fields at the top level, control flags grouped under `options`.
+Example — a service that returns a PDF to the caller and doesn't want
+either the catalog row or the disk file:
 
 ```http
 POST /api/render
 Content-Type: application/json
 
-{ "id": "/docs/invoice.md", "collection": "documents",
-  "type": "document", "meta": { "layout": "invoice" }, "content": "...",
-  "catalog": false, "save": false }
+{
+  "id": "/docs/invoice.md",
+  "collection": "documents",
+  "type": "document",
+  "meta": { "layout": "invoice" },
+  "content": "...",
+  "options": { "catalog": false, "save": false }
+}
 ```
+
+Anything not under `options` is passed through as the entity; the
+`options` key never leaks onto the entity object.
 
 `useCollection(runtime, name)` binds to a single collection's source
 folder and returns `{ name, folder, write, remove }` for filesystem-level

@@ -148,15 +148,16 @@ export default ({
 
         router.post('/render', auth, async (req, res) => {
             try {
-                // Pull control flags out; everything else is treated as
-                // the entity. Both default to true (the existing mikser
-                // lifecycle saves to disk and keeps the catalog row).
-                // Strict opt-outs via the literal `false`:
-                //   catalog: false → prune the catalog row after render
-                //   save: false    → skip writing the final output to disk
-                //                    (bytes still come back in the response)
-                const { catalog, save, ...entityShape } = req.body
-                const { output, entity } = await render(entityShape, { catalog, save })
+                // Body shape mirrors the JS API: entity fields at top
+                // level, control flags grouped under `options`. Forwarded
+                // straight to render(entity, options). Defaults match
+                // mikser's lifecycle (save and keep the catalog row);
+                // strict opt-outs via the literal `false`:
+                //   options.catalog: false → prune the catalog row
+                //   options.save:    false → skip the final disk write
+                //                            (bytes still in the response)
+                const { options = {}, ...entityShape } = req.body
+                const { output, entity } = await render(entityShape, options)
                 await sendRenderOutput(res, output, entity)
             } catch (err) {
                 logger.error('Api render error: %s', err.message)

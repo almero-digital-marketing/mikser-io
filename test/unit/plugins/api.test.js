@@ -305,6 +305,55 @@ describe('api plugin: /render endpoint (integration)', () => {
         }
     })
 
+    it('control flags live under body.options; the rest is treated as the entity', async () => {
+        const { default: express } = await import('express')
+        const app = express()
+        const h = createHarness({
+            options: {
+                app,
+                workingFolder: '/tmp/mikser-rest-options',
+                outputFolder: '/tmp/mikser-rest-options/out',
+            },
+        })
+
+        // Capture the entity that the renderer was actually asked to
+        // process — we want to assert that body.options.save:false ends
+        // up as entity._save:false (which the renderer stamps when
+        // explicitly opting out), and that `options` itself doesn't end
+        // up on the entity as a stray field.
+        let submitted
+        h.runtime.update = async (entity) => { submitted = entity }
+        h.runtime.process = async () => {
+            for (const cb of [...h.runtime.hooks.completed]) {
+                await cb({ entity: submitted, output: { result: 'OK' } })
+            }
+        }
+        h.runtime.hooks.completed = h.runtime.hooks.complete
+
+        apiPlugin(h.core)
+        await h.runHook('loaded')
+
+        const server = await new Promise(r => { const s = app.listen(0, () => r(s)) })
+        try {
+            const { port } = server.address()
+            await fetch(`http://127.0.0.1:${port}/api/render`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({
+                    id: '/docs/x.md',
+                    collection: 'documents',
+                    options: { save: false, catalog: false },
+                }),
+            })
+            assert.equal(submitted.id, '/docs/x.md')
+            assert.equal(submitted.collection, 'documents')
+            assert.equal(submitted._save, false)
+            assert.equal('options' in submitted, false, 'options must not leak into the entity')
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
     it('returns 500 "did not complete" when the cycle finishes without firing the entity\'s hook', async () => {
         const { default: express } = await import('express')
         const app = express()
