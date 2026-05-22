@@ -172,6 +172,57 @@ describe('api: useRenderer', () => {
         assert.equal(entities.length, 0)
     })
 
+    it('save: false — stamps the entity with _save:false so layouts.onComplete skips the disk write', async () => {
+        let submitted
+        const runtime = createFakeRuntime({
+            update: async (e) => { submitted = e },
+            process: async () => {
+                for (const cb of [...runtime.hooks.completed]) {
+                    await cb({ entity: submitted, output: { result: 'rendered' } })
+                }
+            },
+        })
+
+        const { render } = useRenderer(runtime)
+        await render({ id: '/no-save', type: 'document', collection: 'documents' }, { save: false })
+
+        assert.equal(submitted._save, false)
+    })
+
+    it('save: true (default) — does NOT stamp _save (clean entity)', async () => {
+        let submitted
+        const runtime = createFakeRuntime({
+            update: async (e) => { submitted = e },
+            process: async () => {
+                for (const cb of [...runtime.hooks.completed]) {
+                    await cb({ entity: submitted, output: { result: 'r' } })
+                }
+            },
+        })
+
+        const { render } = useRenderer(runtime)
+        await render({ id: '/saved', type: 'document', collection: 'documents' })
+
+        assert.equal('_save' in submitted, false, 'should not stamp _save on the default path')
+    })
+
+    it('save: only the literal false stamps the opt-out (strict)', async () => {
+        for (const value of [null, undefined, 0, '', 'false', 'no', true]) {
+            let submitted
+            const runtime = createFakeRuntime({
+                update: async (e) => { submitted = e },
+                process: async () => {
+                    for (const cb of [...runtime.hooks.completed]) {
+                        await cb({ entity: submitted, output: { result: 'r' } })
+                    }
+                },
+            })
+            const { render } = useRenderer(runtime)
+            await render({ id: '/s', type: 'document', collection: 'documents' }, { save: value })
+            assert.equal('_save' in submitted, false, `save: ${JSON.stringify(value)} should not opt out`)
+        }
+    })
+
     it('catalog: only the literal false triggers cleanup (strict)', async () => {
         for (const value of [null, undefined, 0, '', 'false', 'no']) {
             const entities = [{ id: '/strict', collection: 'documents' }]

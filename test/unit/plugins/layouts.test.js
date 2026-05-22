@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, access } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -112,5 +112,74 @@ describe('layouts plugin', () => {
         const h = createHarness()
         layoutsPlugin(h.core)
         assert.equal(await h.runSync('layouts', { action: 'create', context: {} }), false)
+    })
+
+    it('onComplete writes the rendered output to disk by default', async () => {
+        await withTempWorking(async (workingFolder) => {
+            const outputFolder = path.join(workingFolder, 'out')
+            const h = createHarness({ options: { workingFolder, outputFolder } })
+            layoutsPlugin(h.core)
+            await h.runHook('loaded')
+
+            const entity = {
+                id: '/documents/page.md',
+                collection: 'documents',
+                name: 'page',
+                destination: '/page.html',
+                layout: { name: 'page', format: 'html' },
+            }
+            await h.runHook('complete', { entity, options: {}, output: { result: '<h1>Hi</h1>' } })
+
+            const written = path.join(outputFolder, 'page.html')
+            await assert.doesNotReject(() => access(written), 'expected the file to be written')
+        })
+    })
+
+    it('onComplete with entity._save === false skips the disk write (bytes-only mode)', async () => {
+        await withTempWorking(async (workingFolder) => {
+            const outputFolder = path.join(workingFolder, 'out')
+            const h = createHarness({ options: { workingFolder, outputFolder } })
+            layoutsPlugin(h.core)
+            await h.runHook('loaded')
+
+            const entity = {
+                id: '/documents/page.md',
+                collection: 'documents',
+                name: 'page',
+                destination: '/page.html',
+                layout: { name: 'page', format: 'html' },
+                _save: false,
+            }
+            await h.runHook('complete', { entity, options: {}, output: { result: '<h1>Hi</h1>' } })
+
+            const written = path.join(outputFolder, 'page.html')
+            await assert.rejects(() => access(written), 'expected NO file to be written')
+        })
+    })
+
+    it('onComplete still writes the intermediate when a postprocessor is configured (save:false honored only on FINAL output)', async () => {
+        await withTempWorking(async (workingFolder) => {
+            const outputFolder = path.join(workingFolder, 'out')
+            const h = createHarness({ options: { workingFolder, outputFolder } })
+            layoutsPlugin(h.core)
+            await h.runHook('loaded')
+
+            // Intermediate: postprocessor is configured, no origin yet
+            // (we haven't entered the postprocess phase). _save:false
+            // should be IGNORED here because the postprocessor needs to
+            // read the file.
+            const intermediate = {
+                id: '/documents/r.md',
+                collection: 'documents',
+                name: 'r',
+                destination: '/r.html',
+                layout: { name: 'r', format: 'html', postprocessor: 'pdf' },
+                _save: false,
+            }
+            await h.runHook('complete', { entity: intermediate, options: {}, output: { result: '<h1>R</h1>' } })
+
+            const intermediateFile = path.join(outputFolder, 'r.html')
+            await assert.doesNotReject(() => access(intermediateFile), 'intermediate must be written for postprocess to consume')
+        })
     })
 })

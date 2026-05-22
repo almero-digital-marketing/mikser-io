@@ -208,19 +208,33 @@ parallelism within the cycle is governed by `runtime.options.threads`.
 `render` options:
 
 - `timeout` — per-call timeout in ms (default 30_000).
-- `catalog` — keep the entity in the catalog after the render. Default
-  is `true` (matches mikser's normal persist behavior — every entity that
-  goes through a cycle ends up queryable). Pass `catalog: false` to opt
-  out and have the catalog row pruned after the render, useful for
-  on-demand renders where the rendered bytes are the work product and
-  the metadata row would just accumulate. The rendered output file is
-  kept on disk either way. Strict equality — only the literal `false`
-  opts out; ambiguous inputs (`null`, `"false"`, `0`) keep the default.
+- `catalog` (default `true`) — keep the entity in the catalog after the
+  render. Pass `catalog: false` to prune the row, useful for on-demand
+  renders where the metadata would just accumulate.
+- `save` (default `true`) — write the rendered output to disk at
+  `<outputFolder>/<entity.destination>`. Pass `save: false` to skip the
+  final disk write; the bytes still come back in `output.result` for you
+  to pipe directly to an HTTP response, S3, an email service, etc. For
+  layouts that have a postprocessor (e.g. `*.html-pdf.*`), the
+  *intermediate* file is still written so the postprocessor can read it
+  — only the final output is affected.
 
-When the API plugin is mounted, `catalog` is read straight off the JSON
-body: `POST /api/render` with `{ ..., catalog: false }` prunes the
-catalog row; without the flag (or with any non-`false` value) the row
-is kept.
+Both flags use strict equality. Only the literal `false` opts out;
+ambiguous inputs (`null`, `"false"`, `0`, missing) fall through to the
+default. This avoids surprises from stringly-typed JSON bodies.
+
+When the API plugin is mounted, both flags are read straight off the
+JSON body. Example: a service that returns a PDF to the caller and
+doesn't want either the catalog row or the disk file:
+
+```http
+POST /api/render
+Content-Type: application/json
+
+{ "id": "/docs/invoice.md", "collection": "documents",
+  "type": "document", "meta": { "layout": "invoice" }, "content": "...",
+  "catalog": false, "save": false }
+```
 
 `useCollection(runtime, name)` binds to a single collection's source
 folder and returns `{ name, folder, write, remove }` for filesystem-level

@@ -87,25 +87,41 @@ export function useRenderer(runtime, { defaultTimeout = 30_000 } = {}) {
      * `runtime.process()` cycle — within that cycle, mikser's worker pool
      * renders the batch in parallel.
      *
-     * By default the entity stays in the catalog after the render — that
-     * matches the rest of mikser's lifecycle: any entity that goes through
-     * the persist phase is queryable via `findEntities` afterward. Pass
-     * `catalog: false` to opt out and have the catalog row pruned after
-     * the render resolves (useful for on-demand renders where the bytes
-     * are the work product and the metadata row would just accumulate).
-     * The rendered output file is always kept on disk either way.
+     * Two control flags mirror mikser's default-keep-everything behavior;
+     * both opt-out via strict `=== false`:
+     *
+     * - `catalog: true` (default) — keep the entity in the catalog after
+     *   the render. Pass `catalog: false` to prune the catalog row;
+     *   useful for on-demand renders where the metadata row would just
+     *   accumulate.
+     * - `save: true` (default) — write the rendered output to disk at
+     *   `<outputFolder>/<entity.destination>`. Pass `save: false` to
+     *   skip the final disk write; the bytes still come back via
+     *   `output.result` for you to pipe wherever you want (HTTP
+     *   response, S3, …). For layouts with a postprocessor (e.g.
+     *   `*.html-pdf.*`), the intermediate file is still written so the
+     *   postprocessor can consume it; only the FINAL output is skipped.
+     *
+     * The rendered output's bytes are always returned in `output.result`
+     * regardless of either flag — `save` only affects whether they also
+     * end up on disk.
      *
      * @param {object} entity                - any entity-shaped object
      * @param {object} [opts]
      * @param {number}  [opts.timeout]       - override the default timeout
      * @param {boolean} [opts.catalog=true]  - keep the catalog row after render
+     * @param {boolean} [opts.save=true]     - write the rendered output to disk
      * @returns {Promise<{output, entity}>}
      */
-    async function render(entity, { timeout = defaultTimeout, catalog = true } = {}) {
+    async function render(entity, { timeout = defaultTimeout, catalog = true, save = true } = {}) {
         const result = await new Promise((resolve, reject) => {
             const correlationId = randomUUID()
+            const stamped = { ...entity, _correlationId: correlationId }
+            // Only stamp _save when explicitly opting out — keeps the
+            // entity object clean for the common case.
+            if (save === false) stamped._save = false
             pending.push({
-                entity: { ...entity, _correlationId: correlationId },
+                entity: stamped,
                 correlationId,
                 timeout,
                 resolve,

@@ -370,13 +370,32 @@ export default ({
     onComplete(async ({ entity, options, output }) => {
         const logger = useLogger()
         if (entity.layout && !options?.ignore && output.result != null) {
-            const destinationFile = path.join(runtime.options.outputFolder, entity.destination)
-            await mkdir(path.dirname(destinationFile), { recursive: true })
-            try {
-                await unlink(destinationFile)
-            } catch { }
-            await writeFile(destinationFile, output.result)
-            logger.debug('Layout render finished: %s', entity.destination.replace(runtime.options.workingFolder, ''))
+            // `_save: false` (stamped by useRenderer when called with
+            // { save: false }) opts out of writing the final output to
+            // disk. The bytes still come back to the caller via
+            // output.result. Strict equality — only the literal `false`
+            // opts out, matching the catalog-flag pattern.
+            //
+            // The intermediate file (when a postprocessor will run next)
+            // must still be written so the postprocessor can consume it,
+            // so we only honour `_save: false` for the FINAL output —
+            // detected as either "no postprocessor configured" or "we're
+            // running on the postprocess side already" (origin set).
+            const isFinal = !entity.layout.postprocessor || entity.origin != null
+            const skipWrite = entity._save === false && isFinal
+
+            if (!skipWrite) {
+                const destinationFile = path.join(runtime.options.outputFolder, entity.destination)
+                await mkdir(path.dirname(destinationFile), { recursive: true })
+                try {
+                    await unlink(destinationFile)
+                } catch { }
+                await writeFile(destinationFile, output.result)
+                logger.debug('Layout render finished: %s', entity.destination.replace(runtime.options.workingFolder, ''))
+            } else {
+                logger.debug('Layout render finished (save:false, bytes only): %s', entity.id)
+            }
+
             if (entity.origin && entity.origin !== entity.destination) {
                 // Don't unlink the origin if it was the same path we just
                 // wrote to (post plugins that produce the same extension as
