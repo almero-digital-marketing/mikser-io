@@ -6,7 +6,7 @@ import { existsSync } from 'fs'
 import _ from 'lodash'
 import Piscina from 'piscina'
 import runtime from './runtime.js'
-import { onInitialize, onInitialized, onRender, onCancel, onCancelled, onFinalized, onLoaded, onAfterRender, onBeforePostprocess, onPostprocess, postprocessEntities } from './lifecycle.js'
+import { onInitialize, onInitialized, onLoad, onRender, onCancel, onCancelled, onFinalized, onLoaded, onAfterRender, onBeforePostprocess, onPostprocess, postprocessEntities } from './lifecycle.js'
 import { useJournal, updateEntry } from './journal.js'
 import { globby } from 'globby'
 import { OPERATION, TASKS } from './constants.js'
@@ -46,6 +46,7 @@ export async function setup(options) {
             .option('-d --debug', 'display debug statements')
             .option('-t --trace', 'display trace statements')
             .option('-e --runtime-folder <folder>', 'set mikser runtime folder relative to working folder', 'runtime')
+            .option('-s --server [port]', 'start an Express server on the given port (defaults to 3001)')
 
         Object.assign(runtime.options, options || runtime.engine.commander.parse(process.argv).opts())
         runtime.options.info = true
@@ -84,6 +85,44 @@ export async function setup(options) {
             }
         }
         await mkdir(runtime.options.runtimeFolder, { recursive: true })
+
+        // --server [port] (or `runtime.options.server` set programmatically)
+        // creates a shared Express app on runtime.options.app so that any
+        // plugin mounting routes (api.js, future live-reload, etc.) attaches
+        // to the same server instead of spinning up its own. The actual
+        // `app.listen()` happens at the END of the onLoaded phase (deferred
+        // via an onLoad hook below) so all plugin routes are registered
+        // before traffic is accepted.
+        if (runtime.options.server) {
+            const { default: express } = await import('express').catch(() => {
+                throw new Error('express is required for --server. Run: npm install express')
+            })
+            runtime.options.app = express()
+            runtime.options.port = runtime.options.server === true
+                ? 3001
+                : Number(runtime.options.server) || 3001
+            logger.info('Server starting on port %d', runtime.options.port)
+        }
+    })
+
+    // Registered here (inside setup) so it runs AFTER plugins.js's onLoad
+    // (which is registered at module-import time). That ordering matters
+    // because plugins.js loads user plugins during its onLoad — each plugin
+    // factory may register onLoaded handlers that mount routes on
+    // runtime.options.app. We want our listen() to run LAST in the
+    // onLoaded phase, which is why we register it from inside another
+    // onLoad — by then plugins have already appended their handlers.
+    onLoad(() => {
+        if (!runtime.options.app || runtime.options.port == null) return
+        onLoaded(async () => {
+            const logger = useLogger()
+            await new Promise(resolve => {
+                runtime.options.app.listen(runtime.options.port, () => {
+                    logger.info('Server listening on port %d', runtime.options.port)
+                    resolve()
+                })
+            })
+        })
     })
 
     onLoaded(async () => {

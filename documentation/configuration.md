@@ -49,6 +49,7 @@ These options are part of `runtime.options` and apply to the engine itself.
 | `debug` | `-d, --debug` | boolean | `false` | Enable debug-level logging. |
 | `trace` | `-t, --trace` | boolean | `false` | Enable trace-level logging (very verbose). |
 | `threads` | — | number | `4` | Number of worker threads for parallel rendering. |
+| `server` | `-s, --server [port]` | number\|boolean | — | When set, the engine creates a shared Express app on `runtime.options.app` and listens on the given port (default `3001`) after all plugins have mounted their routes. Plugins like `api` attach to it instead of starting their own server. Requires `express` to be installed. |
 
 ## Plugin Configuration
 
