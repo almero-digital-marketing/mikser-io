@@ -36,6 +36,15 @@ export default ({
             }
         }
         for (let entitiesName in entitiesConfig) {
+            // Per-config namespacing token. When set, this entity-writer's
+            // files land under <dataFolder>/<token>/ instead of straight
+            // in <dataFolder>. Each named entity config can declare its
+            // own token, so they can target different namespaces (useful
+            // for multi-tenant exports into shared storage).
+            const token = entitiesConfig[entitiesName].token
+            const targetFolder = token
+                ? path.join(runtime.options.dataFolder, token)
+                : runtime.options.dataFolder
             const {
                 query,
                 map,
@@ -46,12 +55,12 @@ export default ({
                         return
                     }
                     const dump = JSON.stringify(normalize(entity))
-                    const entityFile = path.join(runtime.options.dataFolder, `${entity.name}.${entitiesName}.json`)
+                    const entityFile = path.join(targetFolder, `${entity.name}.${entitiesName}.json`)
                     await mkdir(path.dirname(entityFile), { recursive: true })
                     await writeFile(entityFile, dump, 'utf8')
                 },
                 delete: deleteEntity = async entity => {
-                    const entityFile = path.join(runtime.options.dataFolder, `${entity.name}.json`)
+                    const entityFile = path.join(targetFolder, `${entity.name}.json`)
                     await unlink(entityFile)
                 }
             } = entitiesConfig[entitiesName]
@@ -90,6 +99,11 @@ export default ({
             }
         }
         for (let contextName in contextConfig) {
+            // Per-config namespacing token — see the entities loop above.
+            const token = contextConfig[contextName].token
+            const targetFolder = token
+                ? path.join(runtime.options.dataFolder, token)
+                : runtime.options.dataFolder
             const {
                 query,
                 map,
@@ -97,7 +111,7 @@ export default ({
                 save: saveConext = async (entity, context) => {
                     if (context?.data) {
                         const entityName = entity.name
-                        const contextFile = path.join(runtime.options.dataFolder, `${entityName}.${contextName}.json`)
+                        const contextFile = path.join(targetFolder, `${entityName}.${contextName}.json`)
                         await mkdir(path.dirname(contextFile), { recursive: true })
                         await writeFile(contextFile, JSON.stringify(context), 'utf8')
                     }
@@ -116,12 +130,18 @@ export default ({
     onFinalize(async () => {
         const logger = useLogger()
         for (let catalogName in runtime.config.data?.catalog || {}) {
+            // Per-config namespacing token — see the entities loop above.
+            const token = runtime.config.data?.catalog[catalogName].token
+            const targetFolder = token
+                ? path.join(runtime.options.dataFolder, token)
+                : runtime.options.dataFolder
             const {
                 query: queryEntities = entity => entity.type == 'document',
                 map,
                 pick,
                 save: saveEntities = async entities => {
-                    const entitiesFile = path.join(runtime.options.dataFolder, `${catalogName}.json`)
+                    const entitiesFile = path.join(targetFolder, `${catalogName}.json`)
+                    await mkdir(path.dirname(entitiesFile), { recursive: true })
                     logger.debug('Data export catalog %s %s: %s', catalogName, entities.length, entitiesFile)
                     await writeFile(entitiesFile, JSON.stringify(entities), 'utf8')
                 }
