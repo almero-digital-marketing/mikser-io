@@ -1,3 +1,9 @@
+import { fileURLToPath } from 'node:url'
+
+try {
+    process.loadEnvFile(fileURLToPath(new URL('./.env', import.meta.url)))
+} catch {}
+
 export default async ({ options }) => ({
 	plugins: [
 		'documents',
@@ -16,7 +22,23 @@ export default async ({ options }) => ({
 		'render-markdown',
 		'post-pdf',
 		'post-mjml',
+		'vector',
 	],
+    vector: {
+        openai: {
+            apiKey: process.env.OPENAI_API_KEY,
+        },
+        stores: {
+            documents: {
+                map: entity => ({
+                    title: entity.meta?.title,
+                    lang: entity.meta?.lang,
+                    layout: entity.meta?.layout,
+                    content: entity.content,
+                }),
+            },
+        },
+    },
     resources: {
         outputFolder: 'public',
 		libraries: {

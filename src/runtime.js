@@ -77,7 +77,7 @@ const runtime = {
         else if (this.abortController) {
             await this.cancel()
         }
-        this.mutex.use(async () => {
+        await this.mutex.use(async () => {
             try {
                 this.abortController = new AbortController()
                 const { signal } = this.abortController
