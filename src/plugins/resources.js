@@ -24,6 +24,7 @@ export default ({
     trackProgress,
     updateProgress,
     updateEntry,
+    matchEntity,
     constants: { OPERATION },
 }) => {
     const collection = 'resources'
@@ -65,8 +66,7 @@ export default ({
                 _.eachDeep(entity.meta, resource => {
                     if (typeof resource == 'string') {
                         for (let library in resourceLib) {
-                            const match = new RegExp(library)
-                            if (resource.match(match)) {
+                            if (matchEntity(resource, library)) {
                                 resourceMap[entity.id].push({ library, resource, entity })
                             }
                         }

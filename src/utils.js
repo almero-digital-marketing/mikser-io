@@ -49,9 +49,9 @@ export function matchEntity(entity, match) {
     if (typeof match == 'function') return match(entity)
     else if (typeof match == 'string') {
         if (match.substring(0, 2) == '@/') {
-            return minimatch(entity.name, match.substring(2))
+            return minimatch(typeof entity == 'string' ? entity : entity.name, match.substring(2))
         } else {
-            return minimatch(entity.id, match)
+            return minimatch(typeof entity == 'string' ? entity : entity.id, match)
         }
     }
     else if (typeof match == 'object') return _.isMatch(entity, match)
