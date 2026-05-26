@@ -86,14 +86,29 @@ export async function setup(options) {
         }
         await mkdir(runtime.options.runtimeFolder, { recursive: true })
 
-        // --server [port] (or `runtime.options.server` set programmatically)
-        // creates a shared Express app on runtime.options.app so that any
-        // plugin mounting routes (api.js, future live-reload, etc.) attaches
-        // to the same server instead of spinning up its own. The actual
-        // `app.listen()` happens at the END of the onLoaded phase (deferred
-        // via an onLoad hook below) so all plugin routes are registered
-        // before traffic is accepted.
-        if (runtime.options.server) {
+        // Server bring-up: two paths, controlled by which of these are set.
+        //
+        //   runtime.options.app   — pre-supplied Express app (e.g. mikser
+        //                           embedded inside an existing service).
+        //                           The caller owns the listen lifecycle
+        //                           and the static-route policy. Engine
+        //                           stays out of routing/listening so it
+        //                           doesn't clobber their setup; plugins
+        //                           still mount their own routers on it.
+        //
+        //   --server [port]       — engine creates the Express app, mounts
+        //   (runtime.options.server)  static for the output folder, and
+        //                           listens on the port. The actual
+        //                           listen() is deferred via the onLoad
+        //                           hook below so it runs LAST in the
+        //                           onLoaded phase — after every plugin
+        //                           has had a chance to register routes.
+        //
+        // If both are present, the externally-supplied app wins; --server
+        // becomes a no-op (the caller is in charge).
+        if (runtime.options.app) {
+            logger.info('Using externally-supplied Express app on runtime.options.app')
+        } else if (runtime.options.server) {
             const { default: express } = await import('express').catch(() => {
                 throw new Error('express is required for --server. Run: npm install express')
             })
@@ -113,6 +128,10 @@ export async function setup(options) {
     // onLoaded phase, which is why we register it from inside another
     // onLoad — by then plugins have already appended their handlers.
     onLoad(() => {
+        // Only auto-mount static + auto-listen when the engine owns the
+        // app (created via --server). When an external app was supplied,
+        // `port` is unset and we stay out of the way — the caller manages
+        // both routing decisions and the listen lifecycle themselves.
         if (!runtime.options.app || runtime.options.port == null) return
         onLoaded(async () => {
             const logger = useLogger()
