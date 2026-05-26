@@ -47,7 +47,7 @@ export default ({
                 : runtime.options.dataFolder
             const {
                 query,
-                map,
+                map: mapEntity = entity => entity,
                 pick,
                 save: saveEntity = async entity => {
                     if (!entity.name) {
@@ -71,12 +71,12 @@ export default ({
                         case OPERATION.CREATE:
                         case OPERATION.UPDATE:
                             logger.debug('Data export entity %s %s: %s', entity.collection, operation, entity.id)
-                            await saveEntity(map ? await map(entity) : {
+                            await saveEntity(({
                                 refId: ('/' + entity.name.replaceAll('\\', '/')).replace(/\/index$/g, '/'),
                                 name: entity.name,
                                 date: new Date(entity.time),
-                                data: _.pick(entity, pick || ['collection', 'format', 'type', 'destination', 'stamp', 'meta', 'id',])
-                            })
+                                data: _.pick(await mapEntity(entity), pick || ['collection', 'format', 'type', 'destination', 'stamp', 'meta', 'id',])
+                            }))
                             break
                         case OPERATION.DELETE:
                             await deleteEntity(entity)
@@ -106,7 +106,7 @@ export default ({
                 : runtime.options.dataFolder
             const {
                 query,
-                map,
+                map: mapEntityContext = (entity, context) => context,
                 pick,
                 save: saveConext = async (entity, context) => {
                     if (context?.data) {
@@ -121,7 +121,7 @@ export default ({
             for await (let { entity, context } of useJournal('Data context', [OPERATION.RENDER])) {
                 if (query(entity)) {
                     logger.debug('Data export context: %s', entity.name)
-                    await saveConext(entity, map ? await map(entity, context) : _.pick(context, pick || ['data']))
+                    await saveConext(entity, _.pick(await mapEntityContext(entity, context), pick || ['data']))
                 }
             }
         }
@@ -137,7 +137,7 @@ export default ({
                 : runtime.options.dataFolder
             const {
                 query: queryEntities = entity => entity.type == 'document',
-                map,
+                map: mapEntity = entity => entity,
                 pick,
                 save: saveEntities = async entities => {
                     const entitiesFile = path.join(targetFolder, `${catalogName}.json`)
@@ -147,12 +147,12 @@ export default ({
                 }
             } = runtime.config.data?.catalog[catalogName]
             const entities = await findEntities(queryEntities)
-            await saveEntities(await pMap(entities, async entity => map ? await map(entity) : {
+            await saveEntities(await pMap(entities, async entity => ({
                 refId: ('/' + entity.name.replaceAll('\\', '/')).replace(/\/index$/g, '/'),
                 name: entity.name,
                 date: new Date(entity.time),
-                data: _.pick(entity, pick || ['collection', 'format', 'type', 'destination', 'stamp', 'meta', 'id',])
-            }))
+                data: _.pick(await mapEntity(entity), pick || ['collection', 'format', 'type', 'destination', 'stamp', 'meta', 'id',])
+            })))
         }
     })
 }
