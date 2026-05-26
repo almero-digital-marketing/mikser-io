@@ -116,6 +116,16 @@ export async function setup(options) {
         if (!runtime.options.app || runtime.options.port == null) return
         onLoaded(async () => {
             const logger = useLogger()
+            const { default: express } = await import('express')
+
+            // Serve the output folder as the catch-all static route.
+            // Mounted LAST in the middleware chain so plugin routes
+            // (e.g. /api/*) match first; anything that didn't match a
+            // plugin's router falls through to the static handler and
+            // gets served from <outputFolder>.
+            runtime.options.app.use(express.static(runtime.options.outputFolder))
+            logger.info('Serving %s as /', runtime.options.outputFolder.replace(runtime.options.workingFolder + '/', ''))
+
             await new Promise(resolve => {
                 runtime.options.app.listen(runtime.options.port, () => {
                     logger.info('Server listening on port %d', runtime.options.port)
