@@ -177,11 +177,6 @@ export default ({
             }
         })
 
-        // The HTTP server keeps the process alive across many process()
-        // cycles. Tell the journal layer not to tear down the sqlite
-        // connection at the end of each cycle.
-        runtime.options.persistent = true
-
         const base = runtime.config.api?.base ?? '/api'
         app.use(base, router)
         logger.info('Api mounted: %s', base)

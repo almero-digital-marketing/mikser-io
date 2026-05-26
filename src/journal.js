@@ -70,12 +70,12 @@ export async function clearJournal(aborted) {
     await journal('operations').del()
     if (!aborted) {
         // Tear down the sqlite connection only when this is genuinely a
-        // one-shot run that's about to exit. Watch mode and any plugin
-        // that keeps the process alive (e.g. the API plugin's HTTP server)
-        // sets `persistent` so subsequent cycles can still write to the
-        // journal — without this, the second /render request would crash
-        // with "Unable to acquire a connection".
-        if (runtime.options.watch !== true && runtime.options.persistent !== true) {
+        // one-shot run that's about to exit. The two ways mikser stays
+        // alive across cycles are watch mode (chokidar handles keep the
+        // event loop ref'd) and an HTTP server (`runtime.options.app`,
+        // set either by --server or by a caller passing setup({ app }));
+        // both need the journal to survive subsequent cycles.
+        if (runtime.options.watch !== true && !runtime.options.app) {
             journal.destroy()
         }
     }
