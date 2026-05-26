@@ -81,13 +81,13 @@ export default ({
         const app = runtime.options.app
         if (!app) {
             throw new Error(
-                'api plugin requires runtime.options.app — run mikser with --server, ' +
+                'API plugin requires runtime.options.app — run mikser with --server, ' +
                 'or pass { app: yourExpressInstance } to setup() before loading the api plugin'
             )
         }
 
         const { default: express } = await import('express').catch(() => {
-            throw new Error('express is required for the api plugin — run: npm install express')
+            throw new Error('Express is required for the api plugin — run: npm install express')
         })
 
         const router = express.Router()

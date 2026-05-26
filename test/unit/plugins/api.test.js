@@ -139,7 +139,7 @@ describe('api plugin: registration', () => {
         apiPlugin(h.core)
         await assert.rejects(
             () => h.runHook('loaded'),
-            /api plugin requires runtime\.options\.app.*--server.*setup/s,
+            /API plugin requires runtime\.options\.app.*--server.*setup/s,
         )
     })
 })

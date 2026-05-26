@@ -72,7 +72,7 @@ describe('matchEntity', () => {
     })
 
     it('throws for an unsupported match type', () => {
-        assert.throws(() => matchEntity(entity, 42), /Ivalid match type/)
+        assert.throws(() => matchEntity(entity, 42), /Invalid match type/)
     })
 })
 

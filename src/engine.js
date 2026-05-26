@@ -110,7 +110,7 @@ export async function setup(options) {
             logger.info('Using externally-supplied Express app on runtime.options.app')
         } else if (runtime.options.server) {
             const { default: express } = await import('express').catch(() => {
-                throw new Error('express is required for --server. Run: npm install express')
+                throw new Error('Express is required for --server. Run: npm install express')
             })
             runtime.options.app = express()
             runtime.options.port = runtime.options.server === true

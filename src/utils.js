@@ -55,7 +55,7 @@ export function matchEntity(entity, match) {
         }
     }
     else if (typeof match == 'object') return _.isMatch(entity, match)
-    throw new Error('Ivalid match type')
+    throw new Error('Invalid match type')
 }
 
 export function changeExtension(file, format) {

@@ -14,7 +14,7 @@ export async function setup({ config, logger }) {
     }
 
     const { default: puppeteer } = await import('puppeteer').catch(() => {
-        throw new Error('puppeteer is required for the pdf postprocessor — run: npm install puppeteer')
+        throw new Error('Puppeteer is required for the pdf postprocessor — run: npm install puppeteer')
     })
     browser = await puppeteer.launch({
         headless: true,
