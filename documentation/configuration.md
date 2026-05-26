@@ -292,15 +292,23 @@ export default {
 
 ### `api`
 
+The api plugin mounts its routes onto an existing Express app — it does
+**not** create one. Provide the app either via the `--server` CLI flag
+(engine creates one) or by passing `app` to `setup()` programmatically.
+If neither is in place when the plugin loads, it fails fast with an
+actionable error.
+
 ```js
 export default {
   api: {
-    port: 3001,           // Port to listen on. Default: 3001
-    token: 'my-secret',   // Bearer token required on all requests. Default: none (open)
+    base: '/api',         // Mount path under runtime.options.app. Default: '/api'
+    token: 'my-secret',   // Bearer token required on PUT/DELETE/POST. Default: none (open)
     pageSize: 10,         // Default page size for GET /entities. Default: 10
     renderTimeout: 30000  // Max ms to wait for POST /render to complete. Default: 30000
   }
 }
 ```
 
-Requires `express` to be installed: `npm install express`.
+Requires `express` to be installed: `npm install express`. Port and
+listen lifecycle live on the engine side (see `--server`) or with the
+caller (when they supplied their own app).

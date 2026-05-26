@@ -133,6 +133,15 @@ describe('api plugin: registration', () => {
         apiPlugin(h.core)
         await assert.doesNotReject(() => h.runHook('loaded'))
     })
+
+    it('fails fast with an actionable error if no runtime.options.app is present', async () => {
+        const h = createHarness()                       // no `app` on options
+        apiPlugin(h.core)
+        await assert.rejects(
+            () => h.runHook('loaded'),
+            /api plugin requires runtime\.options\.app.*--server.*setup/s,
+        )
+    })
 })
 
 // End-to-end: actually start a small HTTP server, POST to /render, verify

@@ -73,12 +73,22 @@ export default ({
     onLoaded(async () => {
         const logger = useLogger()
 
+        // The api plugin no longer creates its own Express app. It mounts
+        // onto an existing app provided either by --server (engine
+        // creates one) or by a caller that programmatically passed
+        // setup({ app: ... }). Without an app there's nowhere to mount
+        // routes, so fail fast with a message that points at the fix.
+        const app = runtime.options.app
+        if (!app) {
+            throw new Error(
+                'api plugin requires runtime.options.app — run mikser with --server, ' +
+                'or pass { app: yourExpressInstance } to setup() before loading the api plugin'
+            )
+        }
+
         const { default: express } = await import('express').catch(() => {
             throw new Error('express is required for the api plugin — run: npm install express')
         })
-
-        const ownApp = !runtime.options.app
-        const app = runtime.options.app ?? express()
 
         const router = express.Router()
         router.use(express.json())
@@ -174,15 +184,6 @@ export default ({
 
         const base = runtime.config.api?.base ?? '/api'
         app.use(base, router)
-
-        if (ownApp) {
-            const port = runtime.config.api?.port ?? 3001
-            const url = runtime.config.api?.url ?? 'http://localhost'
-            app.listen(port, () => {
-                logger.info('Api listening: %s:%d%s', url, port, base)
-            })
-        } else {
-            logger.info('Api mounted: %s', base)
-        }
+        logger.info('Api mounted: %s', base)
     })
 }
