@@ -4,7 +4,7 @@
 	"description": "<p align=\"center\">   <img src=\"mikser-lockup-stacked.svg\" alt=\"mikser\" width=\"198\" /> </p>",
 	"main": "index.js",
 	"scripts": {
-		"debug": "node --no-warnings app.js --debug --working-folder test/fixture",
+		"debug": "node --no-warnings app.js --debug --server --watch --working-folder test/fixture",
 		"test:unit": "node --test --test-reporter=spec 'test/unit/**/*.test.js'",
 		"test:smoke": "node --no-warnings app.js --working-folder test/fixture",
 		"test": "npm run test:unit && npm run test:smoke"
@@ -56,6 +56,7 @@
 	},
 	"devDependencies": {
 		"fluent-ffmpeg": "^2.1.3",
+		"mikser-io-decap": "file:../mikser-io-decap",
 		"mikser-io-post-mjml": "file:../mikser-io-post-mjml",
 		"mikser-io-render-eta": "file:../mikser-io-render-eta",
 		"mikser-io-render-liquid": "file:../mikser-io-render-liquid",

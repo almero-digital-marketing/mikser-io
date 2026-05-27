@@ -23,6 +23,7 @@ export default async ({ options }) => ({
 		'post-pdf',
 		'post-mjml',
 		'vector',
+		'decap',
 	],
     vector: {
         // Flip to pg automatically when PGHOST is set; otherwise sqlite.
