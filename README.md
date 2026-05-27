@@ -38,7 +38,7 @@ Plugins are independent npm packages — install only what a project actually us
 | `api` | REST endpoints — list / get / create / update / delete / render |
 | `vector` | OpenAI embeddings + semantic search (sqlite-vec or pgvector) |
 | `decap` | [Decap CMS](https://decapcms.org/) mounted in the same process |
-| `archive`, `mapper`, `live`, `whitebox`, `aml` | Specialty integrations |
+| `archive`, `mapper`, `live`, `aml` | Specialty integrations |
 
 ## Quick Start
 
