@@ -16,9 +16,16 @@ export async function setup({ config, logger }) {
     const { default: puppeteer } = await import('puppeteer').catch(() => {
         throw new Error('Puppeteer is required for the pdf postprocessor — run: npm install puppeteer')
     })
+    // --no-sandbox / --disable-setuid-sandbox are required on most
+    // headless Linux servers and Docker images where Chrome's sandbox
+    // can't be set up. Applied by default and merged (deduped) with any
+    // user-supplied launch.args so callers can add flags without losing
+    // these. To run WITH the sandbox, override launch.args explicitly.
+    const defaultArgs = ['--no-sandbox', '--disable-setuid-sandbox']
     browser = await puppeteer.launch({
         headless: true,
-        ...config?.launch
+        ...config?.launch,
+        args: [...new Set([...defaultArgs, ...(config?.launch?.args ?? [])])],
     })
     logger.debug('Puppeteer browser launched')
 }
