@@ -47,6 +47,7 @@ export async function setup(options) {
             .option('-t --trace', 'display trace statements')
             .option('-e --runtime-folder <folder>', 'set mikser runtime folder relative to working folder', 'runtime')
             .option('-s --server [port]', 'start an Express server on the given port (defaults to 3001)')
+            .option('--cors [origin]', 'send CORS headers from the server (defaults to *)')
 
         Object.assign(runtime.options, options || runtime.engine.commander.parse(process.argv).opts())
         runtime.options.info = true
@@ -117,6 +118,26 @@ export async function setup(options) {
                 ? 3001
                 : Number(runtime.options.server) || 3001
             logger.info('Server starting on port %d', runtime.options.port)
+
+            // CORS — frontends served from a different origin (a dev
+            // server on another port, a separate domain) can't fetch the
+            // /data/*.json exports or hit /api, /vector etc. without an
+            // Access-Control-Allow-Origin header. Opt in via --cors (or
+            // config.server.cors): `true`/no value → '*', or a specific
+            // origin string. Mounted first so it covers static routes and
+            // every plugin router. No-op when unset.
+            const corsOrigin = runtime.config.server?.cors ?? runtime.options.cors
+            if (corsOrigin) {
+                const origin = corsOrigin === true ? '*' : String(corsOrigin)
+                runtime.options.app.use((req, res, next) => {
+                    res.header('Access-Control-Allow-Origin', origin)
+                    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+                    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+                    if (req.method === 'OPTIONS') return res.sendStatus(204)
+                    next()
+                })
+                logger.info('CORS enabled: %s', origin)
+            }
         }
     })
 
