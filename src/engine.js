@@ -47,7 +47,8 @@ export async function setup(options) {
             .option('-t --trace', 'display trace statements')
             .option('-e --runtime-folder <folder>', 'set mikser runtime folder relative to working folder', 'runtime')
             .option('-s --server [port]', 'start an Express server on the given port (defaults to 3001)')
-            .option('--cors [origin]', 'send CORS headers from the server (defaults to *)')
+            .option('--cors [origin]', 'restrict server CORS to a specific origin (default *)')
+            .option('--no-cors', 'disable server CORS headers')
 
         Object.assign(runtime.options, options || runtime.engine.commander.parse(process.argv).opts())
         runtime.options.info = true
@@ -119,14 +120,20 @@ export async function setup(options) {
                 : Number(runtime.options.server) || 3001
             logger.info('Server starting on port %d', runtime.options.port)
 
-            // CORS — frontends served from a different origin (a dev
-            // server on another port, a separate domain) can't fetch the
-            // /data/*.json exports or hit /api, /vector etc. without an
-            // Access-Control-Allow-Origin header. Opt in via --cors (or
-            // config.server.cors): `true`/no value → '*', or a specific
-            // origin string. Mounted first so it covers static routes and
-            // every plugin router. No-op when unset.
-            const corsOrigin = runtime.config.server?.cors ?? runtime.options.cors
+            // CORS — a server exists to be fetched, and in dev the
+            // frontend is almost always on a different origin (a dev
+            // server on another port, a separate domain). So CORS is ON
+            // by default with Access-Control-Allow-Origin: *. The token
+            // on /api (not CORS) is what gates mutations, and '*' can't
+            // carry credentials, so this is low-risk. Pin it down with
+            // --cors <origin> / config.server.cors, or disable entirely
+            // with --no-cors / config.server.cors:false (recommended for
+            // private/admin deployments). Mounted first so it covers
+            // static routes and every plugin router.
+            // Default on (?? true) so programmatic setup({ server }) —
+            // which bypasses commander's --no-cors default — matches the
+            // CLI. Explicit false (config or --no-cors) still disables.
+            const corsOrigin = runtime.config.server?.cors ?? runtime.options.cors ?? true
             if (corsOrigin) {
                 const origin = corsOrigin === true ? '*' : String(corsOrigin)
                 runtime.options.app.use((req, res, next) => {
