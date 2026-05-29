@@ -316,11 +316,31 @@ export async function setup(options) {
         for await (const { entity, options, context, output } of useJournal('Queuing postprocess', [OPERATION.RENDER], signal)) {
             if (output?.success && options.postprocessor) {
                 const ext = await resolveOutputExt(options.postprocessor)
+                let destination = changeExtension(entity.destination, ext)
+
+                // cleanUrls renders a non-index page `foo` to
+                // `foo/index.html` so the served URL is `/foo/`. A
+                // postprocessor that emits a *different* file type (e.g.
+                // PDF) shouldn't inherit that clean-URL folder — a
+                // downloadable artifact wants to be `foo.pdf`, not
+                // `foo/index.pdf`. Collapse the `/index` segment when the
+                // produced extension differs from the rendered page's.
+                // Genuine index documents (name ends in `index`) keep
+                // their path.
+                const originExt = path.extname(entity.destination).slice(1)
+                const isCleanUrlPage =
+                    runtime.config.layouts?.cleanUrls &&
+                    !_.endsWith(entity.name, 'index') &&
+                    path.basename(entity.destination, path.extname(entity.destination)) === 'index'
+                if (ext !== originExt && isCleanUrlPage) {
+                    destination = `${path.dirname(entity.destination)}.${ext}`
+                }
+
                 tasks.push({
                     entity: {
                         ...entity,
                         origin: entity.destination,
-                        destination: changeExtension(entity.destination, ext)
+                        destination
                     },
                     options: { postprocessor: options.postprocessor, tasks: options.tasks },
                     context

@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { mkdir, writeFile, unlink } from 'node:fs/promises'
+import { mkdir, writeFile, unlink, rmdir } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { globby } from 'globby'
 import _ from 'lodash'
@@ -404,6 +404,15 @@ export default ({
                 const originFile = path.join(runtime.options.outputFolder, entity.origin)
                 try {
                     await unlink(originFile)
+                } catch { }
+                // With cleanUrls the origin was `<name>/index.html`; once
+                // the postprocessor wrote `<name>.<ext>` elsewhere, that
+                // folder is left empty. Remove it if so. rmdir only
+                // succeeds on an empty directory, so this is a no-op when
+                // the folder still holds other outputs (e.g. paginated
+                // pages).
+                try {
+                    await rmdir(path.dirname(originFile))
                 } catch { }
             }
         }
