@@ -14,7 +14,7 @@ Mikser is a content engine for Node.js built around a strict lifecycle, a compos
 
 **Concurrent rendering.** Renders fan out across a worker pool that keeps every CPU core hot. Multi-format outputs (HTML, PDF, MJML email, etc.) generate in parallel from the same source.
 
-**One lifecycle, everything composes.** Plugins hook into 20+ named lifecycle phases. A search-indexing plugin shares the same journal iteration as a CMS plugin and an email-rendering plugin — no glue code, no orchestration layer.
+**One lifecycle, everything composes.** Plugins hook into 20+ named lifecycle phases. A search-indexing plugin shares the same journal iteration as an email-rendering plugin and a PDF-postprocessing plugin — no glue code, no orchestration layer. The engine doesn't know which plugins are loaded; plugins don't have to know about each other.
 
 **Run anywhere.** The same CLI handles one-shot builds, watch-mode dev loops, and a long-running HTTP server with a shared Express app. `npx mikser` ships a static site; `mikser --watch` is the dev loop; `mikser --server` exposes a live admin/API.
 
@@ -22,9 +22,11 @@ Mikser is a content engine for Node.js built around a strict lifecycle, a compos
 
 **Open source.** MIT-licensed, on GitHub, no telemetry, no auth wall, no SaaS dependency. What you see is what runs.
 
-## Plugin ecosystem
+## Plugins on top of the engine
 
-Plugins are independent npm packages — install only what a project actually uses.
+The engine is what stays stable — the lifecycle, the catalog, the file-based content model. Plugins are independent npm packages sitting on the plugin API: some are essential to the SSG workflow, some give external systems HTTP access to the catalog, some are integrations that earn their keep on real projects, and some are probes that test how far the lifecycle stretches without touching the core. Install what a project needs; drop what it doesn't.
+
+**Core — sources, layouts, renderers, postprocessors:**
 
 | Plugin | What it does |
 |---|---|
@@ -34,11 +36,26 @@ Plugins are independent npm packages — install only what a project actually us
 | `render-resource`, `render-asset`, `render-href` | Resource / asset / link rewriting at render time |
 | `post-pdf` | HTML → PDF via headless Chromium |
 | `post-mjml` | MJML email markup → inbox-safe HTML |
-| `data` | JSON snapshots of entities / context / catalog over HTTP |
-| `api` | REST endpoints — list / get / create / update / delete / render |
+
+**HTTP access to the catalog:**
+
+| Plugin | What it does |
+|---|---|
+| `data` | JSON snapshots of entities / context / catalog, written to disk for static serving |
+| `api` | REST endpoints with sift-backed queries, per-endpoint tokens, optional render |
+
+**Integrations:**
+
+| Plugin | What it does |
+|---|---|
 | `vector` | OpenAI embeddings + semantic search (sqlite-vec or pgvector) |
-| `decap` | [Decap CMS](https://decapcms.org/) mounted in the same process |
 | `archive`, `mapper`, `live`, `aml` | Specialty integrations |
+
+**Integration probes** — wrap a substantial external project as a plugin to confirm the lifecycle is open enough to host it without core changes. Treat these as feasibility evidence, not as a statement about where mikser is heading:
+
+| Plugin | What it does |
+|---|---|
+| `decap` | Mounts [Decap CMS](https://decapcms.org/) inside the same Express server — admin UI + local proxy backend + bake-to-`out/` for static deploys (~150 lines, zero engine changes) |
 
 ## Quick Start
 
