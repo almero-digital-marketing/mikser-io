@@ -158,6 +158,7 @@ describe('api plugin: /render endpoint (integration)', () => {
                 workingFolder: '/tmp/mikser-rest-pdf',
                 outputFolder: '/tmp/mikser-rest-pdf/out',
             },
+            config: { api: { endpoints: { default: { operations: ['render'] } } } },
         })
 
         // The API `/render` handler kicks off `runtime.process()` and waits
@@ -188,7 +189,7 @@ describe('api plugin: /render endpoint (integration)', () => {
         })
         try {
             const { port } = server.address()
-            const response = await fetch(`http://127.0.0.1:${port}/api/render`, {
+            const response = await fetch(`http://127.0.0.1:${port}/api/default/render`, {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
                 body: JSON.stringify({
@@ -216,6 +217,7 @@ describe('api plugin: /render endpoint (integration)', () => {
                 workingFolder: '/tmp/mikser-rest-batch',
                 outputFolder: '/tmp/mikser-rest-batch/out',
             },
+            config: { api: { endpoints: { default: { operations: ['render'] } } } },
         })
 
         // The plugin pipelines requests into the *next* cycle: anything
@@ -252,7 +254,7 @@ describe('api plugin: /render endpoint (integration)', () => {
             const { port } = server.address()
             const ids = ['/docs/a.md', '/docs/b.md', '/docs/c.md', '/docs/d.md', '/docs/e.md']
             const responses = await Promise.all(
-                ids.map(id => fetch(`http://127.0.0.1:${port}/api/render`, {
+                ids.map(id => fetch(`http://127.0.0.1:${port}/api/default/render`, {
                     method: 'POST',
                     headers: { 'content-type': 'application/json' },
                     body: JSON.stringify({ id, collection: 'documents', type: 'document' }),
@@ -286,7 +288,7 @@ describe('api plugin: /render endpoint (integration)', () => {
                 workingFolder: '/tmp/mikser-rest-to',
                 outputFolder: '/tmp/mikser-rest-to/out',
             },
-            config: { api: { renderTimeout: 50 } },
+            config: { api: { renderTimeout: 50, endpoints: { default: { operations: ['render'] } } } },
         })
         // process() never resolves — simulates a hung cycle. Per-request
         // timer fires first and rejects the promise with "Render timeout".
@@ -301,7 +303,7 @@ describe('api plugin: /render endpoint (integration)', () => {
         })
         try {
             const { port } = server.address()
-            const response = await fetch(`http://127.0.0.1:${port}/api/render`, {
+            const response = await fetch(`http://127.0.0.1:${port}/api/default/render`, {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
                 body: JSON.stringify({ id: '/docs/x.md' }),
@@ -323,6 +325,7 @@ describe('api plugin: /render endpoint (integration)', () => {
                 workingFolder: '/tmp/mikser-rest-options',
                 outputFolder: '/tmp/mikser-rest-options/out',
             },
+            config: { api: { endpoints: { default: { operations: ['render'] } } } },
         })
 
         // Capture the entity that the renderer was actually asked to
@@ -345,7 +348,7 @@ describe('api plugin: /render endpoint (integration)', () => {
         const server = await new Promise(r => { const s = app.listen(0, () => r(s)) })
         try {
             const { port } = server.address()
-            await fetch(`http://127.0.0.1:${port}/api/render`, {
+            await fetch(`http://127.0.0.1:${port}/api/default/render`, {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
                 body: JSON.stringify({
@@ -372,6 +375,7 @@ describe('api plugin: /render endpoint (integration)', () => {
                 workingFolder: '/tmp/mikser-rest-nc',
                 outputFolder: '/tmp/mikser-rest-nc/out',
             },
+            config: { api: { endpoints: { default: { operations: ['render'] } } } },
         })
         // Cycle finishes immediately, but the completed hook is never fired
         // for this entity (e.g. no layout matched, or the renderer failed
@@ -387,7 +391,7 @@ describe('api plugin: /render endpoint (integration)', () => {
         })
         try {
             const { port } = server.address()
-            const response = await fetch(`http://127.0.0.1:${port}/api/render`, {
+            const response = await fetch(`http://127.0.0.1:${port}/api/default/render`, {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
                 body: JSON.stringify({ id: '/docs/x.md' }),
@@ -395,6 +399,96 @@ describe('api plugin: /render endpoint (integration)', () => {
             assert.equal(response.status, 500)
             const body = await response.json()
             assert.match(body.error, /did not complete/)
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+})
+
+// Verifies the new multi-endpoint shape: per-endpoint token, per-endpoint
+// query scope on list, and the operations allowlist with 403 on disallowed
+// ops / 401 on missing-or-wrong token.
+describe('api plugin: per-endpoint auth + scope', () => {
+    async function mount({ endpoints, entities = [] }) {
+        const { default: express } = await import('express')
+        const app = express()
+        const h = createHarness({
+            options: { app, workingFolder: '/tmp/mikser-rest-ep', outputFolder: '/tmp/mikser-rest-ep/out' },
+            config: { api: { endpoints } },
+            entities,
+        })
+        apiPlugin(h.core)
+        await h.runHook('loaded')
+        const server = await new Promise((resolve) => {
+            const s = app.listen(0, () => resolve(s))
+        })
+        return { server, port: server.address().port, h }
+    }
+
+    it('public endpoint with query scope filters the list', async () => {
+        const { server, port } = await mount({
+            endpoints: {
+                public: {
+                    query: (e) => e.meta?.published === true,
+                    operations: ['list'],
+                },
+            },
+            entities: [
+                { id: '/a.md', type: 'document', meta: { published: true } },
+                { id: '/b.md', type: 'document', meta: { published: false } },
+                { id: '/c.md', type: 'document', meta: { published: true } },
+            ],
+        })
+        try {
+            const res = await fetch(`http://127.0.0.1:${port}/api/public/entities`)
+            assert.equal(res.status, 200)
+            const body = await res.json()
+            assert.equal(body.total, 2)
+            assert.deepEqual(body.items.map((i) => i.id).sort(), ['/a.md', '/c.md'])
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('returns 403 when the requested operation is not in the allowlist', async () => {
+        const { server, port } = await mount({
+            endpoints: {
+                readonly: { operations: ['list'] },
+            },
+        })
+        try {
+            const res = await fetch(`http://127.0.0.1:${port}/api/readonly/entities`, {
+                method: 'DELETE',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ collection: 'documents', relativePath: 'x.md' }),
+            })
+            assert.equal(res.status, 403)
+            const body = await res.json()
+            assert.match(body.error, /not allowed/i)
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('returns 401 when a token-gated endpoint receives no Authorization header', async () => {
+        const { server, port } = await mount({
+            endpoints: {
+                admin: { token: 's3cret', operations: ['list'] },
+            },
+        })
+        try {
+            const noAuth = await fetch(`http://127.0.0.1:${port}/api/admin/entities`)
+            assert.equal(noAuth.status, 401)
+
+            const wrong = await fetch(`http://127.0.0.1:${port}/api/admin/entities`, {
+                headers: { authorization: 'Bearer nope' },
+            })
+            assert.equal(wrong.status, 401)
+
+            const ok = await fetch(`http://127.0.0.1:${port}/api/admin/entities`, {
+                headers: { authorization: 'Bearer s3cret' },
+            })
+            assert.equal(ok.status, 200)
         } finally {
             await new Promise((r) => server.close(r))
         }

@@ -451,25 +451,57 @@ shares: {
 
 Exposes a lightweight HTTP API over the Mikser pipeline. Useful for headless CMS workflows, live preview, and programmatic content management.
 
-**Requires:** `npm install express`
+**Requires:** `npm install express` and a running server (`--server`, or `setup({ app })`).
 
-**Endpoints:**
+**Shape: named endpoints.** Mirrors the `data` and `vector` plugins — you declare named endpoints, each with its own optional `token`, `query` scope, `operations` allowlist, and pagination/render-timeout overrides. Each endpoint mounts under `<base>/<endpointName>`.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/entities` | Query the catalog with optional filters and pagination |
-| `PUT` | `/entities` | Write a file to a collection folder (triggers normal pipeline) |
-| `DELETE` | `/entities` | Delete a file from a collection folder |
-| `POST` | `/render` | Render an entity in memory without touching the filesystem |
+```js
+api: {
+  base: '/api',                    // mount prefix; default '/api'
+  pageSize: 10,                    // global default; per-endpoint override below
+  renderTimeout: 30_000,           // global default; per-endpoint override below
+  endpoints: {
+    public: {
+      // No token → publicly readable. The query function scopes what
+      // this endpoint sees: only published documents, in this example.
+      query: e => e.type === 'document' && e.meta?.published,
+      operations: ['list'],        // default when no token is set
+    },
+    admin: {
+      token: process.env.API_ADMIN_TOKEN,
+      // No query → admin sees everything. operations defaults to all
+      // when a token is set.
+    },
+    products: {
+      token: process.env.API_PRODUCTS_TOKEN,
+      query: e => e.collection === 'products',
+      operations: ['list', 'update', 'delete'],
+      pageSize: 50,                // override the global pageSize
+    },
+    render: {
+      token: process.env.API_RENDER_TOKEN,
+      operations: ['render'],
+      renderTimeout: 60_000,
+    },
+  },
+}
+```
 
-**`GET /entities`**
+**Routes per endpoint:**
 
-Returns a paginated list of entities from the catalog. All query parameters except `page` and `limit` are forwarded to `findEntities()` as a filter.
+| Method | Path | Operation | Description |
+|--------|------|-----------|-------------|
+| `GET` | `/<endpoint>/entities` | `list` | Paginated list of entities. The endpoint's `query` (if set) filters results in addition to the request's filter. |
+| `PUT` | `/<endpoint>/entities` | `update` | Write a file to a collection folder (triggers normal pipeline) |
+| `DELETE` | `/<endpoint>/entities` | `delete` | Delete a file from a collection folder |
+| `POST` | `/<endpoint>/render` | `render` | Render an entity in memory and return the bytes. The endpoint's `query` (if set) must accept the request entity. |
+
+**`GET /<endpoint>/entities`**
 
 ```
-GET /entities                          → all entities, page 1
-GET /entities?collection=documents     → filter by collection
-GET /entities?collection=documents&page=2&limit=25
+GET /api/public/entities                     → public endpoint, page 1
+GET /api/admin/entities?collection=documents → admin endpoint, filtered
+GET /api/public/entities?page=2&limit=25
 ```
 
 Response envelope:
@@ -485,25 +517,21 @@ Response envelope:
 }
 ```
 
-**`PUT /entities`**
+**`PUT /<endpoint>/entities`**
 
-Writes content to a file in a collection folder. The file change is picked up by the chokidar watcher and runs through the normal import → process → render pipeline.
+Writes content to a file in a collection folder. The file change is picked up by the watcher and runs through the normal pipeline.
 
 ```json
 { "collection": "documents", "relativePath": "blog/new-post.md", "content": "---\ntitle: Hello\n---\n\nContent here." }
 ```
 
-**`DELETE /entities`**
-
-Deletes a file from a collection folder. Triggers the normal delete pipeline.
+**`DELETE /<endpoint>/entities`**
 
 ```json
 { "collection": "documents", "relativePath": "blog/old-post.md" }
 ```
 
-**`POST /render`**
-
-Renders an entity in memory without writing any file. Returns the rendered output directly in the response. Useful for live preview.
+**`POST /<endpoint>/render`**
 
 ```json
 {
@@ -512,36 +540,29 @@ Renders an entity in memory without writing any file. Returns the rendered outpu
   "type": "document",
   "format": "md",
   "meta": { "title": "Preview", "layout": "post" },
-  "content": "# Preview\n\nThis is a live preview."
+  "content": "# Preview",
+  "options": { "save": false, "catalog": false }
 }
 ```
 
-**Config:**
-
-```js
-api: {
-  port: 3001,          // Port to listen on. Default: 3001
-  token: 'secret',     // Bearer token for auth. Default: none (open)
-  pageSize: 10,        // Default page size for GET /entities. Default: 10
-  renderTimeout: 30000 // Render timeout in ms. Default: 30000
-}
-```
+`options` is optional. Strict opt-outs via the literal `false`:
+- `options.catalog: false` — prune the catalog row after render
+- `options.save: false` — skip the final disk write (bytes still in the response)
 
 **Authentication:**
 
-When `api.token` is set, write operations require a Bearer token. Read-only endpoints are always open.
+When an endpoint declares a `token`, every request to that endpoint must carry `Authorization: Bearer <token>`. Endpoints without a token are open. Each endpoint owns its own token — a leak only burns one endpoint's scope.
 
-| Method | Auth required |
-|--------|--------------|
-| `GET /entities` | No |
-| `POST /render` | No |
-| `PUT /entities` | Yes |
-| `DELETE /entities` | Yes |
+**Default `operations`:**
 
-Protected requests must include:
-```
-Authorization: Bearer <token>
-```
+| `token` set? | default `operations` |
+|---|---|
+| No (public) | `['list']` — read-only |
+| Yes (gated) | `['list', 'update', 'delete', 'render']` — full |
+
+Always overridable with explicit `operations`. A request to an operation outside the allowlist returns `403`; a missing/wrong token returns `401`.
+
+**Without `api.endpoints` configured**, the plugin logs a warning and mounts nothing — you must declare at least one endpoint to use the API.
 
 ---
 
