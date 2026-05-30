@@ -1,6 +1,122 @@
 import path from 'node:path'
 import { access } from 'node:fs/promises'
+import _ from 'lodash'
+import sift from 'sift'
 import { useRenderer, useCollection } from '../api.js'
+
+// Mongo-style operators recognised in URL query params as `<path>.$<op>=...`.
+// $in / $nin take comma-separated values; $exists takes a truthy/falsy
+// string; everything else coerces the value (numbers, booleans, null) and
+// hands it to sift. Anything sift accepts works on the POST body path too.
+const QUERY_OPS = new Set([
+    'eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'in', 'nin', 'exists', 'regex',
+])
+
+function coerceScalar(v) {
+    if (typeof v !== 'string') return v
+    if (v === 'true') return true
+    if (v === 'false') return false
+    if (v === 'null') return null
+    if (/^-?\d+(\.\d+)?$/.test(v)) return Number(v)
+    return v
+}
+
+function coerceForOp(value, op) {
+    if (op === 'in' || op === 'nin') {
+        return String(value).split(',').map(s => coerceScalar(s.trim()))
+    }
+    if (op === 'exists') return value === 'true' || value === '1'
+    if (op === 'regex') return String(value)
+    return coerceScalar(value)
+}
+
+// "name,-date" → { name: 1, date: -1 }
+function parseSortString(spec) {
+    const sort = {}
+    if (!spec) return sort
+    for (const raw of String(spec).split(',')) {
+        const t = raw.trim()
+        if (!t) continue
+        if (t.startsWith('-')) sort[t.slice(1)] = -1
+        else sort[t.replace(/^\+/, '')] = 1
+    }
+    return sort
+}
+
+// "id,meta.title" → ['id', 'meta.title']
+function parseFieldsString(spec) {
+    if (!spec) return null
+    return String(spec).split(',').map(s => s.trim()).filter(Boolean)
+}
+
+// Reserved query-string keys that aren't filter fields.
+const RESERVED = new Set(['page', 'limit', 'skip', 'sort', 'fields'])
+
+function parseQueryString(params) {
+    const filter = {}
+    let page = 1, limit, skip, sort, fields
+    for (const [key, raw] of Object.entries(params)) {
+        if (key === 'page')   { page = Math.max(1, parseInt(raw) || 1); continue }
+        if (key === 'limit')  { limit = parseInt(raw); continue }
+        if (key === 'skip')   { skip = parseInt(raw); continue }
+        if (key === 'sort')   { sort = parseSortString(raw); continue }
+        if (key === 'fields') { fields = parseFieldsString(raw); continue }
+
+        // <path>.$<op>=... groups under the same dotted-path key so
+        // multiple operators on one field compose:
+        // meta.price.$gt=10&meta.price.$lt=50 → { 'meta.price': { $gt:10, $lt:50 } }
+        // We use dotted keys (Mongo-style) rather than nested objects so
+        // sift treats them as path matchers, not deep-equality.
+        const m = key.match(/^(.+)\.\$([a-zA-Z]+)$/)
+        if (m && QUERY_OPS.has(m[2])) {
+            const [, fieldPath, op] = m
+            const ops = (filter[fieldPath] && typeof filter[fieldPath] === 'object' && !Array.isArray(filter[fieldPath]))
+                ? filter[fieldPath]
+                : {}
+            ops[`$${op}`] = coerceForOp(raw, op)
+            filter[fieldPath] = ops
+        } else {
+            filter[key] = coerceScalar(raw)
+        }
+    }
+    return { filter, page, limit, skip, sort, fields }
+}
+
+// Apply filter → endpoint scope → sort → skip/limit → projection.
+// `findEntities()` returns the live in-memory catalog; for ≤100k docs the
+// per-request scan is plenty fast. Backing this with an index becomes
+// interesting past that — same endpoint contract.
+async function runQuery({ filter, sort, fields, skip, limit, scope, findEntities }) {
+    let all = await findEntities()
+    if (scope) all = all.filter(scope)
+
+    if (filter && Object.keys(filter).length) {
+        const match = sift(filter)
+        all = all.filter(match)
+    }
+
+    const total = all.length
+
+    if (sort && Object.keys(sort).length) {
+        const entries = Object.entries(sort)
+        all.sort((a, b) => {
+            for (const [key, dir] of entries) {
+                const av = _.get(a, key)
+                const bv = _.get(b, key)
+                if (av == null && bv == null) continue
+                if (av == null) return 1
+                if (bv == null) return -1
+                if (av < bv) return -dir
+                if (av > bv) return dir
+            }
+            return 0
+        })
+    }
+
+    let items = all.slice(skip, skip + limit)
+    if (fields?.length) items = items.map(e => _.pick(e, fields))
+    return { items, total }
+}
 
 // MIME type lookup used when streaming a postprocessor's output back over
 // HTTP. The renderer's output extension lives on entity.destination
@@ -146,27 +262,57 @@ export default ({
 
             router.get('/entities', allow('list'), auth, async (req, res) => {
                 try {
-                    const { page: rawPage, limit: rawLimit, ...filter } = req.query
-                    const page = Math.max(1, parseInt(rawPage) || 1)
-                    const limit = Math.min(100, Math.max(1, parseInt(rawLimit) || pageSize))
-                    const reqQuery = Object.keys(filter).length ? filter : undefined
+                    const parsed = parseQueryString(req.query)
+                    const limit = Math.min(100, Math.max(1, parsed.limit ?? pageSize))
+                    const skip = parsed.skip ?? (parsed.page - 1) * limit
 
-                    let all = await findEntities(reqQuery)
-                    // Endpoint-level scope: a public endpoint can be
-                    // restricted to e.g. published documents even when
-                    // the caller asks for everything.
-                    if (query) all = all.filter(query)
-                    const total = all.length
+                    const { items, total } = await runQuery({
+                        filter: parsed.filter,
+                        sort: parsed.sort,
+                        fields: parsed.fields,
+                        skip,
+                        limit,
+                        scope: query,
+                        findEntities,
+                    })
+
+                    const page = Math.floor(skip / limit) + 1
                     const totalPages = Math.ceil(total / limit) || 1
-                    const items = all.slice((page - 1) * limit, page * limit)
-
                     res.json({
                         items, page, limit, total, totalPages,
-                        hasNext: page < totalPages,
-                        hasPrev: page > 1,
+                        hasNext: skip + limit < total,
+                        hasPrev: skip > 0,
                     })
                 } catch (err) {
                     logger.error('Api[%s] list error: %s', name, err.message)
+                    res.status(500).json({ error: err.message })
+                }
+            })
+
+            // POST /entities/query — body-based query for anything that
+            // doesn't fit cleanly in a URL: $and/$or, nested operators,
+            // regex, projections, etc. Same shape as a Mongo find.
+            router.post('/entities/query', allow('list'), auth, async (req, res) => {
+                try {
+                    const { filter = {}, sort, fields, page: rawPage = 1, limit: rawLimit, skip: rawSkip } = req.body ?? {}
+                    const limit = Math.min(100, Math.max(1, rawLimit ?? pageSize))
+                    const skip = rawSkip ?? (Math.max(1, parseInt(rawPage) || 1) - 1) * limit
+
+                    const { items, total } = await runQuery({
+                        filter, sort, fields, skip, limit,
+                        scope: query,
+                        findEntities,
+                    })
+
+                    const page = Math.floor(skip / limit) + 1
+                    const totalPages = Math.ceil(total / limit) || 1
+                    res.json({
+                        items, page, limit, total, totalPages,
+                        hasNext: skip + limit < total,
+                        hasPrev: skip > 0,
+                    })
+                } catch (err) {
+                    logger.error('Api[%s] query error: %s', name, err.message)
                     res.status(500).json({ error: err.message })
                 }
             })

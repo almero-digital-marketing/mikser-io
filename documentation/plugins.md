@@ -491,18 +491,40 @@ api: {
 
 | Method | Path | Operation | Description |
 |--------|------|-----------|-------------|
-| `GET` | `/<endpoint>/entities` | `list` | Paginated list of entities. The endpoint's `query` (if set) filters results in addition to the request's filter. |
+| `GET` | `/<endpoint>/entities` | `list` | Paginated list with Mongo-style filter operators, sort, and field projection. The endpoint's `query` (if set) ANDs with the request filter. |
+| `POST` | `/<endpoint>/entities/query` | `list` | Same as above but body-based — for `$and`/`$or`, regex, or any filter that doesn't fit in a URL. |
 | `PUT` | `/<endpoint>/entities` | `update` | Write a file to a collection folder (triggers normal pipeline) |
 | `DELETE` | `/<endpoint>/entities` | `delete` | Delete a file from a collection folder |
 | `POST` | `/<endpoint>/render` | `render` | Render an entity in memory and return the bytes. The endpoint's `query` (if set) must accept the request entity. |
 
 **`GET /<endpoint>/entities`**
 
+Supports a Mongo-style query language (backed by [sift](https://www.npmjs.com/package/sift)) so the client can filter, sort, project, and paginate exactly the slice it needs — no shipping the whole catalog and filtering in JS.
+
 ```
-GET /api/public/entities                     → public endpoint, page 1
-GET /api/admin/entities?collection=documents → admin endpoint, filtered
-GET /api/public/entities?page=2&limit=25
+GET /api/public/entities                                    → all in scope, page 1
+GET /api/public/entities?meta.published=true&type=document  → equality on multiple fields
+GET /api/public/entities?meta.price.$gt=20&meta.price.$lt=80
+GET /api/public/entities?meta.tags.$in=blog,news
+GET /api/public/entities?meta.summary.$exists=true
+GET /api/public/entities?sort=-meta.date,meta.title         → desc by date, then asc by title
+GET /api/public/entities?fields=id,meta.title,meta.summary  → projection
+GET /api/public/entities?meta.price.$gt=20&sort=-meta.price&limit=10&skip=20
 ```
+
+Supported operators (URL form `<path>.$<op>=<value>`):
+
+| Operator | Example | Notes |
+|---|---|---|
+| `$eq` / `$ne` | `meta.published.$ne=true` | |
+| `$gt` / `$gte` / `$lt` / `$lte` | `meta.price.$gt=20` | numeric, string, ISO date all work |
+| `$in` / `$nin` | `meta.tags.$in=blog,news` | comma-separated |
+| `$exists` | `meta.summary.$exists=true` | |
+| `$regex` | `meta.title.$regex=^Quarterly` | |
+
+Reserved (non-filter) params: `page`, `limit`, `skip`, `sort`, `fields`.
+
+Type coercion on URL values: `true`/`false` → boolean, `null` → null, numeric strings → number, everything else stays string. For full type control use the POST endpoint below.
 
 Response envelope:
 ```json
@@ -516,6 +538,33 @@ Response envelope:
   "hasPrev": false
 }
 ```
+
+**`POST /<endpoint>/entities/query`**
+
+For richer queries that don't fit in a URL — `$and`/`$or`, nested operators, explicit types — POST a JSON body. Shape mirrors Mongo `find`:
+
+```json
+{
+  "filter": {
+    "$and": [
+      { "meta.published": true },
+      { "meta.date": { "$gte": "2025-01-01" } },
+      { "$or": [
+        { "meta.tags": { "$in": ["product"] } },
+        { "type": "category" }
+      ]}
+    ]
+  },
+  "sort":   { "meta.date": -1, "meta.title": 1 },
+  "fields": ["id", "meta.title", "meta.summary"],
+  "page":   1,
+  "limit":  20
+}
+```
+
+Use dotted keys (`"meta.price": { "$gt": 20 }`) — sift treats nested object literals as deep-equality, not path matches. Same as standard Mongo.
+
+The endpoint's configured `query` (in JS) still ANDs as the outer scope: a `public` endpoint restricted to published documents stays restricted, even if the client sends a filter that asks for drafts.
 
 **`PUT /<endpoint>/entities`**
 

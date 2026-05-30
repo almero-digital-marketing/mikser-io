@@ -494,3 +494,103 @@ describe('api plugin: per-endpoint auth + scope', () => {
         }
     })
 })
+
+// Verifies the sift-backed query features on /entities and the body-based
+// /entities/query route: comparison operators, $in, sort, projection, and
+// $and/$or composition. The endpoint's scope still ANDs as the outer filter.
+describe('api plugin: rich queries (GET operators + POST /entities/query)', () => {
+    async function mountWithEntities(entities, endpoints = { open: {} }) {
+        const { default: express } = await import('express')
+        const app = express()
+        const h = createHarness({
+            options: { app, workingFolder: '/tmp/mikser-rest-q', outputFolder: '/tmp/mikser-rest-q/out' },
+            config: { api: { endpoints } },
+            entities,
+        })
+        apiPlugin(h.core)
+        await h.runHook('loaded')
+        const server = await new Promise((resolve) => {
+            const s = app.listen(0, () => resolve(s))
+        })
+        return { server, port: server.address().port }
+    }
+
+    const FIXTURE = [
+        { id: '/a.md', type: 'document', meta: { price: 10,  published: true,  date: '2025-01-01', tags: ['x'] } },
+        { id: '/b.md', type: 'document', meta: { price: 50,  published: true,  date: '2025-06-01', tags: ['y', 'x'] } },
+        { id: '/c.md', type: 'document', meta: { price: 100, published: false, date: '2025-03-01', tags: ['z'] } },
+        { id: '/d.md', type: 'document', meta: { price: 25,  published: true,  date: '2024-12-31', tags: [] } },
+    ]
+
+    it('GET supports comparison operators ($gt, $lt) with type coercion', async () => {
+        const { server, port } = await mountWithEntities(FIXTURE)
+        try {
+            const res = await fetch(`http://127.0.0.1:${port}/api/open/entities?meta.price.$gt=20&meta.price.$lt=80`)
+            assert.equal(res.status, 200)
+            const body = await res.json()
+            assert.equal(body.total, 2)
+            assert.deepEqual(body.items.map(i => i.id).sort(), ['/b.md', '/d.md'])
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('GET supports sort=-field for descending and ?fields= for projection', async () => {
+        const { server, port } = await mountWithEntities(FIXTURE)
+        try {
+            const res = await fetch(`http://127.0.0.1:${port}/api/open/entities?sort=-meta.price&fields=id,meta.price&limit=2`)
+            assert.equal(res.status, 200)
+            const body = await res.json()
+            assert.equal(body.total, 4)
+            assert.deepEqual(body.items, [
+                { id: '/c.md', meta: { price: 100 } },
+                { id: '/b.md', meta: { price: 50 } },
+            ])
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('POST /entities/query supports $or, $in, and projection in one go', async () => {
+        const { server, port } = await mountWithEntities(FIXTURE)
+        try {
+            const res = await fetch(`http://127.0.0.1:${port}/api/open/entities/query`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({
+                    filter: {
+                        $or: [
+                            { 'meta.tags': { $in: ['z'] } },
+                            { 'meta.price': { $gte: 50 } },
+                        ],
+                    },
+                    sort: { 'meta.price': 1 },
+                    fields: ['id'],
+                }),
+            })
+            assert.equal(res.status, 200)
+            const body = await res.json()
+            // b (price 50, OR-match), c (tag z OR price 100), d is excluded
+            assert.deepEqual(body.items, [
+                { id: '/b.md' },
+                { id: '/c.md' },
+            ])
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('endpoint query scope ANDs with the request filter', async () => {
+        const { server, port } = await mountWithEntities(FIXTURE, {
+            public: { query: e => e.meta?.published === true, operations: ['list'] },
+        })
+        try {
+            const res = await fetch(`http://127.0.0.1:${port}/api/public/entities?meta.price.$gte=10&sort=meta.price`)
+            assert.equal(res.status, 200)
+            const body = await res.json()
+            assert.deepEqual(body.items.map(i => i.id), ['/a.md', '/d.md', '/b.md'])
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+})
