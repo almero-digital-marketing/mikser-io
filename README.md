@@ -4,7 +4,23 @@
 
 # Mikser
 
-Mikser is a content engine for Node.js built around a strict lifecycle, a composable plugin system, and direct control over every output. Every document, asset, and template flows through the same deterministic pipeline. Plugins hook in at any phase; nothing runs outside the cycle. It scales from a single markdown blog to a multi-language, multi-format publishing platform — and stays predictable in both directions.
+**Mikser is the content layer of your application.** Business logic, user accounts, transactions live in their own services; mikser handles the parts that *are* content — pages, docs, the published catalog, multi-format outputs. The SDKs are the seam between them.
+
+Built for Node.js around a strict lifecycle, a composable plugin system, and direct control over every output. Every document, asset, and template flows through the same deterministic pipeline. Plugins hook in at any phase; nothing runs outside the cycle. It scales from a single markdown blog to a multi-language, multi-format publishing platform — and stays predictable in both directions.
+
+## Where it fits
+
+Mikser is a focused component, not a backend. Think of it like a database in your stack: defined surface, content-shaped responsibilities, the app code lives separately and reaches in through a small typed interface.
+
+| | Strapi / Payload / Sanity / Contentful | Mikser as content layer |
+|---|---|---|
+| **Role** | "Be the backend" — content + relationships + sometimes business logic | One component of the app, specifically the content piece |
+| **Boundary** | Soft — they invite business logic into the CMS (computed fields, hooks, workflows) | Hard — files in, rendered output out; business logic isn't here |
+| **Coupling** | App tied to the CMS vendor | App owns business logic independently; the content source can be swapped |
+| **Storage** | Vendor's database, vendor's schema | Plain `.md` / `.yml` files on disk — diffable, portable, takeable on day one and year ten |
+| **Migration risk** | High when the vendor reinvents itself (Strapi v3→v4, etc.) | Content is files, business logic is yours — neither is exposed to the other's churn |
+
+Build mikser into the parts of your application that are content-shaped. Keep the rest where it belongs.
 
 ## Why mikser
 
@@ -21,6 +37,22 @@ Mikser is a content engine for Node.js built around a strict lifecycle, a compos
 **Library mode.** Mikser is also a library. `useRenderer`, `useCollection`, `findSimilar`, and direct lifecycle hooks let you embed the engine inside an existing Node app instead of running it as a CLI.
 
 **Open source.** MIT-licensed, on GitHub, no telemetry, no auth wall, no SaaS dependency. What you see is what runs.
+
+## Built for AI-assisted development
+
+Files-as-source isn't just a portability story — it makes the project unusually friendly to AI coding agents. Most setups lose time configuring an agent's access to the data: tokens, schemas, MCP servers, sandboxed query environments. Mikser sidesteps all of it because the content is text files the agent can already read with the tools it already has.
+
+**Zero infra friction for discovery.** An agent can `rg "type: product"` across the content tree to find every product doc in a second. No DB connection, no API token, no schema file to parse.
+
+**The schema emerges from examples, not a definition file.** Front-matter shows what fields exist *in the docs that exist*. Markdown + YAML are overwhelmingly well-represented in AI training data, so the model "speaks" them fluently and infers structure from real documents better than from a schema definition.
+
+**Determinism shortens the iteration loop.** Save a file → watcher fires → predictable rebuild. No DB triggers, no surprise cache invalidation, no API quotas. The agent's mental model of "what happens next" can be precise instead of probabilistic.
+
+**The SDK's `.d.ts` is the read-side contract.** When the agent writes frontend query code, the operator subset and envelope shape are right there in types — a step-change for code generation quality versus "go read the REST API docs."
+
+**Plugin-by-example.** Authoring a new plugin? There are 15+ existing ones in the same shape to pattern-match against. Convention is dense enough that new plugins look like the old ones without coaching.
+
+The honest caveat: this advantage is real on **content-shaped work** — adding pages, restructuring collections, generating new layouts, building frontends. It doesn't make mikser better for non-content tasks (concurrency bugs in the worker pool, database tuning elsewhere in your stack); those are plain Node debugging like anywhere else. The visibility advantage also degrades past ~10k documents — at that scale the agent queries via the SDK instead of grepping the tree, which is still good but less "see everything at once."
 
 ## Plugins on top of the engine
 
