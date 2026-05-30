@@ -57,6 +57,17 @@ The engine is what stays stable — the lifecycle, the catalog, the file-based c
 |---|---|
 | `decap` | Mounts [Decap CMS](https://decapcms.org/) inside the same Express server — admin UI + local proxy backend + bake-to-`out/` for static deploys (~150 lines, zero engine changes) |
 
+## Client SDKs
+
+The `api` and `vector` plugins are paired with small client-side SDKs so a frontend (or another Node app) can talk to a running mikser server without rolling its own `fetch` glue. Zero dependencies, runs in browsers / Node 18+ / Deno / Bun / Workers.
+
+| Package | For the plugin | What you get |
+|---|---|---|
+| [`mikser-io-sdk-api`](https://github.com/almero-digital-marketing/mikser-io-sdk-api) | `api` | `entities(name).list / query / urlFor / pages / update / delete / render` — Mongo-style filter operators backed by sift, sort, projection, pagination |
+| [`mikser-io-sdk-vector`](https://github.com/almero-digital-marketing/mikser-io-sdk-vector) | `vector` | `vector(storeName).findSimilar(text, { limit })` — semantic search hits with the original mapped object attached |
+
+Each SDK ships TypeScript declarations so client projects get autocomplete on filters, envelopes, and the `MikserError` thrown on non-2xx responses. Install only the one(s) a project needs.
+
 ## Quick Start
 
 ```bash
