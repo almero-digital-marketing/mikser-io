@@ -1,5 +1,7 @@
 # Architecture
 
+For the **why** behind these architectural choices — the load-bearing decisions and the reasoning that protects them — see [`decisions/`](./decisions/). This document describes the *what*; the ADRs describe the *why*. Read the ADRs before proposing a feature that pushes against an established constraint.
+
 ## Module Structure
 
 ```
