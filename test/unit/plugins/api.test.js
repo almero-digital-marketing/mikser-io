@@ -470,6 +470,61 @@ describe('api plugin: per-endpoint auth + scope', () => {
         }
     })
 
+    it('subscribe is opt-in for public endpoints — 403 by default', async () => {
+        // Public endpoint with default operations (['list']) — subscribe
+        // is NOT included unless explicitly listed. Each open SSE
+        // connection holds resources, so the safe default is to require
+        // opt-in.
+        const { server, port } = await mount({
+            endpoints: {
+                pub: {}, // public; defaults to ['list'] only
+            },
+        })
+        try {
+            const res = await fetch(`http://127.0.0.1:${port}/api/pub/entities/subscribe`)
+            assert.equal(res.status, 403)
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('subscribe opens an SSE stream and emits an init event when enabled', async () => {
+        const { server, port } = await mount({
+            endpoints: {
+                live: { operations: ['list', 'subscribe'] },
+            },
+        })
+        try {
+            const ac = new AbortController()
+            const res = await fetch(`http://127.0.0.1:${port}/api/live/entities/subscribe`, {
+                signal: ac.signal,
+            })
+            assert.equal(res.status, 200)
+            assert.match(res.headers.get('content-type') ?? '', /text\/event-stream/)
+
+            // Read just the first event block (init), then abort.
+            const reader = res.body.getReader()
+            const decoder = new TextDecoder()
+            let buffer = ''
+            let firstBlock = null
+            while (firstBlock == null) {
+                const { value, done } = await reader.read()
+                if (done) break
+                buffer += decoder.decode(value, { stream: true })
+                const sep = buffer.indexOf('\n\n')
+                if (sep >= 0) firstBlock = buffer.slice(0, sep)
+            }
+            ac.abort()
+
+            assert.ok(firstBlock, 'received at least one SSE event block')
+            assert.match(firstBlock, /event:\s*init/)
+            assert.match(firstBlock, /"subscriptionId"\s*:\s*"sub_/)
+            assert.match(firstBlock, /"endpoint"\s*:\s*"live"/)
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
     it('returns 401 when a token-gated endpoint receives no Authorization header', async () => {
         const { server, port } = await mount({
             endpoints: {

@@ -493,6 +493,7 @@ api: {
 |--------|------|-----------|-------------|
 | `GET` | `/<endpoint>/entities` | `list` | Paginated list with Mongo-style filter operators, sort, and field projection. The endpoint's `query` (if set) ANDs with the request filter. |
 | `POST` | `/<endpoint>/entities/query` | `list` | Same as above but body-based — for `$and`/`$or`, regex, or any filter that doesn't fit in a URL. |
+| `GET` | `/<endpoint>/entities/subscribe` | `subscribe` | Server-Sent Events stream — push create/update/delete events for matching entities as they change. |
 | `PUT` | `/<endpoint>/entities` | `update` | Write a file to a collection folder (triggers normal pipeline) |
 | `DELETE` | `/<endpoint>/entities` | `delete` | Delete a file from a collection folder |
 | `POST` | `/<endpoint>/render` | `render` | Render an entity in memory and return the bytes. The endpoint's `query` (if set) must accept the request entity. |
@@ -598,6 +599,51 @@ Writes content to a file in a collection folder. The file change is picked up by
 - `options.catalog: false` — prune the catalog row after render
 - `options.save: false` — skip the final disk write (bytes still in the response)
 
+**`GET /<endpoint>/entities/subscribe`**
+
+Open a Server-Sent Events stream that pushes change events for entities matching a filter. Same filter syntax as `GET /entities` (operator-suffixed URL params). The endpoint's `query` (if set) still ANDs as the outer scope.
+
+```
+GET /api/public/entities/subscribe?type=document&meta.published=true
+```
+
+Event stream:
+
+```
+event: init
+data: {"subscriptionId":"sub_...","endpoint":"public"}
+
+event: create
+data: {"id":"/documents/en/foo.md","entity":{...}}
+
+event: update
+data: {"id":"/documents/en/foo.md","entity":{...}}
+
+event: delete
+data: {"id":"/documents/en/foo.md"}
+
+event: heartbeat
+data: {}
+```
+
+Heartbeats fire every 25 seconds so idle proxies don't close the connection. On client disconnect (or AbortController abort) the server cleans up immediately.
+
+Compose with the list endpoint to get an initial snapshot, then stream forward changes:
+
+```js
+const { items } = await fetch('/api/public/entities/query', { ... }).then(r => r.json())
+items.forEach(addToView)
+
+const es = new EventSource('/api/public/entities/subscribe?type=document')
+es.addEventListener('create', ({ data }) => addToView(JSON.parse(data).entity))
+es.addEventListener('update', ({ data }) => updateInView(JSON.parse(data).entity))
+es.addEventListener('delete', ({ data }) => removeFromView(JSON.parse(data).id))
+```
+
+Or with the [`mikser-io-sdk-api`](https://github.com/almero-digital-marketing/mikser-io-sdk-api) `watch()` async iterator — fetch-based so it works in browsers, Node 18+, Deno, Bun, Workers.
+
+Events fire on **every** process cycle — both file-watcher–driven changes (`--watch`) and programmatic writes through `PUT /entities`. No second mechanism to wire up.
+
 **Authentication:**
 
 When an endpoint declares a `token`, every request to that endpoint must carry `Authorization: Bearer <token>`. Endpoints without a token are open. Each endpoint owns its own token — a leak only burns one endpoint's scope.
@@ -607,7 +653,9 @@ When an endpoint declares a `token`, every request to that endpoint must carry `
 | `token` set? | default `operations` |
 |---|---|
 | No (public) | `['list']` — read-only |
-| Yes (gated) | `['list', 'update', 'delete', 'render']` — full |
+| Yes (gated) | `['list', 'update', 'delete', 'render', 'subscribe']` — full |
+
+`subscribe` is excluded from the public default because each open connection has ongoing resource cost — public endpoints must explicitly opt in. Token-gated endpoints get it by default (token presence implies trust).
 
 Always overridable with explicit `operations`. A request to an operation outside the allowlist returns `403`; a missing/wrong token returns `401`.
 

@@ -180,11 +180,36 @@ export async function sendRenderOutput(res, output, entity) {
     return res.json(result)
 }
 
+// Subscription bookkeeping shared across all endpoints. Each entry holds
+// the live Express response, the compiled sift filter, the endpoint
+// scope, and a heartbeat timer. Per-cycle the onFinalized hook iterates
+// the journal and dispatches matching changes to every subscription.
+const subscriptions = new Map()
+let subscriptionCounter = 0
+
+function sseInit(res) {
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.setHeader('Cache-Control', 'no-cache, no-transform')
+    res.setHeader('Connection', 'keep-alive')
+    res.setHeader('X-Accel-Buffering', 'no')  // disable nginx buffering
+    if (typeof res.flushHeaders === 'function') res.flushHeaders()
+}
+
+function sseSend(res, eventName, payload) {
+    try {
+        res.write(`event: ${eventName}\n`)
+        res.write(`data: ${JSON.stringify(payload)}\n\n`)
+    } catch { /* connection dropped — cleanup runs via 'close' */ }
+}
+
 export default ({
     runtime,
     onLoaded,
+    onFinalize,
     useLogger,
+    useJournal,
     findEntities,
+    constants: { OPERATION },
 }) => {
     onLoaded(async () => {
         const logger = useLogger()
@@ -228,10 +253,13 @@ export default ({
             router.use(express.json())
 
             // Operations default to the safer shape when no token is set
-            // (read-only) and full access when token-gated. Explicit
+            // (read-only) and full access when token-gated. `subscribe`
+            // holds an open SSE connection per client — opt in for
+            // public endpoints; included in the token-gated default
+            // because tokens already gate the trust. Explicit
             // `operations` always wins.
             const defaultOps = ep.token
-                ? ['list', 'update', 'delete', 'render']
+                ? ['list', 'update', 'delete', 'render', 'subscribe']
                 : ['list']
             const allowedOps = new Set(ep.operations ?? defaultOps)
 
@@ -317,6 +345,46 @@ export default ({
                 }
             })
 
+            // GET /entities/subscribe — open an SSE stream. Each subsequent
+            // process cycle (file-watcher fired OR programmatic API write)
+            // emits create/update/delete events for entities matching the
+            // subscription's filter and the endpoint's scope. Heartbeats
+            // every 25s keep proxies happy. Connection close cleans up.
+            router.get('/entities/subscribe', allow('subscribe'), auth, (req, res) => {
+                let filterFn = null
+                try {
+                    const parsed = parseQueryString(req.query)
+                    if (Object.keys(parsed.filter).length) filterFn = sift(parsed.filter)
+                } catch (err) {
+                    return res.status(400).json({ error: `Invalid filter: ${err.message}` })
+                }
+
+                sseInit(res)
+                const subscriptionId = `sub_${Date.now()}_${++subscriptionCounter}`
+                sseSend(res, 'init', { subscriptionId, endpoint: name })
+
+                // Heartbeat — silent enough to not confuse the SDK but
+                // frequent enough that idle proxies don't kill the
+                // connection.
+                const heartbeat = setInterval(() => sseSend(res, 'heartbeat', {}), 25_000)
+                if (typeof heartbeat.unref === 'function') heartbeat.unref()
+
+                subscriptions.set(subscriptionId, {
+                    endpointName: name,
+                    scope: query,
+                    filter: filterFn,
+                    res,
+                })
+
+                req.on('close', () => {
+                    clearInterval(heartbeat)
+                    subscriptions.delete(subscriptionId)
+                    logger.debug('Api[%s] subscription closed: %s', name, subscriptionId)
+                })
+
+                logger.debug('Api[%s] subscription opened: %s', name, subscriptionId)
+            })
+
             router.put('/entities', allow('update'), auth, async (req, res) => {
                 try {
                     const { collection, relativePath, content = '' } = req.body
@@ -369,6 +437,41 @@ export default ({
             logger.info('Api endpoint mounted: %s/%s (ops=[%s] %s)',
                 base, name, [...allowedOps].join(','),
                 ep.token ? '[token]' : '[public]')
+        }
+    })
+
+    // Dispatcher: once per lifecycle cycle, walk the journal and push
+    // matching CREATE/UPDATE/DELETE events to every active subscription
+    // (regardless of which endpoint opened it). Each subscription has
+    // its own scope + filter; we apply both before sending. Empty when
+    // nothing's subscribed, so it costs ~nothing in normal builds.
+    //
+    // Hook onFinalize, NOT onFinalized — journal.js registers its own
+    // clearJournal callback on onFinalized at module load, which runs
+    // before plugin onFinalized hooks. By Finalize we still have the
+    // cycle's journal entries; by Finalized they're already gone.
+    onFinalize(async (signal) => {
+        if (!subscriptions.size) return
+        const logger = useLogger()
+        const evMap = {
+            [OPERATION.CREATE]: 'create',
+            [OPERATION.UPDATE]: 'update',
+            [OPERATION.DELETE]: 'delete',
+        }
+        for await (const { operation, entity } of useJournal(
+            'Api subscriptions',
+            [OPERATION.CREATE, OPERATION.UPDATE, OPERATION.DELETE],
+            signal,
+        )) {
+            for (const [subId, sub] of subscriptions) {
+                if (sub.scope && !sub.scope(entity)) continue
+                if (sub.filter && !sub.filter(entity)) continue
+                const payload = operation === OPERATION.DELETE
+                    ? { id: entity.id }
+                    : { id: entity.id, entity }
+                sseSend(sub.res, evMap[operation], payload)
+                logger.trace('Api subscription %s %s: %s', subId, evMap[operation], entity.id)
+            }
         }
     })
 }
