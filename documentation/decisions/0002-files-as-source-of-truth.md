@@ -41,7 +41,7 @@ No database holds primary content. The catalog (sqlite, under `runtimeFolder`) h
 - Per-document updates rewrite the whole file. Fine for human-paced editing; wrong shape for telemetry or high-frequency mutation.
 - Very large content sets (millions of documents) have filesystem limits. Sub-100k is comfortable; beyond that the filesystem becomes the bottleneck.
 
-These costs are accepted because they're the right cost shape for *content-shaped* workloads (see ADR-0001). High-frequency mutation belongs in a different system (whitebox).
+These costs are accepted because they're the right cost shape for *content-shaped* workloads (see ADR-0001). High-frequency mutation belongs in a different system entirely — not in mikser.
 
 ## Examples in the codebase
 

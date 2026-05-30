@@ -25,7 +25,7 @@ Business logic lives in separate services owned by the application:
 - User accounts, sessions, transactions
 - Real-time application features (chat, presence, collaboration state)
 - Custom workflows tied to business rules
-- Customer data, identity, analytics (see ADR-0004 — these go in whitebox)
+- Customer data, identity, analytics (these belong in dedicated systems — see ADR-0004 for the integration model)
 
 The SDKs (`mikser-io-sdk-api`, `mikser-io-sdk-vector`) are the seam between the two layers.
 
@@ -46,7 +46,7 @@ The SDKs (`mikser-io-sdk-api`, `mikser-io-sdk-vector`) are the seam between the 
 - No user accounts. The api plugin's only auth model is per-endpoint bearer tokens — for gating, not for identity.
 - No transactional database for primary content. Files are the substrate (see ADR-0002).
 - No business-rule plugins. There's no `mikser-io-discount-engine` or `mikser-io-loyalty-points`.
-- Form submissions, comments, customer events all belong in whitebox, not mikser, even though they have a content-shaped HTML surface. The HTML *renders* in mikser; the data *lives* in whitebox.
+- Form submissions, comments, customer events all belong in a dedicated customer-data system, not mikser, even though they have a content-shaped HTML surface. The HTML *renders* in mikser; the data *lives* elsewhere.
 
 ## Watch for drift
 

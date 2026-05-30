@@ -29,4 +29,4 @@ Decisions don't expire. They get **superseded** when we learn enough to change t
 | [0001](./0001-content-layer-not-the-app.md)         | Mikser is the content layer of the application, not the app                | Accepted |
 | [0002](./0002-files-as-source-of-truth.md)          | Files are the source of truth for content                                  | Accepted |
 | [0003](./0003-plugins-independent-engine-stable.md) | Plugins are independent packages; the engine doesn't grow                  | Accepted |
-| [0004](./0004-no-direct-integration-agency-tools.md) | No direct integration with other agency tools — compose via protocols only | Accepted |
+| [0004](./0004-compose-via-protocols.md) | Compose with external systems via clean protocols, not shared code         | Accepted |
