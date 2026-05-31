@@ -289,6 +289,7 @@ export default ({
             const { render } = useRenderer(runtime, { defaultTimeout: renderTimeout })
 
             router.get('/entities', allow('list'), auth, async (req, res) => {
+                const t0 = Date.now()
                 try {
                     const parsed = parseQueryString(req.query)
                     const limit = Math.min(100, Math.max(1, parsed.limit ?? pageSize))
@@ -311,8 +312,9 @@ export default ({
                         hasNext: skip + limit < total,
                         hasPrev: skip > 0,
                     })
+                    logger.trace('Api[%s] list %dms (%d/%d items)', name, Date.now() - t0, items.length, total)
                 } catch (err) {
-                    logger.error('Api[%s] list error: %s', name, err.message)
+                    logger.error('Api[%s] list error (%dms): %s', name, Date.now() - t0, err.message)
                     res.status(500).json({ error: err.message })
                 }
             })
@@ -321,6 +323,7 @@ export default ({
             // doesn't fit cleanly in a URL: $and/$or, nested operators,
             // regex, projections, etc. Same shape as a Mongo find.
             router.post('/entities/query', allow('list'), auth, async (req, res) => {
+                const t0 = Date.now()
                 try {
                     const { filter = {}, sort, fields, page: rawPage = 1, limit: rawLimit, skip: rawSkip } = req.body ?? {}
                     const limit = Math.min(100, Math.max(1, rawLimit ?? pageSize))
@@ -339,8 +342,9 @@ export default ({
                         hasNext: skip + limit < total,
                         hasPrev: skip > 0,
                     })
+                    logger.trace('Api[%s] query %dms (%d/%d items)', name, Date.now() - t0, items.length, total)
                 } catch (err) {
-                    logger.error('Api[%s] query error: %s', name, err.message)
+                    logger.error('Api[%s] query error (%dms): %s', name, Date.now() - t0, err.message)
                     res.status(500).json({ error: err.message })
                 }
             })
