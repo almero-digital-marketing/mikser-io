@@ -58,6 +58,8 @@ Files-as-source isn't just a portability story — it makes the project unusuall
 
 **Plugin-by-example.** Authoring a new plugin? There are 15+ existing ones in the same shape to pattern-match against. Convention is dense enough that new plugins look like the old ones without coaching.
 
+**One-shot bootstrap via Claude Code.** The [`mikser-io-claude-plugin`](https://github.com/almero-digital-marketing/mikser-io-claude-plugin) wraps the setup story above into a single skill. Run `/plugin add almero-digital-marketing/mikser-io-claude-plugin` once in Claude Code, then in any Vue 3, React, or SvelteKit project — or in a blank directory — say "add mikser to this app." It detects the framework (or scaffolds a fresh starter via `create-vite` / `sv create`), wires the matching framework SDK, composes with your existing router rather than replacing it, and optionally lays down a `mikser-content/` sibling folder with Zod schemas and starter documents so the backend works on first run.
+
 The honest caveat: this advantage is real on **content-shaped work** — adding pages, restructuring collections, generating new layouts, building frontends. It doesn't make mikser better for non-content tasks (concurrency bugs in the worker pool, database tuning elsewhere in your stack); those are plain Node debugging like anywhere else. The visibility advantage also degrades past ~10k documents — at that scale the agent queries via the SDK instead of grepping the tree, which is still good but less "see everything at once."
 
 ## Plugins on top of the engine
