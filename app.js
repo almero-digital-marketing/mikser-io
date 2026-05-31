@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { setup } from "./index.js"
 
 async function main() {
