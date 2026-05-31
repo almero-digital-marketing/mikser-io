@@ -4,9 +4,13 @@
 
 # Mikser
 
-**Mikser is the content layer of your application.** Business logic, user accounts, transactions live in their own services; mikser handles the parts that *are* content — pages, docs, the published catalog, multi-format outputs. The SDKs are the seam between them.
+**Mikser is the content layer of your application.** Business logic, user accounts, transactions live in their own services; mikser handles the parts that *are* content — pages, docs, the published catalog, multi-format outputs. [Vue](https://github.com/almero-digital-marketing/mikser-io-sdk-vue), [React](https://github.com/almero-digital-marketing/mikser-io-sdk-react), and [Svelte](https://github.com/almero-digital-marketing/mikser-io-sdk-svelte) SDKs are the seam between them — same surface across all three (`useDocument`, `useDocuments`, multilingual `useHref`, live SSE updates), each in its framework's idiomatic shape.
 
-Built for Node.js around a strict lifecycle, a composable plugin system, and direct control over every output. Every document, asset, and template flows through the same deterministic pipeline. Plugins hook in at any phase; nothing runs outside the cycle. It scales from a single markdown blog to a multi-language, multi-format publishing platform — and stays predictable in both directions.
+Built for Node.js around a strict lifecycle, a composable plugin system, and direct control over every output. Every document, asset, and template flows through the same deterministic pipeline. Plugins hook in at any phase; nothing runs outside the cycle. It scales from a single markdown blog to a multi-language, multi-format publishing platform with image / video / AI pipelines, live SSE-driven editors, semantic search, and typed frontend contracts — and stays predictable in both directions.
+
+It's MIT-licensed, runs on Node 18+, has zero hosted dependencies, and the entire content tree it manages is a folder of `.md` and `.yml` files you can copy, diff, and version-control. **The portability promise is the architecture, not a feature.**
+
+> **New to mikser?** Read the [Architecture Overview](./documentation/overview.md) — one document, end-to-end walkthrough of how a file becomes a deployed page across all twenty lifecycle phases. It's the doc most projects need first.
 
 ## Where it fits
 
@@ -29,6 +33,8 @@ Build mikser into the parts of your application that are content-shaped. Keep th
 **Incremental builds that scale.** Mikser tracks every entity in a journal. When a file changes, only the affected entities re-process — not the whole site graph. On 10k+ documents this dramatically outpaces tools that rebuild more on every change.
 
 **Concurrent rendering.** Renders fan out across a worker pool that keeps every CPU core hot. Multi-format outputs (HTML, PDF, MJML email, etc.) generate in parallel from the same source.
+
+**Image, video, and AI pipelines authored as plugins — not configured.** The `assets` plugin runs user-written preset modules over binary inputs. A preset is a plain Node module: ~10 lines around `sharp` resize an image, ~10 lines around `fluent-ffmpeg` transcode a video, ~30 lines around the Replicate API run an AI upscaler. The pipeline isn't a fixed menu of operations — it's whatever Node can call. Most SSGs cap your asset processing at "resize and convert format." Mikser caps it at "what can Node do." Compose with the `resources` plugin and your DAM, CDN, or company content server becomes an upstream input — uploaded files end up transcoded, watermarked, AI-enhanced, and deployed without manual handoff. See [the assets / resources docs](./documentation/plugins.md#assets) for end-to-end examples.
 
 **One lifecycle, everything composes.** Plugins hook into 20+ named lifecycle phases. A search-indexing plugin shares the same journal iteration as an email-rendering plugin and a PDF-postprocessing plugin — no glue code, no orchestration layer. The engine doesn't know which plugins are loaded; plugins don't have to know about each other.
 
@@ -80,7 +86,8 @@ The engine is what stays stable — the lifecycle, the catalog, the file-based c
 
 | Plugin | What it does |
 |---|---|
-| `vector` | OpenAI embeddings + semantic search (sqlite-vec or pgvector) |
+| [`mikser-io-vector`](https://github.com/almero-digital-marketing/mikser-io-vector) | OpenAI embeddings + semantic search (sqlite-vec or pgvector) |
+| [`mikser-io-plugin-schemas`](https://github.com/almero-digital-marketing/mikser-io-plugin-schemas) | Zod-backed entity validation + auto-generated TypeScript declarations for the SDK |
 | `archive`, `mapper`, `live`, `aml` | Specialty integrations |
 
 **Integration probes** — wrap a substantial external project as a plugin to confirm the lifecycle is open enough to host it without core changes. Treat these as feasibility evidence, not as a statement about where mikser is heading:
@@ -91,14 +98,24 @@ The engine is what stays stable — the lifecycle, the catalog, the file-based c
 
 ## Client SDKs
 
-The `api` and `vector` plugins are paired with small client-side SDKs so a frontend (or another Node app) can talk to a running mikser server without rolling its own `fetch` glue. Zero dependencies, runs in browsers / Node 18+ / Deno / Bun / Workers.
+The `api`, `vector`, and `schemas` plugins are paired with client-side SDKs so a frontend (or another Node app) can talk to a running mikser server without rolling its own `fetch` glue or type contracts. Zero dependencies, runs in browsers / Node 18+ / Deno / Bun / Workers.
+
+**Transport-level:**
 
 | Package | For the plugin | What you get |
 |---|---|---|
-| [`mikser-io-sdk-api`](https://github.com/almero-digital-marketing/mikser-io-sdk-api) | `api` | `entities(name).list / query / urlFor / pages / update / delete / render` — Mongo-style filter operators backed by sift, sort, projection, pagination |
+| [`mikser-io-sdk-api`](https://github.com/almero-digital-marketing/mikser-io-sdk-api) | `api` | `entities(name).list / query / urlFor / pages / update / delete / render / live` — Mongo-style filter operators backed by sift, sort, projection, pagination, SSE-driven live subscriptions |
 | [`mikser-io-sdk-vector`](https://github.com/almero-digital-marketing/mikser-io-sdk-vector) | `vector` | `vector(storeName).findSimilar(text, { limit })` — semantic search hits with the original mapped object attached |
 
-Each SDK ships TypeScript declarations so client projects get autocomplete on filters, envelopes, and the `MikserError` thrown on non-2xx responses. Install only the one(s) a project needs.
+**Framework integrations** — all three wrap `mikser-io-sdk-api` in framework-idiomatic shapes. Same surface: `useDocument` / `useDocuments` live data, multilingual `useHref` / `useAlternates`, asset resolution via `useAsset`, generic on entity type so `mikser-io-plugin-schemas`-emitted types compose:
+
+| Package | Framework | Notes |
+|---|---|---|
+| [`mikser-io-sdk-vue`](https://github.com/almero-digital-marketing/mikser-io-sdk-vue) | Vue 3 | Composables, vue-router integration (`createMikserRouter`, `generateMikserRoutes`), provide/inject for the client. |
+| [`mikser-io-sdk-react`](https://github.com/almero-digital-marketing/mikser-io-sdk-react) | React 18+ / 19+ | Hooks, `<MikserProvider>` Context, React Router v6+ integration via `useMikserRoutes` → `useRoutes()`. |
+| [`mikser-io-sdk-svelte`](https://github.com/almero-digital-marketing/mikser-io-sdk-svelte) | Svelte 5 (runes) | `$state` / `$effect` reactives, SvelteKit-friendly `generateMikserRoutes` for `entries()` prerender, `useMikserPages` for live nav. |
+
+Each SDK ships TypeScript declarations so client projects get autocomplete on filters, envelopes, and the `MikserError` thrown on non-2xx responses. Pair any of the framework SDKs with the `entities.d.ts` emitted by `mikser-io-plugin-schemas` for typed entity meta per layout. Install only the one(s) a project needs.
 
 ## Quick Start
 
@@ -130,19 +147,43 @@ npx mikser --server     # build + serve at :3001
 - **Runtime Singleton** — A plain module-level object holds all global state and coordinates the lifecycle. The ES module cache guarantees every importer gets the same instance.
 - **Watch Mode** — In watch mode, file changes trigger incremental re-processing without restarting.
 
+## What you can build with it
+
+The shape mikser fits cleanly:
+
+- **Marketing sites with editorial teams** — content authors work in files (via their editor, a Git client, or `mikser-io-decap`), engineers ship features without negotiating with a CMS schema, the site stays portable.
+- **Multilingual publishing platforms** — the `useHref()` / `useAlternates()` pattern in `sdk-vue` decouples logical references from per-locale URLs. One source tree, many language deployments.
+- **Content-heavy product catalogues** — `documents` + `mikser-io-plugin-schemas` + `data` plugin + a Vue frontend = typed product listings with live updates, semantic search via `vector`, and static-CDN-friendly JSON snapshots all at once.
+- **AI-augmented media pipelines** — `assets` plugin presets call out to Replicate / OpenAI / local models to upscale images, transcribe audio, transcode video. The pipeline is JS code, so anything Node can do is in scope.
+- **Mixed-output publishing** — the same source document renders to HTML, PDF (via `post-pdf`), MJML email (via `post-mjml`), and JSON snapshots. One catalog, many output formats, all concurrent.
+- **Headless backends for static frontends** — pair the `api` plugin with `sdk-api` for SSE-driven live frontends; pair the `data` plugin output with any static host for pre-rendered consumption.
+
+The shape mikser **doesn't** fit cleanly: anything with non-technical content authors who can't or won't work with files, anything with non-content business logic at the core, anything needing multi-tenant / per-user auth. Those aren't bugs — they're outside the design envelope. See [`decisions/0001-content-layer-not-the-app.md`](./documentation/decisions/0001-content-layer-not-the-app.md) for the explicit scope decision.
+
+## Engineering discipline
+
+A few things this project takes seriously:
+
+- **ADRs for load-bearing decisions.** The [`decisions/`](./documentation/decisions/) folder names which choices are structural — files-as-source, journal+catalog split, plugin-as-factory, compose-via-protocols — and explains what protects them. Read those before proposing a feature that pushes against one.
+- **Engine stability, plugin churn.** The 15+ plugins in the ecosystem add capability without core changes. The integration probes (e.g. `decap`, mounting a third-party CMS in ~150 lines) are deliberate evidence that the extension model holds.
+- **Deterministic builds.** The journal is the synchronization primitive. There's no event-passing layer, no IoC container, no plugin orchestrator. The engine knows how to fire phases in order; everything else falls out of that.
+- **The mental model is one document.** The [Architecture Overview](./documentation/overview.md) is one read for the full top-to-bottom picture. The reference docs exist for lookup; the overview exists for comprehension.
+
 ## Documentation Index
 
 | Document                                              | Audience           | Description                                        |
 | ----------------------------------------------------- | ------------------ | -------------------------------------------------- |
+| [Architecture Overview](./documentation/overview.md)  | Everyone           | **Start here.** End-to-end walkthrough of how a file becomes a deployed page across all lifecycle phases. |
 | [Getting Started](./documentation/getting-started.md) | Users              | Installation, first project, basic usage           |
 | [Configuration](./documentation/configuration.md)     | Users              | All CLI options and config file reference          |
 | [Lifecycle](./documentation/lifecycle.md)             | Users & Developers | Complete lifecycle phases and hook system          |
-| [Plugins](./documentation/plugins.md)                 | Users & Developers | Built-in plugins, writing custom plugins           |
+| [Plugins](./documentation/plugins.md)                 | Users & Developers | Built-in plugins, writing custom plugins, the assets / resources / AI pipeline |
 | [Entities](./documentation/entities.md)               | Users & Developers | Entity model, operations, journal, catalog         |
 | [Rendering](./documentation/rendering.md)             | Users & Developers | Render pipeline, render plugins, render modes      |
 | [Watch Mode](./documentation/watch-mode.md)           | Users              | File watching, scheduled tasks, incremental builds |
-| [Architecture](./documentation/architecture.md)       | Developers         | System design, module structure, extension points  |
+| [Architecture](./documentation/architecture.md)       | Developers         | Module-level reference — what's in each file       |
 | [API Reference](./documentation/api-reference.md)     | Developers         | Complete public API reference                      |
+| [Decisions (ADRs)](./documentation/decisions/)        | Developers         | Load-bearing architectural choices and what protects them |
 
 ## License
 

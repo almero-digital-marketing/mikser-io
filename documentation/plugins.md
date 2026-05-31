@@ -244,63 +244,287 @@ Cross-directory auto-matching is intentionally not supported — pair `posts/art
 
 ### `assets`
 
-Transforms images and other binary assets through preset processors.
+The assets plugin runs **user-authored preset modules** over binary inputs (images, video, audio, anything) and writes processed outputs. Each preset is a plain Node module — whatever you can call from Node, you can run as a build step. No DSL, no constrained options bag, no vendor pipeline to fight with.
 
-**Config:**
+That makes the assets plugin **the most powerful primitive in mikser**: an open-ended build-time processing layer with full Node capabilities. Image resizing with sharp, video transcoding with ffmpeg, AI upscaling via Replicate, watermarking with canvas, custom multi-output pipelines composed across all of the above — each is a preset module. The plugin doesn't decide what's possible; the preset does.
+
+#### Config
+
 ```js
 assets: {
-  assetsFolder: 'assets',      // default: 'assets'
-  outputFolder: '',            // default: root
-  presets: {
-    'thumbnail': ['@/images/*'],
-    'hero': ['@/images/hero-*']
-  }
+    assetsFolder: 'assets',         // working folder for presets — default 'assets'
+    outputFolder: 'public',         // where the processed outputs land — default root
+
+    // Each preset name maps to a list of source globs. A source matches
+    // multiple presets if needed (one image → thumbnail + hero + og-card).
+    presets: {
+        thumbnail: ['/files/images/*.{jpg,png}',  '/resources/**/*.{jpg,png}'],
+        hero:      ['/files/images/hero-*.jpg'],
+        'video-web': ['/files/videos/*.mp4',       '/resources/**/*.mp4'],
+        'image-2x': ['/files/images/*.jpg'],
+        upscaled:  ['/files/photos/raw-*.jpg'],
+    },
 }
 ```
 
-**Preset modules** (placed in your presets folder as `.js` files):
+`presets/<name>.js` next to your `mikser.config.js` is the preset module for that name.
+
+#### Preset module shape
+
+A preset is a default-exported async function. It receives the entity being processed (with `source`, `destination`, `preset`, `name`, etc.), runs whatever code it needs, and resolves (or rejects) when done.
 
 ```js
-// presets/thumbnail.js
-export const revision = 1      // Increment to force re-render
-export const format = 'webp'   // Output format
-export const options = { width: 300 }
+export const revision = 1     // bump to force re-render (cache-bust)
+export const format = 'webp'  // output format hint (used in the destination filename)
 
 export default async ({ entity, runtime, logger }) => {
-  // Transform the asset — return the output file path
-  const outputPath = entity.destination
-  await sharp(entity.uri).resize(300).webp().toFile(outputPath)
-  return outputPath
+    // entity.source       — input file on disk
+    // entity.destination  — where to write the result
+    // entity.preset       — config of the matching preset (name, source, options)
+    // entity.name         — original entity name (e.g. '/files/images/hero.jpg')
+    // runtime / logger    — mikser context, including runtime.options for paths
 }
 ```
 
-**Watch support:** Yes (watches presets folder).
+That's the whole contract. Three real examples follow.
+
+#### Example 1 — Video transcoding via ffmpeg
+
+A 720×1080 portrait MP4 at 600kbps for the web. fluent-ffmpeg streams progress events back into mikser's logger so the build progress bar reflects encoder progress in real time.
+
+```js
+// presets/video-web.js
+import ffmpeg from 'fluent-ffmpeg'
+
+export const revision = 7
+export const format = 'mp4'
+
+export default ({ entity: { name, source, destination, preset }, logger }) => {
+    return new Promise((resolve, reject) => {
+        ffmpeg(source)
+            .videoCodec('libx264')
+            .size('810x1080')
+            .videoBitrate(600)
+            .outputOptions('-strict -2')
+            .on('progress', ({ percent }) =>
+                logger.trace(`Progress: [${preset.name}] ${name} ${Math.round(percent)}%`))
+            .on('error', reject)
+            .on('end', resolve)
+            .save(destination)
+    })
+}
+```
+
+10 lines of glue around ffmpeg. Every published video in the catalog gets transcoded; rebuilds skip unchanged inputs because the journal tracks file mtimes; bumping `revision` re-encodes everything (useful when you change the bitrate).
+
+#### Example 2 — Image variants via sharp
+
+Resize + format negotiation. Most projects want srcset variants in WebP and AVIF; this preset emits both with a single sharp pipeline.
+
+```js
+// presets/image-2x.js
+import sharp from 'sharp'
+import { dirname, basename, extname, join } from 'node:path'
+import { mkdir } from 'node:fs/promises'
+
+export const revision = 3
+
+export default async ({ entity: { source, destination }, logger }) => {
+    const dir   = dirname(destination)
+    const stem  = basename(destination, extname(destination))
+    await mkdir(dir, { recursive: true })
+
+    const pipeline = sharp(source).rotate()       // honor EXIF orientation
+    // 2× variants for each format
+    await Promise.all([
+        pipeline.clone().resize({ width: 1600 }).webp({ quality: 85 }).toFile(join(dir, `${stem}@2x.webp`)),
+        pipeline.clone().resize({ width: 1600 }).avif({ quality: 60 }).toFile(join(dir, `${stem}@2x.avif`)),
+        pipeline.clone().resize({ width: 800  }).webp({ quality: 85 }).toFile(join(dir, `${stem}.webp`)),
+        pipeline.clone().resize({ width: 800  }).avif({ quality: 60 }).toFile(join(dir, `${stem}.avif`)),
+    ])
+    logger.trace('image-2x emitted 4 variants for %s', source)
+}
+```
+
+One preset, four output files per input image. The render-href plugin can then rewrite `<img src="hero.jpg">` to the `@2x.webp` URL with a fallback `<source>` chain — but that's a render-time concern, not the asset plugin's.
+
+#### Example 3 — AI enhancement via Replicate
+
+The interesting one. Hand a raw photo to a model on Replicate (here, an image upscaler), poll for completion, fetch the result, write it to disk. The preset is a normal Node module — `fetch` is just `fetch`, no special bridging.
+
+```js
+// presets/upscaled.js
+import { writeFile } from 'node:fs/promises'
+
+export const revision = 2
+export const format = 'jpg'
+
+const REPLICATE_MODEL = 'nightmareai/real-esrgan'
+const REPLICATE_VERSION = '...'   // pin a model version
+
+export default async ({ entity: { source, destination }, logger }) => {
+    // 1. Upload source — Replicate accepts a public URL or base64 data URI
+    const data = await readFile(source)
+    const dataUri = `data:image/jpeg;base64,${data.toString('base64')}`
+
+    // 2. Kick off the prediction
+    const start = await fetch('https://api.replicate.com/v1/predictions', {
+        method: 'POST',
+        headers: {
+            'authorization': `Token ${process.env.REPLICATE_TOKEN}`,
+            'content-type':  'application/json',
+        },
+        body: JSON.stringify({
+            version: REPLICATE_VERSION,
+            input:   { image: dataUri, scale: 4 },
+        }),
+    }).then(r => r.json())
+
+    // 3. Poll until succeeded
+    let prediction = start
+    while (prediction.status === 'starting' || prediction.status === 'processing') {
+        await new Promise(r => setTimeout(r, 1500))
+        prediction = await fetch(start.urls.get, {
+            headers: { authorization: `Token ${process.env.REPLICATE_TOKEN}` },
+        }).then(r => r.json())
+        logger.trace('replicate %s: %s', start.id, prediction.status)
+    }
+    if (prediction.status !== 'succeeded') {
+        throw new Error(`Replicate failed: ${prediction.error}`)
+    }
+
+    // 4. Download the result and write it where mikser expects
+    const buffer = Buffer.from(await fetch(prediction.output).then(r => r.arrayBuffer()))
+    await writeFile(destination, buffer)
+}
+```
+
+What's unique here is that **none of this required a plugin to mikser**. The preset *is* the plugin code. You can call any third-party service, run any local model (via `@xenova/transformers`, llama.cpp, ONNX runtime, whatever), shell out to anything (`child_process` to a custom binary), or compose multiple steps:
+
+```js
+// presets/hero-deluxe.js — multi-step pipeline
+import sharp from 'sharp'
+import { upscaleViaReplicate } from './_replicate.js'
+import { applyWatermark } from './_watermark.js'
+
+export const revision = 1
+export default async ({ entity: { source, destination } }) => {
+    const upscaled  = await upscaleViaReplicate(source)
+    const watermark = await applyWatermark(upscaled, { text: '© Acme Co 2026' })
+    await sharp(watermark).resize({ width: 2400 }).avif({ quality: 70 }).toFile(destination)
+}
+```
+
+This is the property no other SSG / CMS exposes at this level. Astro's `<Image>` resizes; that's it. Hugo's image processing has a fixed set of operations. Sanity's image CDN runs the transforms it decided to support. mikser's preset is whatever you write — including operations that don't exist anywhere else (upscaling specific to your domain, watermarks driven by per-image rules, multi-format outputs with vendor-specific encoders).
+
+#### Composition with `resources`
+
+The assets plugin processes whatever's on disk. Source files don't have to start in your repo — the **resources plugin** (next section) pulls them from external systems (company content servers, S3, vendor APIs) into the working folder so assets can then process them. That composition is where the "advanced pipeline" idea pays off — see the end-of-section example for the full chain.
+
+#### Watch support
+
+Yes — the plugin watches both the source files and the preset modules. Editing a preset re-processes every input that matches it; editing a source re-processes just that input.
 
 ---
 
 ### `resources`
 
-Downloads and caches external CDN resources locally.
+The resources plugin pulls **external files** into the build so the rest of the pipeline can treat them like local content. It scans entity bodies for URLs that match configured "libraries," downloads each matching URL into the resources folder, and exposes those files to subsequent plugins.
 
-**Config:**
+Two things compose with this:
+
+- The **assets plugin** can target `resources/**` in its preset globs — so an externally-hosted MP4 ends up transcoded the same way a locally-committed one would.
+- Render templates get `runtime.resource(url)` to rewrite the original URL to its local (cached, deployed-with-the-site) counterpart.
+
+#### Config
+
 ```js
 resources: {
-  resourcesFolder: 'resources',
-  outputFolder: '',
-  libraries: {
-    'bootstrap': {
-      url: 'https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css',
-      match: 'cdn.jsdelivr.net/npm/bootstrap'
-    }
-  }
+    resourcesFolder: 'resources',   // working folder — default 'resources'
+    outputFolder: '',               // mirror into output — default root
+
+    libraries: {
+        // Public CDN — third-party stylesheet, downloaded once and served from your origin
+        bootstrap: {
+            url:   'https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css',
+            match: 'cdn.jsdelivr.net/npm/bootstrap',
+        },
+
+        // Company DAM — anything referenced from your content server ends up
+        // on disk so the assets plugin can pick it up.
+        'company-media': {
+            base:  'https://media.acme.internal/',
+            match: 'media.acme.internal',
+            // Optional auth — runs in Node so any HTTP-shaped credential works
+            headers: { authorization: `Bearer ${process.env.DAM_TOKEN}` },
+        },
+    },
 }
 ```
 
-**What it does:**
-1. Scans entity content for URLs matching `libraries[*].match`
-2. Downloads the resource to `resourcesFolder/libraryName/`
-3. Symlinks the folder into the output
-4. Makes `runtime.resource(url)` available in render templates for URL mapping
+#### What it does
+
+1. **Scan** — walks loaded entities and finds URL references matching each library's `match` pattern.
+2. **Download** — fetches each match into `resourcesFolder/<libraryName>/<path>`, with the original URL path preserved. Existing files are cached by URL + mtime; re-runs only refetch changed files.
+3. **Expose** — the downloaded files now live in the working folder; assets/render/catalog plugins see them as if they'd been committed to the repo.
+4. **Rewrite** — `runtime.resource(url)` returns the local URL for a given source URL, for use inside render templates: `<link rel="stylesheet" href="${runtime.resource('https://cdn.jsdelivr.net/.../bootstrap.min.css')}">`.
+
+---
+
+### End-to-end pipeline composition
+
+The point of separating `resources` and `assets` is that they compose. A common pattern: editorial team uploads videos to a DAM, content authors reference them by URL in markdown front-matter, the build pulls them in and transcodes them into web-friendly formats — no manual handoff.
+
+```md
+---
+title: Spring Collection 2026
+layout: campaign
+meta:
+  hero: https://media.acme.internal/campaigns/spring-2026/hero.mp4
+---
+```
+
+With this config:
+
+```js
+// mikser.config.js
+export default {
+    plugins: ['files', 'resources', 'assets', 'catalog', 'render', 'api'],
+
+    resources: {
+        libraries: {
+            'company-media': {
+                base:  'https://media.acme.internal/',
+                match: 'media.acme.internal',
+                headers: { authorization: `Bearer ${process.env.DAM_TOKEN}` },
+            },
+        },
+    },
+
+    assets: {
+        presets: {
+            'video-web': ['/resources/company-media/**/*.mp4'],
+            poster:     ['/resources/company-media/**/*.mp4'],
+        },
+    },
+}
+```
+
+…the build performs:
+
+```
+files       → loads the markdown, surfaces meta.hero as a URL string
+resources   → matches media.acme.internal, downloads hero.mp4 → resources/company-media/campaigns/spring-2026/hero.mp4
+assets      → matches /resources/.../hero.mp4 against the video-web preset → transcodes via ffmpeg
+              → matches the same input against the poster preset → extracts a JPEG frame via a sharp/ffmpeg preset
+catalog     → registers the transcoded mp4 and the poster jpg as asset entities
+render      → page templates pull the asset URL via the SDK or runtime.urlFor
+api / data  → ships everything to clients via SSE + JSON
+```
+
+A content editor uploaded a file to a DAM. The deployment site is serving a transcoded, poster-framed, properly-sized version. Nobody manually exported anything; the next deploy will re-process automatically if either the source or the preset changes.
+
+This is what makes assets + resources together unusual: **the pipeline is bounded only by what you can write in a Node module**, and the inputs to that pipeline can come from anywhere your build has network access to.
 
 ---
 
