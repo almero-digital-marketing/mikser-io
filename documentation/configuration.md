@@ -158,7 +158,7 @@ export default {
 ```js
 export default {
   data: {
-    dataFolder: 'api',          // Output folder for JSON files
+    dataFolder: 'data',         // Output folder for JSON files. Default: 'data'
 
     // Export individual entities to JSON
     entities: {
@@ -183,35 +183,6 @@ export default {
         query: entity => entity.collection === 'documents',
         map: entity => ({ id: entity.id, title: entity.meta.title })
       }
-    }
-  }
-}
-```
-
-### `api`
-
-```js
-export default {
-  api: {
-    posts: {
-      collection: 'posts',
-      type: 'post',
-      uri: 'https://api.example.com/posts',
-      
-      // Function to fetch all items (returns array)
-      readMany: async (uri) => {
-        const res = await fetch(uri)
-        return res.json()
-      },
-      
-      // Function to fetch a single item
-      readOne: async (uri, id) => {
-        const res = await fetch(`${uri}/${id}`)
-        return res.json()
-      },
-      
-      // Cron schedule for automatic refresh
-      cron: '0 * * * *'  // Every hour
     }
   }
 }
@@ -292,22 +263,71 @@ export default {
 
 ### `api`
 
-The api plugin mounts its routes onto an existing Express app — it does
-**not** create one. Provide the app either via the `--server` CLI flag
-(engine creates one) or by passing `app` to `setup()` programmatically.
-If neither is in place when the plugin loads, it fails fast with an
+The api plugin exposes the catalog over HTTP via one or more **named
+endpoints**, each with its own query scope, allowed operations, and
+optional bearer token. Endpoints mount under `<base>/<name>` (default
+`/api/<name>`); for example the `public` endpoint below ends up at
+`/api/public/entities`.
+
+The plugin mounts onto an existing Express app — it does **not**
+create one. Provide the app either via the `--server` CLI flag (engine
+creates one) or by passing `app` to `setup()` programmatically. If
+neither is in place when the plugin loads, it fails fast with an
 actionable error.
 
 ```js
 export default {
   api: {
-    base: '/api',         // Mount path under runtime.options.app. Default: '/api'
-    token: 'my-secret',   // Bearer token required on PUT/DELETE/POST. Default: none (open)
-    pageSize: 10,         // Default page size for GET /entities. Default: 10
-    renderTimeout: 30000  // Max ms to wait for POST /render to complete. Default: 30000
-  }
+    // Global defaults — every endpoint can override these.
+    base: '/api',          // Mount path under runtime.options.app. Default: '/api'
+    pageSize: 10,          // Default page size for list / query. Default: 10
+    renderTimeout: 30000,  // Max ms to wait for POST /render to complete. Default: 30000
+
+    // Named endpoints. Each becomes /api/<name>/entities... and gets
+    // its own query scope, token, and operation allow-list.
+    endpoints: {
+      // Open read-only endpoint. No token → defaults to ['list'] only.
+      // Add 'subscribe' explicitly to expose the SSE event stream so
+      // SDK clients can keep useDocument / useDocuments live.
+      public: {
+        query: e => e.type === 'document' && e.meta?.published,
+        operations: ['list', 'subscribe'],
+      },
+
+      // Token-gated endpoint. With a token set, the default operations
+      // open up to ['list','update','delete','render','subscribe'] —
+      // override with an explicit `operations` array if you need a
+      // narrower surface.
+      admin: {
+        token: process.env.ADMIN_TOKEN,
+        // operations defaults to full set when a token is present
+        // pageSize / renderTimeout overrideable per endpoint:
+        pageSize: 50,
+      },
+
+      // Render endpoint that ships HTML on demand. The render operation
+      // pipes the catalog entity through the configured renderer chain
+      // (render-hbs, render-eta, etc.) and returns the produced output.
+      render: {
+        token: process.env.RENDER_TOKEN,
+        operations: ['render'],
+        renderTimeout: 60000,
+      },
+    },
+  },
 }
 ```
+
+**Operations** (`ep.operations`) — pick any subset:
+- `list` — `GET /api/<name>/entities`, `POST /api/<name>/entities/query`
+- `update` — `PUT /api/<name>/entities/:id`
+- `delete` — `DELETE /api/<name>/entities/:id`
+- `render` — `POST /api/<name>/entities/:id/render`
+- `subscribe` — `GET /api/<name>/entities/subscribe` (Server-Sent Events stream; SDK clients (`sdk-api`'s `client.live(...)`) consume this for live `useDocument`/`useDocuments` updates)
+
+When `token` is unset, the default operation set is `['list']` (safest open shape). When `token` is set, it widens to `['list', 'update', 'delete', 'render', 'subscribe']`. Explicit `operations` always wins.
+
+**Auth** — endpoints with `token` require `Authorization: Bearer <token>` on every request. Endpoints without `token` are open.
 
 Requires `express` to be installed: `npm install express`. Port and
 listen lifecycle live on the engine side (see `--server`) or with the
