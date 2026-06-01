@@ -175,6 +175,10 @@ A few things this project takes seriously:
 - **Deterministic builds.** The journal is the synchronization primitive. There's no event-passing layer, no IoC container, no plugin orchestrator. The engine knows how to fire phases in order; everything else falls out of that.
 - **The mental model is one document.** The [Architecture Overview](./documentation/overview.md) is one read for the full top-to-bottom picture. The reference docs exist for lookup; the overview exists for comprehension.
 
+## Acknowledgments
+
+The earliest version of mikser was inspired by [DocPad](https://github.com/docpad/docpad) (Benjamin Lupton, with Michael Duane Mooring and Rob Loach). DocPad's "freeway, not a box" philosophy — files on disk, any pre-processor or template engine, plugin-by-convention extension — shaped how mikser started. The engine has evolved since (journal, lifecycle, live channel, entity catalog), but the file-as-source-of-truth posture traces straight back.
+
 ## Documentation Index
 
 | Document                                              | Audience           | Description                                        |
