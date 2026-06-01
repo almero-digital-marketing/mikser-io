@@ -1,5 +1,6 @@
 import path from 'node:path'
-import { access, writeFile, mkdir } from 'node:fs/promises'
+import { access, writeFile, mkdir, rm } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import _ from 'lodash'
 import sift from 'sift'
 import { useRenderer, useCollection } from '../api.js'
@@ -118,54 +119,75 @@ async function runQuery({ filter, sort, fields, skip, limit, scope, findEntities
     return { items, total }
 }
 
-// Build the list-response envelope for an endpoint's "default" GET —
-// i.e. the response a client would get hitting GET <base>/<name>/entities
-// with no query parameters. This is what gets written to disk as the
-// cache file so a reverse proxy can serve it when mikser is down.
-//
-// The cache is the highest-traffic case (the SDK's useMikserRoutes
-// fetches exactly this), and identical across clients — caching it to
-// out/ turns it into a CDN-friendly static file. Per-query caching of
-// arbitrary URL params would explode the cache key space without
-// matching real traffic; we deliberately don't.
-async function buildDefaultEnvelope({ scope, findEntities, pageSize }) {
-    const limit = Math.min(100, Math.max(1, pageSize))
-    const skip = 0
-    const { items, total } = await runQuery({
-        filter: {},
-        sort: undefined,
-        fields: undefined,
-        skip,
-        limit,
-        scope,
-        findEntities,
-    })
-    const totalPages = Math.ceil(total / limit) || 1
-    return {
-        items, page: 1, limit, total, totalPages,
-        hasNext: limit < total,
-        hasPrev: false,
-    }
+// Canonicalize an object so structurally-equal queries produce the
+// same string. Mongo-style filters / sorts / fields lists are all
+// order-insensitive at the semantic level; alphabetizing object keys
+// + sorting fields arrays gives us a stable string to hash.
+function canonicalize(value) {
+    if (value === null || value === undefined) return null
+    if (typeof value !== 'object') return value
+    if (Array.isArray(value)) return value.map(canonicalize)
+    return Object.keys(value).sort().reduce((acc, key) => {
+        const v = canonicalize(value[key])
+        if (v !== null && v !== undefined) acc[key] = v
+        return acc
+    }, {})
 }
 
-// Write the cached response to <outputFolder>/<basePath>/<endpoint>/entities.json.
-// When mikser is running, the live API route serves the path without the
-// .json extension — the file is the explicit static fallback a reverse
-// proxy (or mikser's own static handler) serves when the live route is
-// unavailable. SDK consumers point initialUrl at the .json file directly
-// for zero-roundtrip first paint.
-async function writeEndpointCache({ outputFolder, base, name, envelope, logger }) {
-    // Strip leading slash from base ("/api" → "api") so path.join joins
-    // it under outputFolder rather than treating it as absolute.
+// Stable cache key for a list query. SHA-256 of the canonicalized
+// query, truncated to 16 hex chars — 64 bits of entropy is plenty for
+// per-endpoint cache namespaces and keeps filenames manageable.
+//
+// The same logic must run on:
+//   - server (here) when writing the cache
+//   - client (sdk-api) when computing initialUrl for a specific query
+//   - reverse proxy (nginx-Lua or equivalent) when looking up the
+//     fallback file on mikser-down
+// Keep the canonicalization simple and language-portable; no
+// JavaScript-specific behaviour.
+export function cacheKeyForQuery({ filter, sort, fields, limit, skip } = {}) {
+    const canon = JSON.stringify({
+        filter: canonicalize(filter ?? {}),
+        sort:   canonicalize(sort ?? null),
+        fields: fields ? [...fields].sort() : null,
+        limit:  limit ?? null,
+        skip:   skip ?? null,
+    })
+    return createHash('sha256').update(canon).digest('hex').slice(0, 16)
+}
+
+// Write the response envelope to the cache. Path scheme:
+//   <outputFolder>/<basePath>/<endpoint>/entities/<hash>.json
+//
+// One file per unique query. The reverse proxy is configured to
+// compute the same hash from the request URL and falls back to this
+// file when the live API is unreachable.
+async function writeQueryCache({ outputFolder, base, name, queryKey, envelope, logger }) {
     const relBase = base.replace(/^\//, '')
-    const dir = path.join(outputFolder, relBase, name)
-    const file = path.join(dir, 'entities.json')
+    const dir = path.join(outputFolder, relBase, name, 'entities')
+    const file = path.join(dir, `${queryKey}.json`)
     try {
         await mkdir(dir, { recursive: true })
         await writeFile(file, JSON.stringify(envelope), 'utf8')
-        logger.trace('Api[%s] cache written: %s (%d items)', name, file, envelope.items.length)
+        logger.trace('Api[%s] cache write: %s (%d items)', name, file, envelope.items.length)
     } catch (err) {
         logger.error('Api[%s] cache write failed (%s): %s', name, file, err.message)
+    }
+}
+
+// Clear the entire per-endpoint cache directory. Called when any
+// catalog entity changes — coarse but correct, and on-demand writes
+// rebuild the cache as queries come back in. The cost of warm-up
+// after invalidation is bounded by traffic, which is what you'd want
+// from a write-through cache anyway.
+async function clearEndpointCache({ outputFolder, base, name, logger }) {
+    const relBase = base.replace(/^\//, '')
+    const dir = path.join(outputFolder, relBase, name, 'entities')
+    try {
+        await rm(dir, { recursive: true, force: true })
+        logger.trace('Api[%s] cache cleared: %s', name, dir)
+    } catch (err) {
+        logger.error('Api[%s] cache clear failed (%s): %s', name, dir, err.message)
     }
 }
 
@@ -329,14 +351,23 @@ export default ({
             const pageSize = ep.pageSize ?? globalPageSize
             const renderTimeout = ep.renderTimeout ?? globalRenderTimeout
 
-            // Endpoints with cache: true get their default GET response
-            // written to <out>/<base>/<name>/entities.json on every
-            // catalog change. See the onFinalize hook below — a reverse
-            // proxy can serve this file as a static fallback so the
-            // frontend keeps working even if mikser itself is down.
+            // Endpoints with cache: true cache list responses to disk
+            // on a per-query basis. Each unique list query (whether
+            // GET /entities?... or POST /entities/query) writes its
+            // response envelope to
+            //   <out>/<base>/<name>/entities/<hash>.json
+            // where hash is a stable digest of the canonicalized query
+            // (see cacheKeyForQuery above). On any catalog change the
+            // whole cache directory is dropped — the next request
+            // through repopulates whatever's needed. Coarse but correct.
+            //
+            // The reverse proxy uses the same hash logic (nginx-Lua or
+            // equivalent) to find the matching cache file when mikser
+            // is unreachable. See the README for a working nginx config.
             if (ep.cache === true) {
-                cachedEndpoints.push({ name, scope: query, pageSize })
+                cachedEndpoints.push({ name })
             }
+            const cacheEnabled = ep.cache === true
 
             const auth = (req, res, next) => {
                 if (!ep.token) return next()
@@ -378,12 +409,36 @@ export default ({
 
                     const page = Math.floor(skip / limit) + 1
                     const totalPages = Math.ceil(total / limit) || 1
-                    res.json({
+                    const envelope = {
                         items, page, limit, total, totalPages,
                         hasNext: skip + limit < total,
                         hasPrev: skip > 0,
-                    })
+                    }
+                    res.json(envelope)
                     logger.trace('Api[%s] list %dms (%d/%d items)', name, Date.now() - t0, items.length, total)
+
+                    // Write-through cache: on every list response, also
+                    // write to <out>/<base>/<name>/entities/<hash>.json.
+                    // The hash is computed from the canonicalized query
+                    // (same logic the reverse proxy uses for failover).
+                    if (cacheEnabled && runtime.options.outputFolder) {
+                        const cacheKey = cacheKeyForQuery({
+                            filter: parsed.filter,
+                            sort: parsed.sort,
+                            fields: parsed.fields,
+                            limit, skip,
+                        })
+                        // Fire-and-forget — the response is already sent.
+                        // Errors are logged but don't propagate.
+                        writeQueryCache({
+                            outputFolder: runtime.options.outputFolder,
+                            base: apiBase,
+                            name,
+                            queryKey: cacheKey,
+                            envelope,
+                            logger,
+                        }).catch(() => {})
+                    }
                 } catch (err) {
                     logger.error('Api[%s] list error (%dms): %s', name, Date.now() - t0, err.message)
                     res.status(500).json({ error: err.message })
@@ -408,12 +463,31 @@ export default ({
 
                     const page = Math.floor(skip / limit) + 1
                     const totalPages = Math.ceil(total / limit) || 1
-                    res.json({
+                    const envelope = {
                         items, page, limit, total, totalPages,
                         hasNext: skip + limit < total,
                         hasPrev: skip > 0,
-                    })
+                    }
+                    res.json(envelope)
                     logger.trace('Api[%s] query %dms (%d/%d items)', name, Date.now() - t0, items.length, total)
+
+                    // Same write-through cache as GET — the query shape
+                    // is identical, so the hash is identical, so a GET
+                    // and a POST with structurally-equal queries share
+                    // one cache file.
+                    if (cacheEnabled && runtime.options.outputFolder) {
+                        const cacheKey = cacheKeyForQuery({
+                            filter, sort, fields, limit, skip,
+                        })
+                        writeQueryCache({
+                            outputFolder: runtime.options.outputFolder,
+                            base: apiBase,
+                            name,
+                            queryKey: cacheKey,
+                            envelope,
+                            logger,
+                        }).catch(() => {})
+                    }
                 } catch (err) {
                     logger.error('Api[%s] query error (%dms): %s', name, Date.now() - t0, err.message)
                     res.status(500).json({ error: err.message })
@@ -562,28 +636,20 @@ export default ({
             }
         }
 
-        // Rewrite every cached endpoint when any entity changed. On
-        // the very first cycle (initial catalog load) the journal
-        // contains every entity as a CREATE, so this fires automatically
-        // — no separate one-shot writer needed.
+        // Clear each cached endpoint's directory on any entity change.
+        // Subsequent list requests re-warm the cache via the write-
+        // through path in the GET/POST handlers above. Coarse but
+        // correct — any stale entry, anywhere in the per-endpoint
+        // cache, gets dropped without us having to track which queries
+        // were affected by which entity changes.
         if (anyChange && cachedEndpoints.length > 0 && runtime.options.outputFolder) {
             for (const ep of cachedEndpoints) {
-                try {
-                    const envelope = await buildDefaultEnvelope({
-                        scope: ep.scope,
-                        findEntities,
-                        pageSize: ep.pageSize,
-                    })
-                    await writeEndpointCache({
-                        outputFolder: runtime.options.outputFolder,
-                        base: apiBase,
-                        name: ep.name,
-                        envelope,
-                        logger,
-                    })
-                } catch (err) {
-                    logger.error('Api[%s] cache rebuild failed: %s', ep.name, err.message)
-                }
+                await clearEndpointCache({
+                    outputFolder: runtime.options.outputFolder,
+                    base: apiBase,
+                    name: ep.name,
+                    logger,
+                })
             }
         }
     })
