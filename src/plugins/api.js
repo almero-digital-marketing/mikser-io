@@ -336,6 +336,43 @@ export default ({
             const pageSize = ep.pageSize ?? globalPageSize
             const renderTimeout = ep.renderTimeout ?? globalRenderTimeout
 
+            // Server-enforced field projection. When set, every list /
+            // query / subscribe response is narrowed to exactly these
+            // dotted paths — regardless of what the client asks for.
+            //
+            // Right when you want to expose a narrow public sitemap
+            // without leaking the rest of the entity shape: stamps,
+            // uris, full meta, content body. The client's `fields`
+            // parameter (if any) is intersected with this allow-list,
+            // so a curl with no projection still gets the safe subset.
+            //
+            // Loud failure mode: if you forget to set this on a public
+            // endpoint that has cache: true, the resulting cache file
+            // contains every field of every matching entity — and it's
+            // a static GET URL anyone can hit. Be explicit.
+            const allowedFields = Array.isArray(ep.fields) && ep.fields.length
+                ? ep.fields
+                : null
+            if (ep.cache === true && !allowedFields && !ep.token) {
+                logger.warn(
+                    'Api[%s] cache: true is set on a token-less endpoint without `fields` — every entity field will be cached to disk and served publicly. Set `fields` to an explicit allow-list (e.g. [\'id\', \'meta.title\', \'meta.route\']) to limit what gets exposed.',
+                    name,
+                )
+            }
+
+            // Pick the effective projection for a request. If the
+            // endpoint declares allowedFields, that's the ceiling: a
+            // client requesting more gets only the intersection. A
+            // client requesting nothing gets exactly allowedFields.
+            // No allowedFields → whatever the client asked for (or
+            // all fields when omitted).
+            function resolveFields(requested) {
+                if (!allowedFields) return requested ?? null
+                if (!requested || !requested.length) return allowedFields
+                const allowSet = new Set(allowedFields)
+                return requested.filter(f => allowSet.has(f))
+            }
+
             // Endpoints with cache: true cache GET /entities responses
             // to disk on a per-query-string basis. Path scheme:
             //   <out>/<base>/<name>/entities/<raw-query-string>.json
@@ -398,7 +435,7 @@ export default ({
                     const { items, total } = await runQuery({
                         filter: parsed.filter,
                         sort: parsed.sort,
-                        fields: parsed.fields,
+                        fields: resolveFields(parsed.fields),
                         skip,
                         limit,
                         scope: query,
@@ -452,7 +489,9 @@ export default ({
                     const skip = rawSkip ?? (Math.max(1, parseInt(rawPage) || 1) - 1) * limit
 
                     const { items, total } = await runQuery({
-                        filter, sort, fields, skip, limit,
+                        filter, sort,
+                        fields: resolveFields(fields),
+                        skip, limit,
                         scope: query,
                         findEntities,
                     })
@@ -508,6 +547,7 @@ export default ({
                     endpointName: name,
                     scope: query,
                     filter: filterFn,
+                    allowedFields,
                     res,
                 })
 
@@ -614,9 +654,15 @@ export default ({
             for (const [subId, sub] of subscriptions) {
                 if (sub.scope && !sub.scope(entity)) continue
                 if (sub.filter && !sub.filter(entity)) continue
+                // Apply the endpoint's field projection to SSE payloads
+                // too — so live updates leak no more than list/query
+                // responses do.
+                const projected = sub.allowedFields
+                    ? _.pick(entity, sub.allowedFields)
+                    : entity
                 const payload = operation === OPERATION.DELETE
                     ? { id: entity.id }
-                    : { id: entity.id, entity }
+                    : { id: entity.id, entity: projected }
                 sseSend(sub.res, evMap[operation], payload)
                 logger.trace('Api subscription %s %s: %s', subId, evMap[operation], entity.id)
             }
