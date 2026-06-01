@@ -40,6 +40,8 @@ Build mikser into the parts of your application that are content-shaped. Keep th
 
 **Run anywhere.** The same CLI handles one-shot builds, watch-mode dev loops, and a long-running HTTP server with a shared Express app. `npx mikser` ships a static site; `mikser --watch` is the dev loop; `mikser --server` exposes a live admin/API.
 
+**Survives backend outages.** The `api` plugin's [per-query disk cache](./documentation/plugins.md#per-query-disk-cache-cache-true) writes every cacheable list response to `out/` keyed by the request URL. A stock-nginx reverse proxy can fail over to the cached file when mikser is unreachable — same URL, transparent to the client, no Lua or extra modules required. Production frontends keep rendering routes during deploys, brief outages, and the upstream-blip-of-the-week. Opt in per endpoint with `cache: true`.
+
 **Library mode.** Mikser is also a library. `useRenderer`, `useCollection`, `findSimilar`, and direct lifecycle hooks let you embed the engine inside an existing Node app instead of running it as a CLI.
 
 **Open source.** MIT-licensed, on GitHub, no telemetry, no auth wall, no SaaS dependency. What you see is what runs.
@@ -82,7 +84,7 @@ The engine is what stays stable — the lifecycle, the catalog, the file-based c
 | Plugin | What it does |
 |---|---|
 | `data` | JSON snapshots of entities / context / catalog, written to disk for static serving |
-| `api` | REST endpoints with sift-backed queries, per-endpoint tokens, optional render |
+| `api` | REST endpoints with sift-backed queries, per-endpoint tokens, optional render, opt-in [per-query disk cache](./documentation/plugins.md#per-query-disk-cache-cache-true) for reverse-proxy failover |
 
 **Integrations:**
 
