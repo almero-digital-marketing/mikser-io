@@ -163,7 +163,7 @@ function maybeWarnWide({ logger, endpoint, envelope, req }) {
         endpoint, items, sizeLabel, queryStr,
     )
     logger.warn(
-        '  ↳ Consider a `fields:` projection, or move this query to a `data.catalog.<name>` snapshot loaded via the SDK\'s `initialUrl`.',
+        '  ↳ Consider a `fields:` projection, or move this query to a `data.catalog.<name>` snapshot loaded via the SDK\'s `data.catalog` option.',
     )
 }
 
