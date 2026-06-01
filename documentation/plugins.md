@@ -890,12 +890,7 @@ Always overridable with explicit `operations`. A request to an operation outside
 
 #### Per-query disk cache (`cache: true`)
 
-Setting `cache: true` on an endpoint turns every `GET /<endpoint>/entities?...` response into a write-through cache. Each unique query writes the response envelope to a file whose path is derived from the request URL — no hashing, no extra modules on either end. Two things happen as a side effect:
-
-1. **Reverse-proxy failover.** When the live mikser API is unreachable (process down, deploy mid-flight, network glitch), a stock-nginx reverse proxy can serve the cached file at the same URL the client requested. Reads keep working. SSE is necessarily live-only, but list reads — which dominate page loads — survive transparently.
-2. **Repeat-query savings.** A reverse proxy serving the cache hits disk instead of round-tripping to mikser for identical queries. For SPAs where every browser tab issues the same `useMikserRoutes` query on boot, that's a real reduction in load on the engine.
-
-**Config:**
+Setting `cache: true` on an endpoint turns every `GET /<endpoint>/entities?...` response into a write-through cache file under `out/<base>/<endpoint>/entities/`. A reverse proxy in front of mikser can serve those files as failover when the live API is unreachable — same URL, transparent to the SDK, no special client config.
 
 ```js
 api: {
@@ -909,64 +904,7 @@ api: {
 }
 ```
 
-**File layout.** The cache file path mirrors the request URL exactly. The path segment after `/entities/` is the raw query string the client sent (URL-encoded), or `index` when there's no query:
-
-```
-out/api/sitemap/entities/index.json                              ← GET /api/sitemap/entities
-out/api/sitemap/entities/meta.published=true.json                ← GET /api/sitemap/entities?meta.published=true
-out/api/sitemap/entities/meta.component=page&limit=20.json       ← GET /api/sitemap/entities?meta.component=page&limit=20
-```
-
-**nginx config** — stock primitives, no Lua, no extra modules:
-
-```nginx
-location /api/sitemap/entities {
-    proxy_pass http://localhost:3001;
-    proxy_intercept_errors on;
-    error_page 502 503 504 = @cache;
-}
-
-location @cache {
-    root /var/www/out;
-    # $args is the raw query string mikser used as the cache filename.
-    # Falls through to index.json for the no-params case so / still
-    # works during an outage.
-    try_files /api/sitemap/entities/$args.json
-              /api/sitemap/entities/index.json
-              =502;
-}
-```
-
-What this gives you:
-
-- **Live request when mikser is up.** `proxy_pass` reaches mikser, which serves a fresh response. As a side effect mikser writes the cache file to disk — the proxy doesn't have to do anything special.
-- **Cached response when mikser is down.** nginx's `proxy_intercept_errors` catches the 5xx, falls through to `@cache`, and serves the file at the matching `$args` path. The client sees a 200 with the last-cached payload.
-- **Same URL in both cases.** The client never has to know about a separate cache URL; the SDK never needs a special configuration for "fast path vs live path."
-
-**Equivalent for other proxies.** The same shape works in:
-
-- **Caddy** — `reverse_proxy` with `try_files` in a fallback `handle_errors` route.
-- **Cloudflare Workers** — `fetch(request)` with a `.catch` that reads from R2 or KV at the matching key.
-- **Apache** — `mod_proxy` + `ErrorDocument` + `Files` directives.
-
-The key invariant: the proxy must be able to derive the cache file path from the request URL using only what the request gives it (path + raw query string). The naming scheme above means no hashing, no JSON parsing, no shared secret.
-
-**Invalidation.** Any catalog change (CREATE / UPDATE / DELETE on any entity) clears the entire `out/<base>/<endpoint>/entities/` directory. The next request through repopulates whatever query the client asked for — write-through cache, on demand. There's no per-query invalidation tracking; it's coarse but correct, and the cost of re-warming after a change is bounded by traffic.
-
-**What's not cached:**
-
-- **`POST /<endpoint>/entities/query`** — there's no URL-derivable cache key for a request body. The proxy would have no way to find the right file on failover. The SDK's `client.list()` uses GET when the query fits (≤1800 bytes URL-encoded) and falls back to POST only for queries that don't fit in a URL — so most real traffic still benefits.
-- **`/<endpoint>/entities/subscribe`** — SSE is by definition a live connection. No reverse proxy can serve "current updates" from a static file.
-- **`/<endpoint>/render`** — render is a render-time operation, not a list. Caching it would be a separate feature with different semantics (and possibly a different config flag).
-
-**Trade-offs to be honest about:**
-
-- **Different parameter orders create different cache files.** `?a=1&b=2` and `?b=2&a=1` are structurally equal but write to two separate cache files. The SDK uses a stable parameter order, so this only matters for hand-crafted URLs. Soft inefficiency, not a correctness bug.
-- **Long URLs fail to cache.** Filesystems typically limit filenames to 255 bytes; queries longer than that cause the cache write to fail silently (logged, not propagated to the response). Live traffic still works.
-- **Stale cache between mikser restart and first traffic.** If you restart mikser and the cache file from the previous run is still on disk, a proxy fallback during the restart window serves the old cache. Catch the restart with a `pre_stop` hook that clears the directory if you need this to be sharp.
-- **Cache directory size.** Long-tail queries each create a file; for unbounded query spaces this grows unboundedly until the next invalidation. Endpoints with `cache: true` are right when the query space is small and predictable (sitemap, navigation, faceted-search dimensions). Less right when every client issues a different unique query.
-
-**Without `cache: true`**, the endpoint runs as before — every list request hits mikser, no files written. The cache is opt-in per endpoint precisely because the trade-offs above only make sense for some endpoints (sitemap, public reads) and not others (admin, search-as-you-type).
+See **[Caching and reverse-proxy failover](./caching.md)** for the full story: file layout, working nginx config (stock primitives, no Lua), Caddy / Cloudflare Workers / Apache equivalents, invalidation model, what isn't cached, and honest trade-offs.
 
 ---
 
