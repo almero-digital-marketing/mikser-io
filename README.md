@@ -30,7 +30,7 @@ Build mikser into the parts of your application that are content-shaped. Keep th
 
 **Your content stays yours.** Source files live on disk as `.md`, `.yml`, `.html` with YAML front-matter. The build output is plain static files. No database lock-in, no proprietary export format. The whole content tree is copyable, diffable, and version-controllable with git — your site is portable on day one and on year ten.
 
-**Static-first with a built-in live channel.** Most content engines pick one side: static-site generators (Hugo, Eleventy, Astro) are fast but rebuild-only; headless CMSes (Sanity, Contentful, Strapi) are live but every page is an API round-trip. Mikser composes both — content publishes as static files by default (fast first paint, no API on the happy path), and the live channel arrives on top, so edits show up in connected clients without a refresh and without losing the static advantage.
+**Static-first with a built-in live channel.** Most content engines pick one side: static-site generators (Hugo, Eleventy, Jekyll) are fast but rebuild-only; headless CMSes (Sanity, Contentful, Strapi) are live but every page is an API round-trip. Mikser composes both — content publishes as static files by default (fast first paint, no API on the happy path), and the live channel arrives on top, so edits show up in connected clients without a refresh and without losing the static advantage.
 
 **Incremental builds that scale.** Mikser tracks every entity in a journal. When a file changes, only the affected entities re-process — not the whole site graph. On 10k+ documents this dramatically outpaces tools that rebuild more on every change.
 
