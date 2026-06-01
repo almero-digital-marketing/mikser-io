@@ -340,25 +340,20 @@ export default ({
             // query / subscribe response is narrowed to exactly these
             // dotted paths — regardless of what the client asks for.
             //
-            // Right when you want to expose a narrow public sitemap
-            // without leaking the rest of the entity shape: stamps,
-            // uris, full meta, content body. The client's `fields`
-            // parameter (if any) is intersected with this allow-list,
-            // so a curl with no projection still gets the safe subset.
+            // The right tool when an endpoint backs a broad list query
+            // and only a handful of fields per entity are actually
+            // useful to the client — sitemap, navigation menus,
+            // faceted search dimensions. A SPA's first paint shouldn't
+            // download every markdown body just to find out which
+            // routes exist.
             //
-            // Loud failure mode: if you forget to set this on a public
-            // endpoint that has cache: true, the resulting cache file
-            // contains every field of every matching entity — and it's
-            // a static GET URL anyone can hit. Be explicit.
+            // Skip it for endpoints that serve individual full
+            // documents (the typical `public` shape used by
+            // useDocument(id)) — those queries return one entity at a
+            // time so narrowing has no real benefit.
             const allowedFields = Array.isArray(ep.fields) && ep.fields.length
                 ? ep.fields
                 : null
-            if (ep.cache === true && !allowedFields && !ep.token) {
-                logger.warn(
-                    'Api[%s] cache: true is set on a token-less endpoint without `fields` — every entity field will be cached to disk and served publicly. Set `fields` to an explicit allow-list (e.g. [\'id\', \'meta.title\', \'meta.route\']) to limit what gets exposed.',
-                    name,
-                )
-            }
 
             // Pick the effective projection for a request. If the
             // endpoint declares allowedFields, that's the ceiling: a

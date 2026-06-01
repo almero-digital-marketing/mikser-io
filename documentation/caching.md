@@ -6,28 +6,6 @@ This is what keeps your frontend rendering during deploys, restarts, brief upstr
 
 > **Working nginx config** ([jump to the snippet](#stock-nginx-no-lua-no-extra-modules)) — stock primitives, no Lua, no extra modules. Copy-paste, change the paths, deploy.
 
-## Set `fields` on any cached public endpoint — read this first
-
-`cache: true` on a public endpoint without an explicit `fields` allow-list is a data-leak waiting to happen. The cached file contains every field of every matching entity — markdown content, internal `uri` / `source` paths, timestamps, ANY meta field including the ones you didn't think to limit — and it's served at a static GET URL that anyone with the URL can hit, even when mikser is alive and authenticated requests would be rejected.
-
-Always set `fields` when both `cache: true` and `token` is unset:
-
-```js
-sitemap: {
-    query: e => e.type === 'document' && e.meta?.published && e.meta?.component,
-    operations: ['list', 'subscribe'],
-    cache: true,
-    fields: [                       // ← REQUIRED for public caches
-        'id', 'destination',
-        'meta.route', 'meta.component', 'meta.title',
-    ],
-}
-```
-
-The api plugin enforces this projection on every response — list, query, AND subscribe — regardless of what the client requests. A curl with no `?fields=...` parameter still gets exactly the safe subset. Token-gated endpoints don't need it (the token is the access control); public endpoints absolutely do.
-
-mikser-io 6.26.0+ logs a warning at load time if it sees a token-less endpoint with `cache: true` but no `fields`. If you see that warning, stop and add the projection before deploying.
-
 ## Why a disk cache at all
 
 Two real problems get solved.
@@ -35,6 +13,34 @@ Two real problems get solved.
 **Outage survival.** When mikser is unreachable — process down, deploy in flight, network glitch, container restart — the live API stops responding. Without a cache, every list request 5xxs at the proxy and falls through to the client. Routes don't resolve, list reads fail, and the frontend either freezes on its loading state or surfaces a generic "backend unavailable." With the cache, the proxy reads from disk and serves the last-known-good response. SSE updates pause (you can't fake a live stream from a static file), but list reads — which dominate page-load traffic — survive transparently.
 
 **Repeat-query savings.** Every browser tab issuing `useMikserRoutes(...)` makes the same `GET /api/sitemap/entities?...` request on boot. Without a cache, mikser re-runs sift over the in-memory catalog for each. With a cache, the proxy serves the cached file from disk and only the first request after an invalidation actually hits mikser. For SPAs in front of small-to-medium catalogs that's a measurable drop in CPU on the engine.
+
+## Picking which endpoint to cache
+
+Two-endpoint pattern, optimized for SPA boot:
+
+- **A full-content endpoint (e.g. `public`)** — returns the whole entity. Used by per-id reads like `useDocument(id)`. **Don't cache it.** Per-id responses are already small, and a broad list call against this endpoint (no filter, no projection) would dump the entire catalog into a single cache file.
+- **A narrow sitemap endpoint** — filters to just the routes the SPA needs (e.g. documents with `meta.component`), projects to just the routing fields (`id`, `destination`, `meta.route`, `meta.component`, `meta.title`). **Cache this one.** The SPA's first paint hits exactly this endpoint and never has to download a megabyte of unused markdown to build its route table.
+
+```js
+api: {
+  endpoints: {
+    public: {
+      query: e => e.type === 'document' && e.meta?.published,
+      operations: ['list', 'subscribe'],
+      // no `cache`, no `fields` — useDocument(id) hits this for one
+      // doc at a time
+    },
+    sitemap: {
+      query: e => e.type === 'document' && e.meta?.published && e.meta?.component,
+      operations: ['list', 'subscribe'],
+      fields: ['id', 'destination', 'meta.route', 'meta.component', 'meta.title'],
+      cache: true,
+    },
+  },
+}
+```
+
+**The `fields` allow-list is what makes the sitemap a sitemap.** Without it, a broad query against a "narrow" endpoint still returns the full entity for every match — same wire size as querying `public`, defeating the whole point. mikser-io enforces the projection server-side regardless of what the client asks for, so a curl with no `?fields=...` still gets exactly the safe subset.
 
 ## How to turn it on
 
