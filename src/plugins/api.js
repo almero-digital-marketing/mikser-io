@@ -533,20 +533,23 @@ export default ({
             [OPERATION.DELETE]: 'delete',
         }
 
-        // Track which cached endpoints saw a relevant change this cycle —
-        // we only rewrite the cache file if the endpoint's query scope
-        // actually matches at least one journal entry, so a churning
-        // catalog that doesn't touch sitemap-eligible docs doesn't
-        // rewrite sitemap.json on every change.
-        const dirtyCached = new Set()
+        // Cache invalidation is intentionally coarse: if ANY entity
+        // changed in this cycle, rebuild every cached endpoint. Per-
+        // endpoint scope matching would shave a few file writes off a
+        // churning catalog but adds bug surface for no real win —
+        // buildDefaultEnvelope is microseconds (in-memory sift),
+        // writeFile is milliseconds. Simpler and safer to just rebuild.
+        let anyChange = false
 
-        // Single journal iteration drives both SSE push and cache
-        // invalidation detection — keeps the per-cycle cost to one pass.
+        // Single journal iteration drives both SSE push and the
+        // any-change flag — one pass per cycle.
         for await (const { operation, entity } of useJournal(
             'Api subscriptions',
             [OPERATION.CREATE, OPERATION.UPDATE, OPERATION.DELETE],
             signal,
         )) {
+            anyChange = true
+
             // SSE push to live subscribers
             for (const [subId, sub] of subscriptions) {
                 if (sub.scope && !sub.scope(entity)) continue
@@ -557,21 +560,14 @@ export default ({
                 sseSend(sub.res, evMap[operation], payload)
                 logger.trace('Api subscription %s %s: %s', subId, evMap[operation], entity.id)
             }
-
-            // Cache-dirty detection
-            for (const ep of cachedEndpoints) {
-                if (dirtyCached.has(ep.name)) continue
-                if (!ep.scope || ep.scope(entity)) dirtyCached.add(ep.name)
-            }
         }
 
-        // Rewrite cache files for any endpoint that saw a relevant
-        // change. On the very first cycle (initial catalog load) the
-        // journal contains every entity as a CREATE, so this fires
-        // automatically — no need for a separate one-shot writer.
-        if (dirtyCached.size > 0 && runtime.options.outputFolder) {
+        // Rewrite every cached endpoint when any entity changed. On
+        // the very first cycle (initial catalog load) the journal
+        // contains every entity as a CREATE, so this fires automatically
+        // — no separate one-shot writer needed.
+        if (anyChange && cachedEndpoints.length > 0 && runtime.options.outputFolder) {
             for (const ep of cachedEndpoints) {
-                if (!dirtyCached.has(ep.name)) continue
                 try {
                     const envelope = await buildDefaultEnvelope({
                         scope: ep.scope,
