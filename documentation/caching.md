@@ -6,6 +6,28 @@ This is what keeps your frontend rendering during deploys, restarts, brief upstr
 
 > **Working nginx config** ([jump to the snippet](#stock-nginx-no-lua-no-extra-modules)) — stock primitives, no Lua, no extra modules. Copy-paste, change the paths, deploy.
 
+## Set `fields` on any cached public endpoint — read this first
+
+`cache: true` on a public endpoint without an explicit `fields` allow-list is a data-leak waiting to happen. The cached file contains every field of every matching entity — markdown content, internal `uri` / `source` paths, timestamps, ANY meta field including the ones you didn't think to limit — and it's served at a static GET URL that anyone with the URL can hit, even when mikser is alive and authenticated requests would be rejected.
+
+Always set `fields` when both `cache: true` and `token` is unset:
+
+```js
+sitemap: {
+    query: e => e.type === 'document' && e.meta?.published && e.meta?.component,
+    operations: ['list', 'subscribe'],
+    cache: true,
+    fields: [                       // ← REQUIRED for public caches
+        'id', 'destination',
+        'meta.route', 'meta.component', 'meta.title',
+    ],
+}
+```
+
+The api plugin enforces this projection on every response — list, query, AND subscribe — regardless of what the client requests. A curl with no `?fields=...` parameter still gets exactly the safe subset. Token-gated endpoints don't need it (the token is the access control); public endpoints absolutely do.
+
+mikser-io 6.26.0+ logs a warning at load time if it sees a token-less endpoint with `cache: true` but no `fields`. If you see that warning, stop and add the projection before deploying.
+
 ## Why a disk cache at all
 
 Two real problems get solved.
