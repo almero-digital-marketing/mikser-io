@@ -1,64 +1,44 @@
 # Caching and reverse-proxy failover
 
-When the `api` plugin's endpoints declare `cache: true`, every cacheable list response is written to disk in `out/`. The cache lives on the filesystem — not in memory — so a reverse proxy in front of mikser can serve the cached file as failover when mikser itself is unreachable.
+When an `api` plugin endpoint declares `cache: true`, every cacheable list response is written to disk under `out/`. The cache lives on the filesystem — not in memory — so a reverse proxy in front of mikser can serve the cached file as failover when mikser itself is unreachable.
 
-This is what keeps your frontend rendering during deploys, restarts, brief upstream blips, and the kind of outages that would otherwise cascade into a blank page.
+This is what keeps the live, per-id reads inside your app working during deploys, restarts, brief upstream blips, and the kind of outages that would otherwise cascade into a blank page.
 
 > **Working nginx config** ([jump to the snippet](#stock-nginx-no-lua-no-extra-modules)) — stock primitives, no Lua, no extra modules. Copy-paste, change the paths, deploy.
 
-## Why a disk cache at all
+## What this cache is for, and what it isn't
 
-Two real problems get solved.
+`cache: true` is the **fail-safety mechanism for live API reads**. The typical SPA / hybrid app uses it on a single full-content endpoint (`public`) so that calls like `useDocument(id)` keep working — out of the proxy's cached responses — when mikser is briefly down.
 
-**Outage survival.** When mikser is unreachable — process down, deploy in flight, network glitch, container restart — the live API stops responding. Without a cache, every list request 5xxs at the proxy and falls through to the client. Routes don't resolve, list reads fail, and the frontend either freezes on its loading state or surfaces a generic "backend unavailable." With the cache, the proxy reads from disk and serves the last-known-good response. SSE updates pause (you can't fake a live stream from a static file), but list reads — which dominate page-load traffic — survive transparently.
+It is **not** the place to publish a routing snapshot. The first-paint route table for an SPA should come from a static file that the `data` plugin writes (`out/data/sitemap.json` or similar) — served by mikser's built-in static handler, CDN-cacheable, no API round-trip needed. The SDK loads it via `entities('public', { initialUrl: '/data/sitemap.json' })`. See the **[sdk-api docs](https://github.com/almero-digital-marketing/mikser-io-sdk-api)** for the `initialUrl` option and the data-plugin example for `catalog` config.
 
-**Repeat-query savings.** Every browser tab issuing `useMikserRoutes(...)` makes the same `GET /api/sitemap/entities?...` request on boot. Without a cache, mikser re-runs sift over the in-memory catalog for each. With a cache, the proxy serves the cached file from disk and only the first request after an invalidation actually hits mikser. For SPAs in front of small-to-medium catalogs that's a measurable drop in CPU on the engine.
+That split matters because the two needs have different shapes:
 
-## Two cache benefits, decide per endpoint
+| Need                                  | Right tool                                                       |
+|---|---|
+| First-paint route table for a SPA     | `data.catalog.<name>` → `out/data/<name>.json` (static file)     |
+| Per-id document fetch survives outage | `api.endpoints.<name>.cache: true` (per-query disk cache, this doc) |
+| Live updates (SSE)                    | Subscribe path — necessarily live, never cached                  |
 
-`cache: true` gives you two things at once:
+The rest of this document is about the second row.
 
-1. **Fail-safety.** When mikser is down, the reverse proxy serves the cached response so reads don't fail. Whatever the user was looking at keeps working.
-2. **Performance.** When the response is large and the proxy can serve it directly (or after the proxy's own HTTP cache layer), each cached query saves a roundtrip to mikser plus the sift execution.
+## Why the per-query cache exists at all
 
-Pick `cache: true` whenever **either** benefit matters for the endpoint. The two endpoints in a typical SPA setup illustrate both:
+**Outage survival.** When mikser is unreachable — process down, deploy in flight, network glitch, container restart — the live API stops responding. Without a cache, every list/read request 5xxs at the proxy and falls through to the client. The page either freezes on its loading state or surfaces a generic "backend unavailable." With the cache, the proxy reads from disk and serves the last-known-good response. SSE updates pause (you can't fake a live stream from a static file), but list reads — which dominate page-load traffic for things like `useDocument(id)` — survive transparently.
 
-- **A full-content endpoint (e.g. `public`)** — returns the whole entity. Used by per-id reads like `useDocument(id)`. **Cache it for the fail-safety benefit.** A user reading a document keeps reading it when mikser blips during a deploy. Per-id cache files are small; the performance win is modest, but the outage-survival win is the whole point.
-- **A narrow sitemap endpoint** — filters to just the routes the SPA needs (e.g. documents with `meta.component`), projects to just the routing fields (`id`, `destination`, `meta.route`, `meta.component`, `meta.title`). **Cache it for both benefits.** The fail-safety story is the same as above. The performance story is the load-time win: the SPA's first paint hits exactly this endpoint and never has to download megabytes of unused markdown to build its route table.
+**Repeat-query savings.** Multiple tabs issuing the same `GET /api/public/entities?...` for a popular document otherwise re-run sift over the in-memory catalog every time. With the cache the proxy can serve from disk, and only the first request after an invalidation actually hits mikser. For small-to-medium catalogs that's a measurable drop in engine CPU.
 
-```js
-api: {
-  endpoints: {
-    public: {
-      query: e => e.type === 'document' && e.meta?.published,
-      operations: ['list', 'subscribe'],
-      cache: true,                    // fail-safety for per-id reads
-    },
-    sitemap: {
-      query: e => e.type === 'document' && e.meta?.published && e.meta?.component,
-      operations: ['list', 'subscribe'],
-      fields: ['id', 'destination', 'meta.route', 'meta.component', 'meta.title'],
-      cache: true,                    // fail-safety + load-time win
-    },
-  },
-}
-```
-
-**The `fields` allow-list is what makes the sitemap a sitemap.** Without it, a broad query against a "narrow" endpoint still returns the full entity for every match — same wire size as querying `public`, defeating the load-time win. mikser-io enforces the projection server-side regardless of what the client asks for, so a curl with no `?fields=...` still gets exactly the projected subset.
-
-**Caveat for broad list calls against full-content endpoints.** A `public`-style endpoint without a `fields` projection that gets hit with a broad list (no filter) writes a single cache file containing every full entity in scope. That's not what you want — it's a megabyte-scale cache file behind a single URL. The SDK's `useMikserRoutes` deliberately points at the narrow sitemap endpoint for exactly this reason. If you have a use case that needs broad lists against full content, either narrow the endpoint via `fields`, or split it into two endpoints (narrow sitemap-style for the broad list, full-content for per-id).
-
-## How to turn it on
+## Configure it
 
 Set `cache: true` on the api endpoint:
 
 ```js
 api: {
     endpoints: {
-        sitemap: {
-            query: e => e.type === 'document' && e.meta?.published && e.meta?.component,
+        public: {
+            query: e => e.type === 'document' && e.meta?.published,
             operations: ['list', 'subscribe'],
-            cache: true,                    // ← engages the disk cache
+            cache: true,                    // ← engages the per-query disk cache
         },
     },
 }
@@ -66,14 +46,19 @@ api: {
 
 That's the only engine-side change. Once a cacheable endpoint exists, every successful `GET /<endpoint>/entities?...` triggers a write-through cache file as a side effect.
 
+**Caveat for broad list calls.** A `public`-style endpoint without a `fields` projection that gets hit with a *broad* list (no filter) writes a single cache file containing every full entity in scope — a megabyte-scale file behind a single URL. That's fine if a single such file is actually what you want; usually it isn't. Two ways to avoid it:
+
+1. **Route first-paint catalog listings through the data-plugin snapshot** (see top of this doc) — they don't touch the live API at all. This is what the SDK examples do.
+2. **If you need a live broad list**, either narrow the endpoint via `fields:`, or split into two endpoints (a narrow one for the broad list, the full-content one for per-id reads).
+
 ## File layout
 
 The cache file path mirrors the request URL exactly — no hashing, no encoding magic. The segment after `/entities/` is the raw query string the client sent (URL-encoded), or `index` when there's no query:
 
 ```
-out/api/sitemap/entities/index.json                              ← GET /api/sitemap/entities
-out/api/sitemap/entities/meta.published=true.json                ← GET /api/sitemap/entities?meta.published=true
-out/api/sitemap/entities/meta.component=page&limit=20.json       ← GET /api/sitemap/entities?meta.component=page&limit=20
+out/api/public/entities/index.json                              ← GET /api/public/entities
+out/api/public/entities/meta.published=true.json                ← GET /api/public/entities?meta.published=true
+out/api/public/entities/id=%2Fdocs%2Fwelcome.json               ← GET /api/public/entities?id=%2Fdocs%2Fwelcome
 ```
 
 Two consequences worth noting:
@@ -86,7 +71,7 @@ Two consequences worth noting:
 The minimum config that gives you transparent failover:
 
 ```nginx
-location /api/sitemap/entities {
+location /api/public/entities {
     proxy_pass http://localhost:3001;
     proxy_intercept_errors on;
     error_page 502 503 504 = @cache;
@@ -96,8 +81,8 @@ location @cache {
     root /var/www/out;
     # $args is the raw query string mikser used as the cache filename.
     # Falls through to index.json for the no-params case.
-    try_files /api/sitemap/entities/$args.json
-              /api/sitemap/entities/index.json
+    try_files /api/public/entities/$args.json
+              /api/public/entities/index.json
               =502;
 }
 ```
@@ -115,10 +100,10 @@ For multiple cacheable endpoints, repeat the location block per endpoint, or use
 If you want the proxy to read from cache by default and only fall through to mikser when the file doesn't exist (lowest possible latency, but reads can be slightly stale until invalidation rebuilds the file):
 
 ```nginx
-location /api/sitemap/entities {
+location /api/public/entities {
     root /var/www/out;
-    try_files /api/sitemap/entities/$args.json
-              /api/sitemap/entities/index.json
+    try_files /api/public/entities/$args.json
+              /api/public/entities/index.json
               @mikser;
 }
 
@@ -137,12 +122,12 @@ The pattern is the same in any HTTP layer that supports "try upstream, fall back
 
 ```caddyfile
 example.com {
-    handle /api/sitemap/entities {
+    handle /api/public/entities {
         reverse_proxy localhost:3001 {
             @cacheable status 502 503 504
             handle_response @cacheable {
                 root * /var/www/out
-                try_files /api/sitemap/entities/{query}.json /api/sitemap/entities/index.json
+                try_files /api/public/entities/{query}.json /api/public/entities/index.json
                 file_server
             }
         }
@@ -157,7 +142,7 @@ export default {
     async fetch(request, env) {
         const url = new URL(request.url)
         const cacheKey = url.searchParams.toString() || 'index'
-        const cachePath = `api/sitemap/entities/${cacheKey}.json`
+        const cachePath = `api/public/entities/${cacheKey}.json`
 
         try {
             const upstream = await fetch(`https://mikser-origin.internal${url.pathname}${url.search}`)
@@ -175,9 +160,9 @@ export default {
 ### Apache (httpd)
 
 ```apache
-<Location /api/sitemap/entities>
-    ProxyPass http://localhost:3001/api/sitemap/entities
-    ProxyPassReverse http://localhost:3001/api/sitemap/entities
+<Location /api/public/entities>
+    ProxyPass http://localhost:3001/api/public/entities
+    ProxyPassReverse http://localhost:3001/api/public/entities
     ProxyErrorOverride On
 
     ErrorDocument 502 /cache-fallback
@@ -187,9 +172,9 @@ export default {
 
 <Location /cache-fallback>
     RewriteEngine On
-    RewriteCond /var/www/out/api/sitemap/entities/%{QUERY_STRING}.json -f
-    RewriteRule .* /var/www/out/api/sitemap/entities/%{QUERY_STRING}.json [L]
-    RewriteRule .* /var/www/out/api/sitemap/entities/index.json [L]
+    RewriteCond /var/www/out/api/public/entities/%{QUERY_STRING}.json -f
+    RewriteRule .* /var/www/out/api/public/entities/%{QUERY_STRING}.json [L]
+    RewriteRule .* /var/www/out/api/public/entities/index.json [L]
 </Location>
 ```
 
@@ -214,8 +199,8 @@ If you have a high-write workload where dropping the cache on every change is to
 - **Different parameter orders create different cache files.** Already mentioned above. Most traffic from the SDK has stable ordering so this is a non-issue in practice.
 - **Long URLs fail to cache.** Filesystems typically limit filenames to 255 bytes. Queries longer than that cause the cache write to fail silently (logged, not propagated to the response). Live traffic still works — only failover for those queries is lost. The SDK's GET form falls back to POST at ~1800 bytes anyway, so this affects mostly hand-crafted queries.
 - **Stale cache between mikser restart and first traffic.** If you restart mikser and a cache file from the previous run is still on disk, a proxy fallback during the restart window serves the old cache. Add a `pre_stop` hook that clears the directory if you need restarts to be sharp.
-- **Cache directory size grows with the unique-query space.** Long-tail queries each create a file; for unbounded query spaces this grows unboundedly until the next invalidation. Endpoints with `cache: true` are right when the query space is small and predictable (sitemap, navigation, faceted-search dimensions). Less right when every client issues a different unique query.
+- **Cache directory size grows with the unique-query space.** Long-tail queries each create a file; for unbounded query spaces this grows unboundedly until the next invalidation. Endpoints with `cache: true` work best when the query space is small and predictable (per-id reads, navigation lookups). Less right when every client issues a different unique query.
 
 ## Without `cache: true`
 
-The endpoint runs as before — every list request hits mikser, no files written. The cache is opt-in per endpoint precisely because the trade-offs above only make sense for some endpoints (sitemap, public reads) and not others (admin, search-as-you-type).
+The endpoint runs as before — every list request hits mikser, no files written. The cache is opt-in per endpoint precisely because the trade-offs above only make sense for some endpoints (a small full-content endpoint fronting `useDocument`, an admin lookup) and not others (search-as-you-type, anything with unbounded query space).
