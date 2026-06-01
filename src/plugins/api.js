@@ -142,6 +142,31 @@ function cacheNameForQueryString(rawQueryString) {
     return rawQueryString
 }
 
+// Wide-list defaults — tuned for "an SPA accidentally pulled the whole
+// catalog because it forgot a `fields` projection." Operators can grep
+// the warning out of logs; SDK users see the same shape client-side via
+// the SDK's dev-mode warning.
+const WIDE_RESPONSE_ITEMS = 100
+const WIDE_RESPONSE_BYTES = 256 * 1024
+
+function maybeWarnWide({ logger, endpoint, envelope, req }) {
+    const items = envelope?.items?.length ?? 0
+    if (items <= WIDE_RESPONSE_ITEMS) return
+    const bytes = Buffer.byteLength(JSON.stringify(envelope))
+    if (bytes <= WIDE_RESPONSE_BYTES && items <= WIDE_RESPONSE_ITEMS) return
+    const queryStr = (req.originalUrl || req.url || '').split('?')[1] || '(none)'
+    const sizeLabel = bytes >= 1024 * 1024
+        ? `${(bytes / 1024 / 1024).toFixed(1)} MB`
+        : `${Math.round(bytes / 1024)} KB`
+    logger.warn(
+        'Api[%s] wide list response: %d items, %s — query=%s',
+        endpoint, items, sizeLabel, queryStr,
+    )
+    logger.warn(
+        '  ↳ Consider a `fields:` projection, or move this query to a `data.catalog.<name>` snapshot loaded via the SDK\'s `initialUrl`.',
+    )
+}
+
 // Write the response envelope to <out>/<base>/<endpoint>/entities/<name>.json.
 // The path matches what nginx's `try_files /<base>/<endpoint>/entities/$args.json
 // /<base>/<endpoint>/entities/index.json` looks up on upstream failure.
@@ -446,6 +471,7 @@ export default ({
                     }
                     res.json(envelope)
                     logger.trace('Api[%s] list %dms (%d/%d items)', name, Date.now() - t0, items.length, total)
+                    maybeWarnWide({ logger, endpoint: name, envelope, req })
 
                     // Write-through cache: write the response to a file
                     // path that mirrors the request URL — same `$args`
@@ -500,6 +526,7 @@ export default ({
                     }
                     res.json(envelope)
                     logger.trace('Api[%s] query %dms (%d/%d items)', name, Date.now() - t0, items.length, total)
+                    maybeWarnWide({ logger, endpoint: name, envelope, req })
 
                     // POST queries aren't disk-cached. The reverse proxy
                     // failover scheme is URL-based (cache file path =

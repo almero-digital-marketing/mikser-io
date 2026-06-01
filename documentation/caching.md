@@ -10,13 +10,13 @@ This is what keeps the live, per-id reads inside your app working during deploys
 
 `cache: true` is the **fail-safety mechanism for live API reads**. The typical SPA / hybrid app uses it on a single full-content endpoint (`public`) so that calls like `useDocument(id)` keep working — out of the proxy's cached responses — when mikser is briefly down.
 
-It is **not** the place to publish a routing snapshot. The first-paint route table for an SPA should come from a static file that the `data` plugin writes (`out/data/sitemap.json` or similar) — served by mikser's built-in static handler, CDN-cacheable, no API round-trip needed. The SDK loads it via `entities('public', { initialUrl: '/data/sitemap.json' })`. See the **[sdk-api docs](https://github.com/almero-digital-marketing/mikser-io-sdk-api)** for the `initialUrl` option and the data-plugin example for `catalog` config.
+It is **not** the place to publish a predictable known-shape snapshot — a route table, a nav menu, a category index, anything that runs on every page load. That work belongs on the `data` plugin: a `catalog.<name>` entry writes one file per name to `out/data/<name>.json`, served by mikser's built-in static handler, CDN-cacheable, with no API round-trip needed. The SDK consumes it via `entities('<endpoint>', { initialUrl: '/data/<name>.json' })` — see the **[sdk-api docs](https://github.com/almero-digital-marketing/mikser-io-sdk-api)** for the `initialUrl` option. Name the snapshot after its role — `sitemap` is the routing-specific name, `menu` for a nav, `tags` for a tag index, and so on.
 
 That split matters because the two needs have different shapes:
 
 | Need                                  | Right tool                                                       |
 |---|---|
-| First-paint route table for a SPA     | `data.catalog.<name>` → `out/data/<name>.json` (static file)     |
+| First-paint snapshot (routes, nav, tags…) | `data.catalog.<name>` → `out/data/<name>.json` (static file)  |
 | Per-id document fetch survives outage | `api.endpoints.<name>.cache: true` (per-query disk cache, this doc) |
 | Live updates (SSE)                    | Subscribe path — necessarily live, never cached                  |
 
