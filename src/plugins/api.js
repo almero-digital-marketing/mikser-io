@@ -119,58 +119,43 @@ async function runQuery({ filter, sort, fields, skip, limit, scope, findEntities
     return { items, total }
 }
 
-// Canonicalize an object so structurally-equal queries produce the
-// same string. Mongo-style filters / sorts / fields lists are all
-// order-insensitive at the semantic level; alphabetizing object keys
-// + sorting fields arrays gives us a stable string to hash.
-function canonicalize(value) {
-    if (value === null || value === undefined) return null
-    if (typeof value !== 'object') return value
-    if (Array.isArray(value)) return value.map(canonicalize)
-    return Object.keys(value).sort().reduce((acc, key) => {
-        const v = canonicalize(value[key])
-        if (v !== null && v !== undefined) acc[key] = v
-        return acc
-    }, {})
+// Derive the cache filename from the raw query string the client sent.
+//   no query string (`/entities`)       → 'index'
+//   query string ('a=1&b=2')            → 'a=1&b=2'
+//
+// We deliberately keep the raw, undecoded form because:
+//   - that's what nginx's `$args` variable contains
+//   - stock nginx can pass it straight into `try_files` without
+//     hashing modules or Lua
+//   - the URL is its own cache key — no extra contract for clients
+//     or proxies to agree on beyond "use the request URL"
+//
+// Trade-off: structurally-equal queries with different parameter
+// orders produce different cache files (`?a=1&b=2` vs `?b=2&a=1`).
+// Soft inefficiency, not a correctness bug — the SDK uses a stable
+// order and most consumers are SDK-driven. Filesystem rules apply:
+// most chars (`=`, `&`, `[`, `]`, `%`) are safe; 255-byte filename
+// limits cap query length on typical fs. Document these in the
+// caching README.
+function cacheNameForQueryString(rawQueryString) {
+    if (!rawQueryString) return 'index'
+    return rawQueryString
 }
 
-// Stable cache key for a list query. SHA-256 of the canonicalized
-// query, truncated to 16 hex chars — 64 bits of entropy is plenty for
-// per-endpoint cache namespaces and keeps filenames manageable.
-//
-// The same logic must run on:
-//   - server (here) when writing the cache
-//   - client (sdk-api) when computing initialUrl for a specific query
-//   - reverse proxy (nginx-Lua or equivalent) when looking up the
-//     fallback file on mikser-down
-// Keep the canonicalization simple and language-portable; no
-// JavaScript-specific behaviour.
-export function cacheKeyForQuery({ filter, sort, fields, limit, skip } = {}) {
-    const canon = JSON.stringify({
-        filter: canonicalize(filter ?? {}),
-        sort:   canonicalize(sort ?? null),
-        fields: fields ? [...fields].sort() : null,
-        limit:  limit ?? null,
-        skip:   skip ?? null,
-    })
-    return createHash('sha256').update(canon).digest('hex').slice(0, 16)
-}
-
-// Write the response envelope to the cache. Path scheme:
-//   <outputFolder>/<basePath>/<endpoint>/entities/<hash>.json
-//
-// One file per unique query. The reverse proxy is configured to
-// compute the same hash from the request URL and falls back to this
-// file when the live API is unreachable.
-async function writeQueryCache({ outputFolder, base, name, queryKey, envelope, logger }) {
+// Write the response envelope to <out>/<base>/<endpoint>/entities/<name>.json.
+// The path matches what nginx's `try_files /<base>/<endpoint>/entities/$args.json
+// /<base>/<endpoint>/entities/index.json` looks up on upstream failure.
+async function writeQueryCache({ outputFolder, base, name, cacheName, envelope, logger }) {
     const relBase = base.replace(/^\//, '')
     const dir = path.join(outputFolder, relBase, name, 'entities')
-    const file = path.join(dir, `${queryKey}.json`)
+    const file = path.join(dir, `${cacheName}.json`)
     try {
         await mkdir(dir, { recursive: true })
         await writeFile(file, JSON.stringify(envelope), 'utf8')
         logger.trace('Api[%s] cache write: %s (%d items)', name, file, envelope.items.length)
     } catch (err) {
+        // Filename-length / illegal-char failures land here. Logged but
+        // not propagated — the live response is already on the wire.
         logger.error('Api[%s] cache write failed (%s): %s', name, file, err.message)
     }
 }
@@ -351,19 +336,32 @@ export default ({
             const pageSize = ep.pageSize ?? globalPageSize
             const renderTimeout = ep.renderTimeout ?? globalRenderTimeout
 
-            // Endpoints with cache: true cache list responses to disk
-            // on a per-query basis. Each unique list query (whether
-            // GET /entities?... or POST /entities/query) writes its
-            // response envelope to
-            //   <out>/<base>/<name>/entities/<hash>.json
-            // where hash is a stable digest of the canonicalized query
-            // (see cacheKeyForQuery above). On any catalog change the
-            // whole cache directory is dropped — the next request
-            // through repopulates whatever's needed. Coarse but correct.
+            // Endpoints with cache: true cache GET /entities responses
+            // to disk on a per-query-string basis. Path scheme:
+            //   <out>/<base>/<name>/entities/<raw-query-string>.json
+            //   <out>/<base>/<name>/entities/index.json    (no params)
             //
-            // The reverse proxy uses the same hash logic (nginx-Lua or
-            // equivalent) to find the matching cache file when mikser
-            // is unreachable. See the README for a working nginx config.
+            // On any catalog change, the whole cache directory is
+            // dropped — the next requests through repopulate whatever's
+            // needed. Coarse but correct, no per-query tracking.
+            //
+            // Reverse-proxy failover (stock nginx, no Lua):
+            //   location /api/sitemap/entities {
+            //       proxy_pass http://localhost:3001;
+            //       proxy_intercept_errors on;
+            //       error_page 502 503 504 = @cache;
+            //   }
+            //   location @cache {
+            //       root /var/www/out;
+            //       try_files /api/sitemap/entities/$args.json
+            //                 /api/sitemap/entities/index.json
+            //                 =502;
+            //   }
+            //
+            // POST /entities/query responses aren't cached — there's no
+            // URL the proxy could derive a cache file path from. Use
+            // GET for cacheable queries (the SDK's client.list({...}) →
+            // GET URL is the canonical pattern).
             if (ep.cache === true) {
                 cachedEndpoints.push({ name })
             }
@@ -417,24 +415,22 @@ export default ({
                     res.json(envelope)
                     logger.trace('Api[%s] list %dms (%d/%d items)', name, Date.now() - t0, items.length, total)
 
-                    // Write-through cache: on every list response, also
-                    // write to <out>/<base>/<name>/entities/<hash>.json.
-                    // The hash is computed from the canonicalized query
-                    // (same logic the reverse proxy uses for failover).
+                    // Write-through cache: write the response to a file
+                    // path that mirrors the request URL — same `$args`
+                    // nginx's `try_files` sees, no hashing on either
+                    // side. See the caching docs for the nginx config
+                    // that wires the failover.
                     if (cacheEnabled && runtime.options.outputFolder) {
-                        const cacheKey = cacheKeyForQuery({
-                            filter: parsed.filter,
-                            sort: parsed.sort,
-                            fields: parsed.fields,
-                            limit, skip,
-                        })
+                        const url = req.originalUrl || req.url || ''
+                        const qIdx = url.indexOf('?')
+                        const rawQueryString = qIdx >= 0 ? url.slice(qIdx + 1) : ''
+                        const cacheName = cacheNameForQueryString(rawQueryString)
                         // Fire-and-forget — the response is already sent.
-                        // Errors are logged but don't propagate.
                         writeQueryCache({
                             outputFolder: runtime.options.outputFolder,
                             base: apiBase,
                             name,
-                            queryKey: cacheKey,
+                            cacheName,
                             envelope,
                             logger,
                         }).catch(() => {})
@@ -471,23 +467,13 @@ export default ({
                     res.json(envelope)
                     logger.trace('Api[%s] query %dms (%d/%d items)', name, Date.now() - t0, items.length, total)
 
-                    // Same write-through cache as GET — the query shape
-                    // is identical, so the hash is identical, so a GET
-                    // and a POST with structurally-equal queries share
-                    // one cache file.
-                    if (cacheEnabled && runtime.options.outputFolder) {
-                        const cacheKey = cacheKeyForQuery({
-                            filter, sort, fields, limit, skip,
-                        })
-                        writeQueryCache({
-                            outputFolder: runtime.options.outputFolder,
-                            base: apiBase,
-                            name,
-                            queryKey: cacheKey,
-                            envelope,
-                            logger,
-                        }).catch(() => {})
-                    }
+                    // POST queries aren't disk-cached. The reverse proxy
+                    // failover scheme is URL-based (cache file path =
+                    // request URL), but POST has no URL-equivalent for
+                    // its body. Cacheable queries should use GET — which
+                    // the SDK's list() does by default. Body-only queries
+                    // are by definition complex/non-canonicalizable so
+                    // they're treated as live-only.
                 } catch (err) {
                     logger.error('Api[%s] query error (%dms): %s', name, Date.now() - t0, err.message)
                     res.status(500).json({ error: err.message })
