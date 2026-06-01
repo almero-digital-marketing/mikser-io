@@ -14,12 +14,17 @@ Two real problems get solved.
 
 **Repeat-query savings.** Every browser tab issuing `useMikserRoutes(...)` makes the same `GET /api/sitemap/entities?...` request on boot. Without a cache, mikser re-runs sift over the in-memory catalog for each. With a cache, the proxy serves the cached file from disk and only the first request after an invalidation actually hits mikser. For SPAs in front of small-to-medium catalogs that's a measurable drop in CPU on the engine.
 
-## Picking which endpoint to cache
+## Two cache benefits, decide per endpoint
 
-Two-endpoint pattern, optimized for SPA boot:
+`cache: true` gives you two things at once:
 
-- **A full-content endpoint (e.g. `public`)** — returns the whole entity. Used by per-id reads like `useDocument(id)`. **Don't cache it.** Per-id responses are already small, and a broad list call against this endpoint (no filter, no projection) would dump the entire catalog into a single cache file.
-- **A narrow sitemap endpoint** — filters to just the routes the SPA needs (e.g. documents with `meta.component`), projects to just the routing fields (`id`, `destination`, `meta.route`, `meta.component`, `meta.title`). **Cache this one.** The SPA's first paint hits exactly this endpoint and never has to download a megabyte of unused markdown to build its route table.
+1. **Fail-safety.** When mikser is down, the reverse proxy serves the cached response so reads don't fail. Whatever the user was looking at keeps working.
+2. **Performance.** When the response is large and the proxy can serve it directly (or after the proxy's own HTTP cache layer), each cached query saves a roundtrip to mikser plus the sift execution.
+
+Pick `cache: true` whenever **either** benefit matters for the endpoint. The two endpoints in a typical SPA setup illustrate both:
+
+- **A full-content endpoint (e.g. `public`)** — returns the whole entity. Used by per-id reads like `useDocument(id)`. **Cache it for the fail-safety benefit.** A user reading a document keeps reading it when mikser blips during a deploy. Per-id cache files are small; the performance win is modest, but the outage-survival win is the whole point.
+- **A narrow sitemap endpoint** — filters to just the routes the SPA needs (e.g. documents with `meta.component`), projects to just the routing fields (`id`, `destination`, `meta.route`, `meta.component`, `meta.title`). **Cache it for both benefits.** The fail-safety story is the same as above. The performance story is the load-time win: the SPA's first paint hits exactly this endpoint and never has to download megabytes of unused markdown to build its route table.
 
 ```js
 api: {
@@ -27,20 +32,21 @@ api: {
     public: {
       query: e => e.type === 'document' && e.meta?.published,
       operations: ['list', 'subscribe'],
-      // no `cache`, no `fields` — useDocument(id) hits this for one
-      // doc at a time
+      cache: true,                    // fail-safety for per-id reads
     },
     sitemap: {
       query: e => e.type === 'document' && e.meta?.published && e.meta?.component,
       operations: ['list', 'subscribe'],
       fields: ['id', 'destination', 'meta.route', 'meta.component', 'meta.title'],
-      cache: true,
+      cache: true,                    // fail-safety + load-time win
     },
   },
 }
 ```
 
-**The `fields` allow-list is what makes the sitemap a sitemap.** Without it, a broad query against a "narrow" endpoint still returns the full entity for every match — same wire size as querying `public`, defeating the whole point. mikser-io enforces the projection server-side regardless of what the client asks for, so a curl with no `?fields=...` still gets exactly the safe subset.
+**The `fields` allow-list is what makes the sitemap a sitemap.** Without it, a broad query against a "narrow" endpoint still returns the full entity for every match — same wire size as querying `public`, defeating the load-time win. mikser-io enforces the projection server-side regardless of what the client asks for, so a curl with no `?fields=...` still gets exactly the projected subset.
+
+**Caveat for broad list calls against full-content endpoints.** A `public`-style endpoint without a `fields` projection that gets hit with a broad list (no filter) writes a single cache file containing every full entity in scope. That's not what you want — it's a megabyte-scale cache file behind a single URL. The SDK's `useMikserRoutes` deliberately points at the narrow sitemap endpoint for exactly this reason. If you have a use case that needs broad lists against full content, either narrow the endpoint via `fields`, or split it into two endpoints (narrow sitemap-style for the broad list, full-content for per-id).
 
 ## How to turn it on
 
