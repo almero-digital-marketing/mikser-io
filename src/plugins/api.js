@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { access } from 'node:fs/promises'
+import { access, writeFile, mkdir } from 'node:fs/promises'
 import _ from 'lodash'
 import sift from 'sift'
 import { useRenderer, useCollection } from '../api.js'
@@ -118,6 +118,57 @@ async function runQuery({ filter, sort, fields, skip, limit, scope, findEntities
     return { items, total }
 }
 
+// Build the list-response envelope for an endpoint's "default" GET —
+// i.e. the response a client would get hitting GET <base>/<name>/entities
+// with no query parameters. This is what gets written to disk as the
+// cache file so a reverse proxy can serve it when mikser is down.
+//
+// The cache is the highest-traffic case (the SDK's useMikserRoutes
+// fetches exactly this), and identical across clients — caching it to
+// out/ turns it into a CDN-friendly static file. Per-query caching of
+// arbitrary URL params would explode the cache key space without
+// matching real traffic; we deliberately don't.
+async function buildDefaultEnvelope({ scope, findEntities, pageSize }) {
+    const limit = Math.min(100, Math.max(1, pageSize))
+    const skip = 0
+    const { items, total } = await runQuery({
+        filter: {},
+        sort: undefined,
+        fields: undefined,
+        skip,
+        limit,
+        scope,
+        findEntities,
+    })
+    const totalPages = Math.ceil(total / limit) || 1
+    return {
+        items, page: 1, limit, total, totalPages,
+        hasNext: limit < total,
+        hasPrev: false,
+    }
+}
+
+// Write the cached response to <outputFolder>/<basePath>/<endpoint>/entities.json.
+// When mikser is running, the live API route serves the path without the
+// .json extension — the file is the explicit static fallback a reverse
+// proxy (or mikser's own static handler) serves when the live route is
+// unavailable. SDK consumers point initialUrl at the .json file directly
+// for zero-roundtrip first paint.
+async function writeEndpointCache({ outputFolder, base, name, envelope, logger }) {
+    // Strip leading slash from base ("/api" → "api") so path.join joins
+    // it under outputFolder rather than treating it as absolute.
+    const relBase = base.replace(/^\//, '')
+    const dir = path.join(outputFolder, relBase, name)
+    const file = path.join(dir, 'entities.json')
+    try {
+        await mkdir(dir, { recursive: true })
+        await writeFile(file, JSON.stringify(envelope), 'utf8')
+        logger.trace('Api[%s] cache written: %s (%d items)', name, file, envelope.items.length)
+    } catch (err) {
+        logger.error('Api[%s] cache write failed (%s): %s', name, file, err.message)
+    }
+}
+
 // MIME type lookup used when streaming a postprocessor's output back over
 // HTTP. The renderer's output extension lives on entity.destination
 // (assigned by the layouts plugin), so we use it as the source of truth.
@@ -211,6 +262,13 @@ export default ({
     findEntities,
     constants: { OPERATION },
 }) => {
+    // Shared between onLoaded (populates) and onFinalize (consumes).
+    // Hoisted so the lifecycle hooks see the same registry; the body
+    // inside onLoaded is what actually fills it in based on
+    // runtime.config.api.endpoints.
+    let apiBase = '/api'
+    const cachedEndpoints = []
+
     onLoaded(async () => {
         const logger = useLogger()
 
@@ -237,9 +295,13 @@ export default ({
             throw new Error('Express is required for the api plugin — run: npm install express')
         })
 
-        const base = runtime.config.api?.base ?? '/api'
+        apiBase = runtime.config.api?.base ?? '/api'
+        const base = apiBase   // alias so existing local references still work
         const globalPageSize = runtime.config.api?.pageSize ?? 10
         const globalRenderTimeout = runtime.config.api?.renderTimeout ?? 30_000
+
+        // cachedEndpoints is hoisted above (shared with onFinalize).
+        // Per-endpoint setup loop pushes into it when cache: true is set.
 
         // The plugin mirrors the vector / data plugin shape: a named map
         // of endpoints, each with its own optional `token`, `query`
@@ -266,6 +328,15 @@ export default ({
             const query = typeof ep.query === 'function' ? ep.query : null
             const pageSize = ep.pageSize ?? globalPageSize
             const renderTimeout = ep.renderTimeout ?? globalRenderTimeout
+
+            // Endpoints with cache: true get their default GET response
+            // written to <out>/<base>/<name>/entities.json on every
+            // catalog change. See the onFinalize hook below — a reverse
+            // proxy can serve this file as a static fallback so the
+            // frontend keeps working even if mikser itself is down.
+            if (ep.cache === true) {
+                cachedEndpoints.push({ name, scope: query, pageSize })
+            }
 
             const auth = (req, res, next) => {
                 if (!ep.token) return next()
@@ -455,18 +526,28 @@ export default ({
     // before plugin onFinalized hooks. By Finalize we still have the
     // cycle's journal entries; by Finalized they're already gone.
     onFinalize(async (signal) => {
-        if (!subscriptions.size) return
         const logger = useLogger()
         const evMap = {
             [OPERATION.CREATE]: 'create',
             [OPERATION.UPDATE]: 'update',
             [OPERATION.DELETE]: 'delete',
         }
+
+        // Track which cached endpoints saw a relevant change this cycle —
+        // we only rewrite the cache file if the endpoint's query scope
+        // actually matches at least one journal entry, so a churning
+        // catalog that doesn't touch sitemap-eligible docs doesn't
+        // rewrite sitemap.json on every change.
+        const dirtyCached = new Set()
+
+        // Single journal iteration drives both SSE push and cache
+        // invalidation detection — keeps the per-cycle cost to one pass.
         for await (const { operation, entity } of useJournal(
             'Api subscriptions',
             [OPERATION.CREATE, OPERATION.UPDATE, OPERATION.DELETE],
             signal,
         )) {
+            // SSE push to live subscribers
             for (const [subId, sub] of subscriptions) {
                 if (sub.scope && !sub.scope(entity)) continue
                 if (sub.filter && !sub.filter(entity)) continue
@@ -475,6 +556,38 @@ export default ({
                     : { id: entity.id, entity }
                 sseSend(sub.res, evMap[operation], payload)
                 logger.trace('Api subscription %s %s: %s', subId, evMap[operation], entity.id)
+            }
+
+            // Cache-dirty detection
+            for (const ep of cachedEndpoints) {
+                if (dirtyCached.has(ep.name)) continue
+                if (!ep.scope || ep.scope(entity)) dirtyCached.add(ep.name)
+            }
+        }
+
+        // Rewrite cache files for any endpoint that saw a relevant
+        // change. On the very first cycle (initial catalog load) the
+        // journal contains every entity as a CREATE, so this fires
+        // automatically — no need for a separate one-shot writer.
+        if (dirtyCached.size > 0 && runtime.options.outputFolder) {
+            for (const ep of cachedEndpoints) {
+                if (!dirtyCached.has(ep.name)) continue
+                try {
+                    const envelope = await buildDefaultEnvelope({
+                        scope: ep.scope,
+                        findEntities,
+                        pageSize: ep.pageSize,
+                    })
+                    await writeEndpointCache({
+                        outputFolder: runtime.options.outputFolder,
+                        base: apiBase,
+                        name: ep.name,
+                        envelope,
+                        logger,
+                    })
+                } catch (err) {
+                    logger.error('Api[%s] cache rebuild failed: %s', ep.name, err.message)
+                }
             }
         }
     })
