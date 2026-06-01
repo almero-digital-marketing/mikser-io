@@ -888,7 +888,7 @@ Always overridable with explicit `operations`. A request to an operation outside
 
 **Without `api.endpoints` configured**, the plugin logs a warning and mounts nothing — you must declare at least one endpoint to use the API.
 
-**Per-query disk cache (`cache: true`)**
+#### Per-query disk cache (`cache: true`)
 
 Setting `cache: true` on an endpoint turns every `GET /<endpoint>/entities?...` response into a write-through cache. Each unique query writes the response envelope to a file whose path is derived from the request URL — no hashing, no extra modules on either end. Two things happen as a side effect:
 
