@@ -42,7 +42,7 @@ Build mikser into the parts of your application that are content-shaped. Keep th
 
 **Run anywhere.** The same CLI handles one-shot builds, watch-mode dev loops, and a long-running HTTP server with a shared Express app. `npx mikser` ships a static site; `mikser --watch` is the dev loop; `mikser --server` exposes a live admin/API.
 
-**Outages don't take you down.** When Contentful, Sanity, or Strapi blink, every frontend reading from them errors out. Mikser writes every cacheable read to disk as it serves it — a reverse proxy in front keeps serving the cached file when mikser itself blips, so visitors don't notice. Live updates pause until mikser returns; reads keep working.
+**Outages don't take you down.** Headless CMSes (Contentful, Sanity, Strapi) treat the API as the source of truth — when it blinks, every frontend errors out. Mikser inverts that: reads become static files on disk, the live channel layers on top. A reverse proxy keeps serving the files when mikser blips. Visitors don't notice; live updates pause until mikser returns.
 
 **Library mode.** Mikser is also a library. `useRenderer`, `useCollection`, `findSimilar`, and direct lifecycle hooks let you embed the engine inside an existing Node app instead of running it as a CLI.
 
