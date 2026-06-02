@@ -62,23 +62,22 @@ export async function setup(options) {
             runtime.options.info = false
         }
         runtime.engine.logger.notice = runtime.engine.logger.info
-    })
 
-    onInitialized(async () => {
-        const logger = useLogger()
-
+        // Resolve folders inside onInitialize so journal.js and
+        // catalog.js (which initialize in onInitialized) see absolute
+        // paths and a guaranteed-existing runtimeFolder. The split is
+        // deliberate: engine's onInitialize does setup that the rest of
+        // the engine infrastructure depends on; onInitialized does
+        // things plugins may need.
         runtime.options.workingFolder = path.resolve(runtime.options.workingFolder)
         process.chdir(runtime.options.workingFolder)
 
         runtime.options.runtimeFolder = path.join(runtime.options.workingFolder, runtime.options.runtimeFolder || 'runtime')
         runtime.options.outputFolder = path.join(runtime.options.workingFolder, runtime.options.outputFolder || 'out')
 
-        logger.info('Working folder: %s', runtime.options.workingFolder)
-        logger.info('Output folder: %s', runtime.options.outputFolder)
-
         if (runtime.options.clear) {
             try {
-                logger.info('Clearing folders')
+                runtime.engine.logger.info('Clearing folders')
                 await rm(runtime.options.outputFolder, { recursive: true })
                 await rm(runtime.options.runtimeFolder, { recursive: true })
             } catch (err) {
@@ -87,6 +86,13 @@ export async function setup(options) {
             }
         }
         await mkdir(runtime.options.runtimeFolder, { recursive: true })
+    })
+
+    onInitialized(async () => {
+        const logger = useLogger()
+
+        logger.info('Working folder: %s', runtime.options.workingFolder)
+        logger.info('Output folder: %s', runtime.options.outputFolder)
 
         // Server bring-up: two paths, controlled by which of these are set.
         //

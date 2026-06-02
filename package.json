@@ -1,6 +1,6 @@
 {
 	"name": "mikser-io",
-	"version": "6.27.0",
+	"version": "6.28.0",
 	"description": "<p align=\"center\">   <img src=\"mikser-lockup-stacked.svg\" alt=\"mikser\" width=\"198\" /> </p>",
 	"main": "index.js",
 	"scripts": {
@@ -62,8 +62,10 @@
 		"mikser-io-render-eta": "file:../mikser-io-render-eta",
 		"mikser-io-render-liquid": "file:../mikser-io-render-liquid",
 		"mikser-io-render-markdown": "file:../mikser-io-render-markdown",
+		"mikser-io-schemas": "file:../mikser-io-schemas",
 		"mikser-io-vector": "file:../mikser-io-vector",
-		"sharp": "^0.34.5"
+		"sharp": "^0.34.5",
+		"zod": "^4.4.3"
 	},
 	"directories": {
 		"test": "test"

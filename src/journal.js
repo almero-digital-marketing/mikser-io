@@ -1,5 +1,5 @@
 import runtime from './runtime.js'
-import { onLoaded, onCancelled, onFinalized } from './lifecycle.js'
+import { onInitialized, onCancelled, onFinalized } from './lifecycle.js'
 import { unlink } from 'fs/promises'
 import knex from 'knex'
 import path from 'path'
@@ -81,7 +81,15 @@ export async function clearJournal(aborted) {
     }
 }
 
-onLoaded(async () => {
+// Initialize the journal in onInitialized rather than onLoaded.
+// The engine resolves runtime.options.runtimeFolder in its own
+// onInitialized hook; ours runs after (engine.js is imported before
+// any plugin loads, so its onInitialized registers first). This way
+// every plugin hook from onLoad onwards — including plugin onLoaded
+// — can safely call runtime.create / runtime.update without
+// depending on the order in which journal.js's module registered
+// relative to theirs.
+onInitialized(async () => {
     const filename = path.join(runtime.options.runtimeFolder, `journal.db`)
     try {
         await unlink(filename)

@@ -1,6 +1,6 @@
 import runtime from './runtime.js'
 import { useLogger } from './engine.js'
-import { onLoaded, onPersist, onFinalized } from './lifecycle.js'
+import { onInitialized, onPersist, onFinalized } from './lifecycle.js'
 import { useJournal } from './journal.js'
 import { OPERATION } from './constants.js'
 import { Low } from 'lowdb'
@@ -10,7 +10,13 @@ import _ from 'lodash'
 
 let catalog
 
-onLoaded(async () => {
+// Same reasoning as journal.js — initialize the catalog in
+// onInitialized so every plugin hook from onLoad onwards can safely
+// call findEntity / findEntities and write through the journal.
+// catalog.js imports useJournal from journal.js, so journal.js's
+// onInitialized registers first within the phase — its hook runs
+// before this one.
+onInitialized(async () => {
 	const adapter = new JSONFile(path.join(runtime.options.runtimeFolder, `catalog.json`))
 	catalog = new Low(adapter, {
 		entities: [],
@@ -27,10 +33,21 @@ onPersist(async () => {
 				logger.trace('Database %s %s: %s', entity.collection, operation, entity.id)
 				catalog.data.entities.push(entity)
 				break
-			case OPERATION.UPDATE:
+			case OPERATION.UPDATE: {
 				logger.trace('Database %s %s: %s', entity.collection, operation, entity.id)
-				catalog.chain.get('entities').find({ id: entity.id }).assign(entity).value()
+				// Upsert semantics: if the entity doesn't already exist,
+				// treat UPDATE as CREATE. Plugins that "ensure an entity
+				// is in the catalog" can call runtime.update without a
+				// findEntity-then-branch dance. Previously a no-op when
+				// the id was new, which was a silent footgun.
+				const existing = catalog.chain.get('entities').find({ id: entity.id }).value()
+				if (existing) {
+					catalog.chain.get('entities').find({ id: entity.id }).assign(entity).value()
+				} else {
+					catalog.data.entities.push(entity)
+				}
 				break
+			}
 			case OPERATION.DELETE:
 				logger.trace('Database %s %s: %s', entity.collection, operation, entity.id)
 				catalog.chain.get('entities').remove({ id: entity.id }).value()

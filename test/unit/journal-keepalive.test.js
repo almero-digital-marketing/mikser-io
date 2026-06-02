@@ -14,13 +14,15 @@ import path from 'node:path'
 import runtime from '../../src/runtime.js'
 import { addEntry, clearJournal } from '../../src/journal.js'
 
-// The journal module's onLoaded hook initializes its knex client when
-// the lifecycle reaches the 'loaded' phase. We don't want to spin up the
-// whole engine for this test, so we fire just that one phase.
+// The journal module's onInitialized hook initializes its knex client
+// when the lifecycle reaches the 'initialized' phase. We don't want
+// to spin up the whole engine for this test, so we fire just that
+// one phase. (Was 'loaded' before mikser-io 6.24.0 — see
+// lifecycle.md and ADR-0005.)
 async function loadJournal(runtimeFolder) {
     runtime.options.runtimeFolder = runtimeFolder
     runtime.engine = { logger: console }
-    for (const cb of runtime.hooks.loaded) await cb()
+    for (const cb of runtime.hooks.initialized) await cb()
 }
 
 describe('journal: keep the sqlite connection alive across cycles', () => {
