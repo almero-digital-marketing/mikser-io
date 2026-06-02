@@ -133,6 +133,43 @@ describe('createMcpSubstrate', () => {
         assert.equal(s.tools[0].def.description, 'sugary')
         assert.deepEqual(s.tools[0].def.inputSchema, { x: { type: 'string' } })
     })
+
+    it('recordLogLine retains lines with monotonic seq numbers', () => {
+        const substrate = createMcpSubstrate()
+        substrate.recordLogLine({ level: 'info',  data: { msg: 'one' } })
+        substrate.recordLogLine({ level: 'warn',  data: { msg: 'two' } })
+        substrate.recordLogLine({ level: 'error', data: { msg: 'three' } })
+        const recent = substrate.recentLogLines()
+        assert.equal(recent.length, 3)
+        assert.equal(recent[0].data.msg, 'one')
+        assert.equal(recent[2].data.msg, 'three')
+        assert.ok(recent[0].seq < recent[1].seq)
+        assert.ok(recent[1].seq < recent[2].seq)
+    })
+
+    it('recentLogLines respects limit', () => {
+        const substrate = createMcpSubstrate()
+        for (let i = 0; i < 50; i++) {
+            substrate.recordLogLine({ level: 'info', data: { msg: `line-${i}` } })
+        }
+        const tail = substrate.recentLogLines(5)
+        assert.equal(tail.length, 5)
+        assert.equal(tail[4].data.msg, 'line-49')
+        assert.equal(tail[0].data.msg, 'line-45')
+    })
+
+    it('rolling buffer is tail-truncated past the cap', () => {
+        const substrate = createMcpSubstrate()
+        // Cap is 500 internally; push 700 and verify the oldest 200 dropped.
+        for (let i = 0; i < 700; i++) {
+            substrate.recordLogLine({ level: 'info', data: { msg: `line-${i}` } })
+        }
+        const all = substrate.recentLogLines(1000)
+        assert.equal(all.length, 500)
+        // line-200 is now the oldest retained; line-699 the newest.
+        assert.equal(all[0].data.msg, 'line-200')
+        assert.equal(all[499].data.msg, 'line-699')
+    })
 })
 
 describe('wireLoggerToMcp', () => {

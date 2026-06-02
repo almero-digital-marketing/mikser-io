@@ -56,7 +56,20 @@ Loading the `api` plugin with `--mcp` registers six tools on the engine's MCP su
 
 Other plugins are expected to follow the same shape — `vector` will add `find_similar`, `schemas` will add `list_schemas` / `get_schema_shape`, and so on.
 
-## Ten scenarios
+## Built-in resources
+
+Four introspection resources ship with core — read-only views into the running engine. They use the `mikser://` scheme and return JSON.
+
+| Resource                  | What it shows                                                                                  |
+| ------------------------- | ---------------------------------------------------------------------------------------------- |
+| `mikser://lifecycle`      | Current lifecycle phase (`initialize`, `process`, `render`, etc.) — `null` between phases.      |
+| `mikser://runtime`        | Resolved `runtime.options` — folders, plugins, server port, current phase.                      |
+| `mikser://config`         | Effective `runtime.config` — the merged config plugins see, including per-plugin keys.          |
+| `mikser://logs/recent`    | Rolling 500-line buffer of log lines. Each carries `seq`, `level`, and `data.msg`.              |
+
+Use the log buffer to debug failures that scrolled past the live `notifications/message` stream — e.g. an AI joining mid-cycle can read what happened before its session opened.
+
+## Twelve scenarios
 
 These are written as the conversation an operator would have with their AI. The arrows show the actual MCP tool calls the AI would emit.
 
@@ -293,7 +306,7 @@ The practical implication: if two clients call `mikser_update_entity` for the sa
 
 - **No streaming render output.** `mikser_render` returns the complete output as a single tool response. For very large renders (multi-MB PDFs), this is fine for chat clients but inappropriate as a load-bearing API. Use the HTTP `/api/<endpoint>/render` route for that.
 - **No undo.** `mikser_delete_entity` is final. Wrap destructive flows in your client's confirmation UI.
-- **Resources are not entities.** A `mikser://` resource (currently planned: `mikser://logs/recent`, `mikser://runtime`, `mikser://config`, `mikser://lifecycle`) is engine introspection, not catalog content. Don't conflate them.
+- **Resources are not entities.** Four `mikser://` introspection resources ship with core — `mikser://lifecycle`, `mikser://runtime`, `mikser://config`, `mikser://logs/recent` — and surface engine state (current phase, options, merged config, rolling 500-line log buffer). They're for introspection, not catalog content. Don't conflate them with `mikser_read_entity`.
 - **Late tool registration.** Plugins that register tools deep in `onLoaded` will only appear after their hook runs. Until then, `tools/list` won't include them. Clients should re-list on `notifications/tools/list_changed`.
 
 ## Why this is in core, not a plugin

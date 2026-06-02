@@ -12,6 +12,12 @@ const runtime = {
     journal: [],
     validators: [],
     started: false,
+    // Name of the lifecycle phase currently executing — null between
+    // phases. Set inside start() / process() / render() etc. before
+    // each callHooks(), cleared on completion. Used by MCP
+    // introspection (mikser://lifecycle resource) and surfaced via
+    // runtime.engine.logger trace logs.
+    phase: null,
     mutex: new Mutex(),
     abortController: undefined,
     hooks: {
@@ -40,10 +46,18 @@ const runtime = {
         completed: [],
     },
 
-    async callHooks(hooks, signal) {
-        for (let hook of hooks) {
-            if (signal?.aborted) throw new AbortError()
-            await hook(signal)
+    async callHooks(hooks, signal, phaseName) {
+        // Lifecycle methods below pass `phaseName` so introspection
+        // (mikser://lifecycle, debuggers) can see what's running. Direct
+        // callers (tests, plugins driving sub-flows) can omit it.
+        if (phaseName) this.phase = phaseName
+        try {
+            for (let hook of hooks) {
+                if (signal?.aborted) throw new AbortError()
+                await hook(signal)
+            }
+        } finally {
+            if (phaseName) this.phase = null
         }
     },
 
@@ -60,13 +74,13 @@ const runtime = {
     },
 
     async start() {
-        await this.callHooks(this.hooks.initialize)
-        await this.callHooks(this.hooks.initialized)
-        await this.callHooks(this.hooks.load)
-        await this.callHooks(this.hooks.loaded)
+        await this.callHooks(this.hooks.initialize, undefined, 'initialize')
+        await this.callHooks(this.hooks.initialized, undefined, 'initialized')
+        await this.callHooks(this.hooks.load, undefined, 'load')
+        await this.callHooks(this.hooks.loaded, undefined, 'loaded')
 
-        await this.callHooks(this.hooks.import)
-        await this.callHooks(this.hooks.imported)
+        await this.callHooks(this.hooks.import, undefined, 'import')
+        await this.callHooks(this.hooks.imported, undefined, 'imported')
 
         this.started = true
         await this.process()
@@ -82,43 +96,45 @@ const runtime = {
                 this.abortController = new AbortController()
                 const { signal } = this.abortController
 
-                await this.callHooks(this.hooks.process, signal)
-                await this.callHooks(this.hooks.processed, signal)
-                await this.callHooks(this.hooks.persist, signal)
-                await this.callHooks(this.hooks.persisted, signal)
+                await this.callHooks(this.hooks.process, signal, 'process')
+                await this.callHooks(this.hooks.processed, signal, 'processed')
+                await this.callHooks(this.hooks.persist, signal, 'persist')
+                await this.callHooks(this.hooks.persisted, signal, 'persisted')
 
                 await this.render(signal)
             } catch (e) {
                 if (e.name !== 'AbortError') throw e
+                this.phase = 'cancelled'
                 for (let hook of this.hooks.cancelled) await hook()
+                this.phase = null
             }
         })
     },
 
     async render(signal) {
-        await this.callHooks(this.hooks.beforeRender, signal)
-        await this.callHooks(this.hooks.render, signal)
-        await this.callHooks(this.hooks.afterRender, signal)
+        await this.callHooks(this.hooks.beforeRender, signal, 'beforeRender')
+        await this.callHooks(this.hooks.render, signal, 'render')
+        await this.callHooks(this.hooks.afterRender, signal, 'afterRender')
 
         await this.postprocess(signal)
     },
 
     async postprocess(signal) {
-        await this.callHooks(this.hooks.beforePostprocess, signal)
-        await this.callHooks(this.hooks.postprocess, signal)
-        await this.callHooks(this.hooks.afterPostprocess, signal)
+        await this.callHooks(this.hooks.beforePostprocess, signal, 'beforePostprocess')
+        await this.callHooks(this.hooks.postprocess, signal, 'postprocess')
+        await this.callHooks(this.hooks.afterPostprocess, signal, 'afterPostprocess')
 
         await this.finalize(signal)
     },
 
     async cancel() {
         this.abortController?.abort()
-        await this.callHooks(this.hooks.cancel)
+        await this.callHooks(this.hooks.cancel, undefined, 'cancel')
     },
 
     async finalize(signal) {
-        await this.callHooks(this.hooks.finalize, signal)
-        await this.callHooks(this.hooks.finalized, signal)
+        await this.callHooks(this.hooks.finalize, signal, 'finalize')
+        await this.callHooks(this.hooks.finalized, signal, 'finalized')
     },
 
     async sync(operation) {

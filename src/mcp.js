@@ -47,6 +47,14 @@ export function createMcpSubstrate() {
     // transport. Used to fan log notifications and list-changed
     // events out to every active client.
     const activeServers = new Set()
+    // Rolling buffer of recent log lines, surfaced via the
+    // mikser://logs/recent resource. Sized to cover one or two
+    // typical lifecycle cycles — large enough to debug a render
+    // failure that scrolled off the live stream, small enough that
+    // keeping it in memory isn't a concern. Tail-truncated; oldest
+    // line drops when the cap is exceeded.
+    const LOG_BUFFER_CAP = 500
+    const logBuffer = []
 
     function bind(server) {
         for (const args of registrations.tools) server.registerTool(...args)
@@ -57,24 +65,28 @@ export function createMcpSubstrate() {
     const substrate = {
         // ---- plugin-facing surface (mirrors McpServer) -----------
 
-        registerTool(name, def, handler) {
-            registrations.tools.push([name, def, handler])
+        // The SDK's register* methods take different argument counts
+        // (3 for tools, 4 for resources, 3 for prompts). We spread the
+        // recorded args verbatim — substrate doesn't peek at the
+        // shape, it just records and replays.
+        registerTool(...args) {
+            registrations.tools.push(args)
             for (const s of activeServers) {
-                try { s.registerTool(name, def, handler) } catch { /* dup, etc. */ }
+                try { s.registerTool(...args) } catch { /* dup, etc. */ }
             }
             return substrate
         },
-        registerResource(name, def, handler) {
-            registrations.resources.push([name, def, handler])
+        registerResource(...args) {
+            registrations.resources.push(args)
             for (const s of activeServers) {
-                try { s.registerResource(name, def, handler) } catch { /* dup */ }
+                try { s.registerResource(...args) } catch { /* dup */ }
             }
             return substrate
         },
-        registerPrompt(name, def, handler) {
-            registrations.prompts.push([name, def, handler])
+        registerPrompt(...args) {
+            registrations.prompts.push(args)
             for (const s of activeServers) {
-                try { s.registerPrompt(name, def, handler) } catch { /* dup */ }
+                try { s.registerPrompt(...args) } catch { /* dup */ }
             }
             return substrate
         },
@@ -116,7 +128,115 @@ export function createMcpSubstrate() {
                 } catch { /* swallow */ }
             }
         },
+
+        // ---- rolling log buffer ----------------------------------
+
+        // Called by wireLoggerToMcp on every log call. Records a
+        // monotonic seq number so clients can poll "give me lines
+        // since seq=N" against mikser://logs/recent.
+        recordLogLine(line) {
+            logBuffer.push({
+                seq: (logBuffer.length === 0 ? 1 : logBuffer[logBuffer.length - 1].seq + 1),
+                t: runtime.engine?.now ? runtime.engine.now() : null,
+                ...line,
+            })
+            // Tail-truncate so memory stays bounded.
+            if (logBuffer.length > LOG_BUFFER_CAP) {
+                logBuffer.splice(0, logBuffer.length - LOG_BUFFER_CAP)
+            }
+        },
+        recentLogLines(limit = LOG_BUFFER_CAP) {
+            const n = Math.min(LOG_BUFFER_CAP, Math.max(1, limit))
+            return logBuffer.slice(-n)
+        },
     }
+
+    // Built-in introspection resources. Read-only views into the
+    // running engine — let an AI ask "what's the current phase?",
+    // "what config is loaded?", "what just happened?" without
+    // needing a custom tool.
+    //
+    // The SDK's registerResource signature is:
+    //   registerResource(name, uriOrTemplate, metadata, handler)
+    // Static resources pass a URI string; the handler returns
+    // { contents: [{ uri, mimeType, text }] }.
+
+    substrate.registerResource(
+        'mikser-lifecycle',
+        'mikser://lifecycle',
+        {
+            title: 'Current lifecycle phase',
+            description: 'The phase the engine is currently executing. Null when between phases.',
+            mimeType: 'application/json',
+        },
+        async (uri) => ({
+            contents: [{
+                uri: uri.href,
+                mimeType: 'application/json',
+                text: JSON.stringify({
+                    phase: runtime.phase ?? null,
+                    started: runtime.started === true,
+                    stamp: runtime.stamp,
+                    processTime: runtime.processTime ?? null,
+                }, null, 2),
+            }],
+        }),
+    )
+
+    substrate.registerResource(
+        'mikser-runtime',
+        'mikser://runtime',
+        {
+            title: 'Engine runtime options',
+            description: 'Resolved runtime.options — working folder, output folder, server port, plugin list, etc. Excludes the live engine handles (logger, queue, workers).',
+            mimeType: 'application/json',
+        },
+        async (uri) => ({
+            contents: [{
+                uri: uri.href,
+                mimeType: 'application/json',
+                text: JSON.stringify({
+                    options: runtime.options,
+                    started: runtime.started === true,
+                    phase: runtime.phase ?? null,
+                }, null, 2),
+            }],
+        }),
+    )
+
+    substrate.registerResource(
+        'mikser-config',
+        'mikser://config',
+        {
+            title: 'Effective mikser config',
+            description: 'The merged config object as plugins see it (runtime.config). Includes per-plugin keys.',
+            mimeType: 'application/json',
+        },
+        async (uri) => ({
+            contents: [{
+                uri: uri.href,
+                mimeType: 'application/json',
+                text: JSON.stringify(runtime.config, null, 2),
+            }],
+        }),
+    )
+
+    substrate.registerResource(
+        'mikser-logs-recent',
+        'mikser://logs/recent',
+        {
+            title: 'Recent engine log lines',
+            description: `Rolling buffer of the most recent log lines (up to ${LOG_BUFFER_CAP}). Useful for debugging a render or postprocess failure that scrolled past the live notifications stream.`,
+            mimeType: 'application/json',
+        },
+        async (uri) => ({
+            contents: [{
+                uri: uri.href,
+                mimeType: 'application/json',
+                text: JSON.stringify({ lines: substrate.recentLogLines() }, null, 2),
+            }],
+        }),
+    )
 
     // Built-in liveness/identity tool. Also ensures tools/list works
     // before any plugin has registered (McpServer only advertises
@@ -134,6 +254,7 @@ export function createMcpSubstrate() {
                     name: 'mikser-io',
                     version: packageInfo.version,
                     started: runtime.started === true,
+                    phase: runtime.phase ?? null,
                     workingFolder: runtime.options.workingFolder,
                     outputFolder: runtime.options.outputFolder,
                     activeClients: substrate._activeServerCount(),
@@ -188,10 +309,11 @@ export async function mountMcpOnExpress(app, substrate, path = '/mcp') {
 
 /**
  * Wrap a pino logger so every call also broadcasts a
- * `notifications/message` to MCP clients. Wraps in place: returns
- * the same logger reference, with `fatal/error/warn/info/debug/trace`
- * replaced by versions that call the original AND fan out via the
- * substrate to every connected client.
+ * `notifications/message` to MCP clients AND appends to the
+ * substrate's rolling buffer (read via mikser://logs/recent).
+ * Wraps in place: returns the same logger reference, with
+ * `fatal/error/warn/info/debug/trace` replaced by versions that
+ * call the original AND fan out via the substrate.
  *
  * Wrapping (vs. swapping in a pino multistream) lets us keep the
  * existing logger reference that the rest of the engine, plugins,
@@ -206,10 +328,13 @@ export function wireLoggerToMcp(logger, substrate) {
         logger[level] = (...args) => {
             original(...args)
             try {
+                const data = extractData(args)
+                const mcpLevel = pinoLevelToMcp(pinoLevelNumber(level))
+                substrate.recordLogLine?.({ level: mcpLevel, data })
                 substrate.broadcastLog({
-                    level: pinoLevelToMcp(pinoLevelNumber(level)),
+                    level: mcpLevel,
                     logger: 'mikser',
-                    data: extractData(args),
+                    data,
                 })
             } catch { /* swallow — keep stdout pipeline working */ }
         }
