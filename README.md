@@ -93,7 +93,7 @@ mikser --server --mcp           # mounts MCP at /mcp on the same port as --serve
 
 What that feels like in practice: *"draft three hero-section variants and show me previews"* — three layouts written, three previews returned inline, one chat turn. *"Why did the build break?"* — the agent reads the rolling log buffer and answers from the same view your terminal sees. Operator, AI, and any observer dashboard share the same engine because mikser is single-tenant by design.
 
-Full tool reference and twelve worked scenarios in [`documentation/mcp.md`](./documentation/mcp.md).
+Full tool reference and twelve worked scenarios in [MCP — talking to mikser from AI](./documentation/mcp.md).
 
 ## Plugins on top of the engine
 
