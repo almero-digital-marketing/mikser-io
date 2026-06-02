@@ -1,96 +1,25 @@
-import path from 'node:path'
-import { mkdir, readFile } from 'fs/promises'
-import { globby } from 'globby'
-import _ from 'lodash'
+import { useSource } from '../source.js'
 
-export default ({
-    runtime,
-    onLoaded,
-    useLogger,
-    onImport,
-    createEntity,
-    updateEntity,
-    deleteEntity,
-    watch,
-    onSync,
-    trackProgress,
-    updateProgress,
-    constants: { ACTION }
-}) => {
+// documents — the canonical content source plugin.
+//
+// Scans the documents folder, reads each file's content, and registers
+// it as an entity (type: 'document'). Hot-reloads on file change.
+//
+// Implementation moved to useSource — what's left here is the
+// plugin-specific declaration: collection name, folder config, file
+// content reading, import-phase scanning.
+export default (core) => {
+    const { runtime } = core
     const collection = 'documents'
     const type = 'document'
 
-    onSync(collection, async ({ action, context }) => {
-        if (!context.relativePath) return false
-        const { relativePath } = context
-        const id = path.join(`/${collection}`, relativePath)
-        const uri = path.join(runtime.options.documentsFolder, relativePath)
-        switch (action) {
-            case ACTION.CREATE:
-                await createEntity({
-                    id,
-                    uri,
-                    name: relativePath.replace(path.extname(relativePath), ''),
-                    collection,
-                    type,
-                    format: path.extname(relativePath).substring(1).toLowerCase(),
-                    content: await readFile(uri, 'utf8')
-                })
-                break
-            case ACTION.UPDATE:
-                await updateEntity({
-                    id,
-                    uri,
-                    name: relativePath.replace(path.extname(relativePath), ''),
-                    collection,
-                    type,
-                    format: path.extname(relativePath).substring(1).toLowerCase(),
-                    content: await readFile(uri, 'utf8')
-                })
-                break
-            case ACTION.DELETE:
-                await deleteEntity({
-                    id,
-                    collection,
-                    type,
-                    format: path.extname(relativePath).substring(1).toLowerCase(),
-                })
-                break
-        }
-    })
-
-    onLoaded(async () => {
-        const logger = useLogger()
-        runtime.options.documents = runtime.config.documents?.documentsFolder || collection
-        runtime.options.documentsFolder = path.join(runtime.options.workingFolder, runtime.options.documents)
-
-        logger.info('Documents folder: %s', runtime.options.documentsFolder)
-        await mkdir(runtime.options.documentsFolder, { recursive: true })
-
-        watch(collection, runtime.options.documentsFolder)
-    })
-
-    onImport(async () => {
-        const paths = await globby('**/*', { cwd: runtime.options.documentsFolder })
-
-        trackProgress('Documents import', paths.length)
-        return Promise.all(paths.map(async relativePath => {
-            const uri = path.join(runtime.options.documentsFolder, relativePath)
-            await createEntity({
-                id: path.join(`/${collection}`, relativePath),
-                uri,
-                name: relativePath.replace(path.extname(relativePath), ''),
-                collection,
-                type,
-                format: path.extname(relativePath).substring(1).toLowerCase(),
-                content: await readFile(uri, 'utf8')
-            })
-            updateProgress()
-        }))
-    })
-
-    return {
+    useSource(core, {
         collection,
-        type
-    }
+        type,
+        folder: runtime.config.documents?.documentsFolder ?? collection,
+        content: true,
+        phase: 'import',
+    })
+
+    return { collection, type }
 }

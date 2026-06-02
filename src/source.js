@@ -4,51 +4,97 @@
 //
 // Usage from a plugin factory:
 //
-//   useSource({
-//       collection: 'schemas',
-//       type:       'schema',
-//       folder:     'schemas',                  // relative to workingFolder
-//       extensions: ['js', 'mjs', 'cjs'],       // default ['js']
-//       load: async ({ file, name, entity }) => {
-//           // return entity fields to merge in; throw or return null
-//           // to skip this file. The base entity (id, name, collection,
-//           // type, format, uri, stamp) is populated for you.
-//           const mod = await import(pathToFileURL(file))
-//           return { meta: { description: mod.default.description } }
-//       },
-//   })
+//   export default (core) => {
+//       useSource(core, {
+//           collection: 'schemas',
+//           type:       'schema',
+//           folder:     'schemas',
+//           extensions: ['js', 'mjs', 'cjs'],
+//           load: async ({ file, name, entity }) => ({ meta: { ... } }),
+//       })
+//   }
+//
+// Takes the plugin factory's `core` context as first argument so it
+// uses the same hook-registration functions the plugin would —
+// production goes through src/lifecycle.js, test harnesses substitute
+// them with recorders.
 //
 // Responsibilities the helper handles:
 //   - Resolve `folder` relative to runtime.options.workingFolder
-//   - Glob-scan for matching files in onLoaded
+//   - mkdir the folder if missing
+//   - Stash the absolute path at runtime.options.<collection>Folder
+//   - Glob-scan for matching files in the chosen lifecycle phase
 //   - Build the base entity (id, name, format, uri, stamp) for each
+//   - Optionally read file content (`content: true`)
 //   - Call your load() to merge in domain-specific fields
-//   - runtime.update each entity into the catalog (upsert semantics)
-//   - Hot-reload on file change via the runtime watcher (onSync)
+//   - createEntity / updateEntity / deleteEntity through `core`
+//   - Wire chokidar via watch() in watch mode
+//   - Hot-reload on file change via onSync (CREATE/UPDATE/DELETE)
 //
 // What you do NOT handle in your plugin:
 //   - Hook ordering
-//   - createEntity vs updateEntity
-//   - Folder path resolution
+//   - Folder path resolution / mkdir
 //   - The journal/catalog interaction
 //   - chokidar wiring
+//   - DELETE on file unlink
 import path from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { mkdir, readFile } from 'node:fs/promises'
 import { globby } from 'globby'
-import runtime from './runtime.js'
-import { useLogger } from './engine.js'
-import { onLoaded, onSync } from './lifecycle.js'
-import { findEntity } from './catalog.js'
-import { OPERATION, ACTION } from './constants.js'
+import { ACTION } from './constants.js'
 
-export function useSource(options) {
+/**
+ * @param {Object} options
+ * @param {string} options.collection      catalog collection name (e.g. 'schemas')
+ * @param {string} options.type            entity type field
+ * @param {string} options.folder          folder name relative to workingFolder
+ * @param {string[]} [options.extensions]  file extensions to scan (default ['*'])
+ * @param {string[]} [options.ignore]      globby ignore patterns (default [])
+ * @param {'loaded'|'import'} [options.phase]  lifecycle phase to scan in;
+ *                                          'loaded' (default) for metadata
+ *                                          sources, 'import' for content
+ *                                          sources that play in the import
+ *                                          progress bar
+ * @param {boolean} [options.content]      read each file's content into
+ *                                          entity.content (default false)
+ * @param {string} [options.progress]      progress-tracker label (default
+ *                                          derived from collection name)
+ * @param {string} [options.idPrefix]      override id prefix (default '/<collection>')
+ * @param {(args: {
+ *     file: string, name: string, relativePath: string, entity: Object
+ * }) => Promise<Object|null>|Object|null} [options.load]
+ *     called per file; returned object is merged onto the base entity.
+ *     Return null to skip a file.
+ */
+export function useSource(core, options) {
+    const {
+        runtime,
+        useLogger,
+        onLoaded,
+        onImport,
+        onSync,
+        createEntity,
+        updateEntity,
+        deleteEntity,
+        watch,
+        trackProgress,
+        updateProgress,
+    } = core
     const {
         collection,
         type,
         folder,
-        extensions = ['js'],
+        extensions = ['*'],
+        ignore = [],
+        phase = 'loaded',
+        content = false,
+        progress,
         load = async () => ({}),
         idPrefix,
+        // Most content collections keep the extension in `id` (so
+        // `/documents/post.md`) but strip it from `name` (`post`).
+        // Code-shaped sources (schemas, layouts) typically strip the
+        // extension from `id` too. Default = documents style.
+        stripExtensionFromId = false,
     } = options
 
     if (!collection) throw new Error('useSource: collection is required')
@@ -57,57 +103,94 @@ export function useSource(options) {
 
     let absFolder
     const prefix = idPrefix ?? `/${collection}`
+    const cap = collection.replace(/^./, c => c.toUpperCase())
+    const progressLabel = progress ?? `${cap} import`
+    const pattern = extensions.includes('*')
+        ? '**/*'
+        : `**/*.{${extensions.join(',')}}`
 
-    onLoaded(async () => {
-        const logger = useLogger()
-        const cap = collection.replace(/^./, c => c.toUpperCase())
-
-        // Plugin factories run in the onLoad phase, so by the time
-        // useSource is called the onInitialize / onInitialized phases
-        // have already passed. We do folder resolution + scanning here
-        // in onLoaded — by which point engine has set workingFolder
-        // and journal + catalog have initialized, so runtime.update
-        // is safe.
-        absFolder = path.isAbsolute(folder)
-            ? folder
-            : path.join(runtime.options.workingFolder, folder)
-        // Stash on runtime.options under a conventional key so other
-        // plugins (or watch wiring) can resolve the folder by name.
-        runtime.options[`${collection}Folder`] = absFolder
-        logger.info('%s folder: %s', cap, absFolder)
-
-        const pattern = `**/*.{${extensions.join(',')}}`
-        const files = await globby(pattern, { cwd: absFolder, absolute: true, onlyFiles: true })
-        for (const file of files) {
-            await registerFile(file, { logger })
-        }
-        logger.info('%s loaded: %d', cap, files.length)
-    })
-
-    // Hot reload — chokidar dispatches into onSync(collection) when
-    // a file inside collection's folder changes.
+    // Hot-reload — chokidar dispatches into onSync(collection) when
+    // a file inside the folder changes.
     onSync(collection, async ({ action, context }) => {
         const logger = useLogger()
         if (!context?.relativePath) return false
-        const file = path.join(absFolder, context.relativePath)
+
+        // DELETE doesn't need to touch the file — we identify the
+        // entity by id derived from the path alone. Allows onSync
+        // DELETE to work even if onLoaded never set absFolder
+        // (which matters for unit tests and edge cases).
         if (action === ACTION.DELETE) {
             const name = nameFromRelativePath(context.relativePath)
+            const id = stripExtensionFromId
+                ? `${prefix}/${name}`
+                : `${prefix}/${context.relativePath.replace(/\\/g, '/')}`
             try {
-                await runtime.delete?.({ id: `${prefix}/${name}`, type, collection })
+                await deleteEntity({ id, type, collection })
                 logger.info('%s removed: %s', collection, name)
             } catch (err) {
                 logger.warn('%s remove failed for %s: %s', collection, name, err.message)
             }
             return true
         }
-        await registerFile(file, { logger, reload: true })
+
+        // CREATE / UPDATE need absFolder + the file content.
+        const folderAbs = absFolder ?? runtime.options[`${collection}Folder`]
+        const file = path.join(folderAbs, context.relativePath)
+        await registerFile(file, { logger, action })
         return true
     })
 
-    async function registerFile(file, { logger, reload = false } = {}) {
+    // Phase 1: setup (always onLoaded — folder resolution, mkdir,
+    // chokidar wiring). The actual file scan happens in `phase`.
+    onLoaded(async () => {
+        const logger = useLogger()
+
+        // Plugin factories run during the onLoad phase, so by the time
+        // useSource is called the onInitialize / onInitialized phases
+        // have already passed. We do folder resolution here — by which
+        // point engine has set workingFolder and journal + catalog
+        // have initialized.
+        absFolder = path.isAbsolute(folder)
+            ? folder
+            : path.join(runtime.options.workingFolder, folder)
+        runtime.options[`${collection}Folder`] = absFolder
+        logger.info('%s folder: %s', cap, absFolder)
+
+        await mkdir(absFolder, { recursive: true })
+        watch(collection, absFolder)
+    })
+
+    // Phase 2: scan + register. 'loaded' for metadata sources (runs
+    // right after Phase 1 in the same hook chain). 'import' for content
+    // sources, so they show up under the import progress bar with the
+    // other content collections.
+    const scanHook = phase === 'import' ? onImport : onLoaded
+    scanHook(async () => {
+        if (!absFolder) return // setup didn't run (shouldn't happen)
+        const logger = useLogger()
+        const files = await globby(pattern, {
+            cwd: absFolder,
+            absolute: true,
+            onlyFiles: true,
+            ignore,
+        })
+        if (phase === 'import') trackProgress(progressLabel, files.length)
+        for (const file of files) {
+            await registerFile(file, { logger })
+            if (phase === 'import') updateProgress()
+        }
+        if (phase !== 'import') {
+            logger.info('%s loaded: %d', cap, files.length)
+        }
+    })
+
+    async function registerFile(file, { logger, action = ACTION.CREATE } = {}) {
+        const reload = action !== ACTION.CREATE
         const relativePath = path.relative(absFolder, file)
         const name = nameFromRelativePath(relativePath)
-        const id = `${prefix}/${name}`
+        const id = stripExtensionFromId
+            ? `${prefix}/${name}`
+            : `${prefix}/${relativePath.replace(/\\/g, '/')}`
         const base = {
             id,
             name,
@@ -117,6 +200,14 @@ export function useSource(options) {
             uri: file,
             stamp: Date.now(),
         }
+        if (content) {
+            try {
+                base.content = await readFile(file, 'utf8')
+            } catch (err) {
+                logger.warn('%s read failed for %s: %s', collection, name, err.message)
+                return
+            }
+        }
         try {
             const extra = await load({ file, name, relativePath, entity: base })
             if (extra === null) {
@@ -124,10 +215,15 @@ export function useSource(options) {
                 return
             }
             const entity = mergeEntity(base, extra)
-            // Upsert via runtime.update — catalog treats UPDATE as
-            // CREATE when the id doesn't yet exist (see catalog.js).
-            await runtime.update?.(entity)
-            logger.info('%s %s: %s', collection.replace(/^./, c => c.toUpperCase()), reload ? 'reloaded' : 'loaded', name)
+            // Pick CREATE vs UPDATE based on the action — initial scans
+            // and file-add events go through createEntity; reloads go
+            // through updateEntity. The catalog upserts in both
+            // directions, so the choice is mainly semantic.
+            const write = action === ACTION.UPDATE ? updateEntity : createEntity
+            await write(entity)
+            if (phase !== 'import' || reload) {
+                logger.info('%s %s: %s', cap, reload ? 'reloaded' : 'loaded', name)
+            }
         } catch (err) {
             logger.error('%s load failed for %s: %s', collection, name, err.message)
         }
