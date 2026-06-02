@@ -49,6 +49,7 @@ export async function setup(options) {
             .option('-s --server [port]', 'start an Express server on the given port (defaults to 3001)')
             .option('--cors [origin]', 'restrict server CORS to a specific origin (default *)')
             .option('--no-cors', 'disable server CORS headers')
+            .option('--mcp [path]', 'enable MCP server (mounts at <path>, default /mcp)')
 
         Object.assign(runtime.options, options || runtime.engine.commander.parse(process.argv).opts())
         runtime.options.info = true
@@ -152,6 +153,28 @@ export async function setup(options) {
                 logger.info('CORS enabled: %s', origin)
             }
         }
+
+        // MCP substrate — same engine-provides-transport, plugins-
+        // register-tools shape as Express. See
+        // documentation/decisions/0006-when-to-add-to-core.md for
+        // the justification. The substrate object is exposed at
+        // runtime.options.mcp; plugins use it directly via the SDK
+        // (server.registerTool / server.registerResource). The
+        // transport is mounted later, after plugin routes have had
+        // a chance to register (see the onLoad below that handles
+        // static serving + listen).
+        if (runtime.options.mcp) {
+            try {
+                const { createMcpSubstrate } = await import('./mcp.js')
+                runtime.options.mcpPath = typeof runtime.options.mcp === 'string'
+                    ? runtime.options.mcp
+                    : '/mcp'
+                runtime.options.mcp = createMcpSubstrate()
+                logger.info('MCP substrate ready (mounts at %s when server is up)', runtime.options.mcpPath)
+            } catch (err) {
+                logger.error('Failed to enable MCP: %s', err.message)
+            }
+        }
     })
 
     // Registered here (inside setup) so it runs AFTER plugins.js's onLoad
@@ -170,6 +193,15 @@ export async function setup(options) {
         onLoaded(async () => {
             const logger = useLogger()
             const { default: express } = await import('express')
+
+            // Mount MCP transport (if active) BEFORE the static
+            // catch-all so /mcp isn't swallowed. After this runs the
+            // server is fully reachable over HTTP for AI clients.
+            if (runtime.options.mcp && runtime.options.mcpPath) {
+                const { mountMcpOnExpress } = await import('./mcp.js')
+                await mountMcpOnExpress(runtime.options.app, runtime.options.mcp, runtime.options.mcpPath)
+                logger.info('MCP mounted: %s', runtime.options.mcpPath)
+            }
 
             // Serve the output folder as the catch-all static route.
             // Mounted LAST in the middleware chain so plugin routes

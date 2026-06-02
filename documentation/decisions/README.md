@@ -31,3 +31,4 @@ Decisions don't expire. They get **superseded** when we learn enough to change t
 | [0003](./0003-plugins-independent-engine-stable.md) | Plugins are independent packages; the engine doesn't grow                  | Accepted |
 | [0004](./0004-compose-via-protocols.md) | Compose with external systems via clean protocols, not shared code         | Accepted |
 | [0005](./0005-engine-infrastructure-runs-before-plugin-hooks.md) | Engine infrastructure (journal, catalog) is ready before any plugin hook runs; `runtime.update` is upsert; `useSource` codifies the folder-of-files pattern | Accepted |
+| [0006](./0006-when-to-add-to-core.md) | The four-test check for adding capability to the engine vs. shipping it as a plugin | Accepted |

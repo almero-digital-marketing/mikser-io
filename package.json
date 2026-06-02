@@ -1,6 +1,6 @@
 {
 	"name": "mikser-io",
-	"version": "6.29.0",
+	"version": "6.30.0",
 	"description": "<p align=\"center\">   <img src=\"mikser-lockup-stacked.svg\" alt=\"mikser\" width=\"198\" /> </p>",
 	"main": "index.js",
 	"scripts": {
@@ -21,6 +21,7 @@
 	"license": "ISC",
 	"dependencies": {
 		"@budibase/handlebars-helpers": "^0.14.2",
+		"@modelcontextprotocol/sdk": "^1.29.0",
 		"await-semaphore": "^0.1.3",
 		"axios": "^1.16.0",
 		"chokidar": "^5.0.0",
