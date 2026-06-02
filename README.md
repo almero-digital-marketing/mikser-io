@@ -103,7 +103,10 @@ The engine is what stays stable — the lifecycle, the catalog, the file-based c
 |---|---|
 | [`mikser-io-vector`](https://github.com/almero-digital-marketing/mikser-io-vector) | OpenAI embeddings + semantic search (sqlite-vec or pgvector) |
 | [`mikser-io-plugin-schemas`](https://github.com/almero-digital-marketing/mikser-io-plugin-schemas) | Zod-backed entity validation + auto-generated TypeScript declarations for the SDK |
-| `archive`, `mapper`, `live`, `aml` | Specialty integrations |
+| [`mikser-io-archive`](https://github.com/almero-digital-marketing/mikser-io-archive) | Persist matching entities to YAML — audit trail, versioned content history, downstream export |
+| `mapper` | Run config-supplied transforms over matched entities each cycle (in-core, generic transformation layer) |
+| [`mikser-io-live`](https://github.com/almero-digital-marketing/mikser-io-live) | Lightweight dev server with browser auto-refresh — pair with `--watch` for the classic save→reload loop |
+| [`mikser-io-aml`](https://github.com/almero-digital-marketing/mikser-io-aml) | Parse [ArchieML](https://archieml.org/) (the NYT/ProPublica format) into `entity.meta` for non-technical authors |
 
 **Integration probes** — wrap a substantial external project as a plugin to confirm the lifecycle is open enough to host it without core changes. Treat these as feasibility evidence, not as a statement about where mikser is heading:
 
@@ -138,21 +141,13 @@ Each SDK ships TypeScript declarations so client projects get autocomplete on fi
 npm install mikser-io
 ```
 
-```js
-// mikser.config.js
-export default {
-	plugins: ['documents', 'layouts'],
-	layouts: {
-		cleanUrls: true,
-	},
-}
-```
-
 ```bash
 npx mikser              # one-shot build
 npx mikser --watch      # incremental dev loop
 npx mikser --server     # build + serve at :3001
 ```
+
+For a working starter — config with a real plugin set, sample `documents/`, expected output — see [Getting Started](./documentation/getting-started.md). Or skip straight to "add mikser to this app" via the [Claude Code plugin](#built-for-ai-assisted-development) above.
 
 ## Core Concepts
 
@@ -177,12 +172,12 @@ The shape mikser **doesn't** fit cleanly: anything with non-technical content au
 
 ## Engineering discipline
 
-A few things this project takes seriously:
+What you get from how this project is built:
 
-- **ADRs for load-bearing decisions.** The [`decisions/`](./documentation/decisions/) folder names which choices are structural — files-as-source, journal+catalog split, plugin-as-factory, compose-via-protocols — and explains what protects them. Read those before proposing a feature that pushes against one.
-- **Engine stability, plugin churn.** The 15+ plugins in the ecosystem add capability without core changes. The integration probes (e.g. `decap`, mounting a third-party CMS in ~150 lines) are deliberate evidence that the extension model holds.
-- **Deterministic builds.** The journal is the synchronization primitive. There's no event-passing layer, no IoC container, no plugin orchestrator. The engine knows how to fire phases in order; everything else falls out of that.
-- **The mental model is one document.** The [Architecture Overview](./documentation/overview.md) is one read for the full top-to-bottom picture. The reference docs exist for lookup; the overview exists for comprehension.
+- **Every load-bearing decision has an ADR.** The [`decisions/`](./documentation/decisions/) folder names which choices are structural — files-as-source, journal+catalog split, plugin-as-factory, when something goes in core vs. ships as a plugin — and explains what protects them. When you push against one, there's a written answer waiting instead of folklore.
+- **Engine stays small; capability ships in plugins.** The 15+ plugin ecosystem adds features without core changes, so your upgrade cost stays low. Probes like `decap` (a full third-party CMS mounted in ~150 lines, zero engine changes) are deliberate evidence the extension model holds where it counts.
+- **Builds are deterministic; no async middleware layer.** The journal is the only synchronization primitive — no event bus, no IoC container, no orchestrator running plugins in surprising order. The lifecycle is a list of named phases; "what ran when?" has an answer you can read off the source.
+- **The whole engine is one read.** The [Architecture Overview](./documentation/overview.md) walks the full pipeline top to bottom. Onboarding a new engineer is an afternoon, not a tour through fifteen reference docs.
 
 ## Acknowledgments
 
