@@ -3,6 +3,7 @@ import { access, writeFile, mkdir, rm } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import _ from 'lodash'
 import sift from 'sift'
+import { z } from 'zod'
 import { useRenderer, useCollection } from '../api.js'
 
 // Mongo-style operators recognised in URL query params as `<path>.$<op>=...`.
@@ -634,6 +635,170 @@ export default ({
             logger.info('Api endpoint mounted: %s/%s (ops=[%s] %s)',
                 base, name, [...allowedOps].join(','),
                 ep.token ? '[token]' : '[public]')
+        }
+
+        // ---- MCP tool registrations -----------------------------------
+        // MCP is in-process: whoever can reach the /mcp transport already
+        // controls the engine. So the tool surface mirrors the *admin*-
+        // shape (list/query/read/update/delete/render) without the HTTP
+        // endpoint's token gate or query scope — the catalog is global.
+        // Tools register once (not per HTTP endpoint); plugin-author
+        // facing API is `mcp.simpleTool` from the substrate.
+        const mcp = runtime.options.mcp
+        if (mcp) {
+            const { render: mcpRender } = useRenderer(runtime, { defaultTimeout: globalRenderTimeout })
+
+            // Helpers — small enough to inline, but factoring them keeps
+            // each tool body to a single shape: parse → query → return.
+            const ok = (data) => ({
+                content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data, null, 2) }],
+            })
+            const fail = (msg) => ({
+                isError: true,
+                content: [{ type: 'text', text: msg }],
+            })
+
+            mcp.simpleTool(
+                'mikser_list_entities',
+                'List entities from mikser\'s catalog with optional filter / sort / projection. Use this for "show me all documents about X" or "what entities are in collection Y." Returns paginated results in the same envelope shape as the HTTP /entities endpoint.',
+                {
+                    filter: z.record(z.any()).optional().describe('Mongo-style filter (sift-compatible). Defaults to no filter — every entity.'),
+                    sort:   z.record(z.number()).optional().describe('Sort spec, e.g. { "meta.date": -1, "name": 1 }.'),
+                    fields: z.array(z.string()).optional().describe('Dotted-path projection. Omit to return whole entities.'),
+                    skip:   z.number().int().min(0).optional().describe('Skip N items.'),
+                    limit:  z.number().int().min(1).max(100).optional().describe('Page size, defaults to 25, capped at 100.'),
+                },
+                async ({ filter, sort, fields, skip, limit }) => {
+                    try {
+                        const effectiveLimit = Math.min(100, Math.max(1, limit ?? 25))
+                        const effectiveSkip = Math.max(0, skip ?? 0)
+                        const { items, total } = await runQuery({
+                            filter: filter ?? {},
+                            sort, fields,
+                            skip: effectiveSkip,
+                            limit: effectiveLimit,
+                            scope: null,
+                            findEntities,
+                        })
+                        return ok({
+                            items, total,
+                            skip: effectiveSkip,
+                            limit: effectiveLimit,
+                            hasNext: effectiveSkip + effectiveLimit < total,
+                        })
+                    } catch (err) {
+                        logger.error('MCP mikser_list_entities error: %s', err.message)
+                        return fail(err.message)
+                    }
+                },
+            )
+
+            mcp.simpleTool(
+                'mikser_read_entity',
+                'Read a single entity by its catalog id (e.g. "/documents/about.md"). Returns the full entity record or null when not found.',
+                {
+                    id: z.string().describe('Catalog id of the entity to read.'),
+                },
+                async ({ id }) => {
+                    try {
+                        if (!id) return fail('id is required')
+                        const { items } = await runQuery({
+                            filter: { id },
+                            skip: 0, limit: 1,
+                            scope: null,
+                            findEntities,
+                        })
+                        return ok(items[0] ?? null)
+                    } catch (err) {
+                        logger.error('MCP mikser_read_entity error: %s', err.message)
+                        return fail(err.message)
+                    }
+                },
+            )
+
+            mcp.simpleTool(
+                'mikser_update_entity',
+                'Create or update a content file inside a mikser collection. The file is written to disk and the next lifecycle cycle picks it up — same path the HTTP PUT /entities endpoint takes. Use this to author new documents, layouts, or other content from AI.',
+                {
+                    collection:   z.string().describe('Collection name (e.g. "documents", "layouts").'),
+                    relativePath: z.string().describe('Path relative to the collection folder (e.g. "blog/2026-06-02-launch.md").'),
+                    content:      z.string().optional().describe('File content to write. Frontmatter is parsed by the corresponding plugin.'),
+                },
+                async ({ collection, relativePath, content = '' }) => {
+                    try {
+                        await useCollection(runtime, collection).write(relativePath, content)
+                        return ok({ ok: true, collection, relativePath })
+                    } catch (err) {
+                        logger.error('MCP mikser_update_entity error: %s', err.message)
+                        return fail(err.message)
+                    }
+                },
+            )
+
+            mcp.simpleTool(
+                'mikser_delete_entity',
+                'Remove a content file from a mikser collection. Mirrors HTTP DELETE /entities — deletes the source file, and the next lifecycle cycle prunes its rendered outputs from the manifest.',
+                {
+                    collection:   z.string().describe('Collection name.'),
+                    relativePath: z.string().describe('Path relative to the collection folder.'),
+                },
+                async ({ collection, relativePath }) => {
+                    try {
+                        await useCollection(runtime, collection).remove(relativePath)
+                        return ok({ ok: true, collection, relativePath })
+                    } catch (err) {
+                        logger.error('MCP mikser_delete_entity error: %s', err.message)
+                        return fail(err.message)
+                    }
+                },
+            )
+
+            mcp.simpleTool(
+                'mikser_render',
+                'Render a transient entity through the engine pipeline (parse → layouts → resources → render → postprocess) and return the produced bytes. Use this for "preview this layout against this data" without writing the entity to disk. Set options.save=false to skip the disk write; options.catalog=false to prune the catalog row after rendering.',
+                {
+                    entity:  z.record(z.any()).describe('Entity shape with at least { id, collection } and any meta/content the renderer needs.'),
+                    options: z.record(z.any()).optional().describe('Renderer options: { save: false, catalog: false, renderer: "...", postprocessor: "..." }.'),
+                },
+                async ({ entity = {}, options = {} }) => {
+                    try {
+                        const { output, entity: rendered } = await mcpRender(entity, options)
+                        const result = output?.result
+                        if (result == null) {
+                            return ok({ ok: true, entity: rendered, output: null })
+                        }
+                        const mime = mimeForEntity(rendered) ?? 'application/octet-stream'
+                        if (Buffer.isBuffer(result)) {
+                            return {
+                                content: [{
+                                    type: 'resource',
+                                    resource: {
+                                        uri: `mikser://render/${rendered.id ?? 'inline'}`,
+                                        mimeType: mime,
+                                        blob: result.toString('base64'),
+                                    },
+                                }],
+                            }
+                        }
+                        // String result — most renderers (HTML, MJML, etc.).
+                        return {
+                            content: [{
+                                type: 'resource',
+                                resource: {
+                                    uri: `mikser://render/${rendered.id ?? 'inline'}`,
+                                    mimeType: mime,
+                                    text: String(result),
+                                },
+                            }],
+                        }
+                    } catch (err) {
+                        logger.error('MCP mikser_render error: %s', err.message)
+                        return fail(err.message)
+                    }
+                },
+            )
+
+            logger.info('MCP tools registered: list/read/update/delete/render')
         }
     })
 

@@ -165,11 +165,18 @@ export async function setup(options) {
         // static serving + listen).
         if (runtime.options.mcp) {
             try {
-                const { createMcpSubstrate } = await import('./mcp.js')
+                const { createMcpSubstrate, wireLoggerToMcp } = await import('./mcp.js')
                 runtime.options.mcpPath = typeof runtime.options.mcp === 'string'
                     ? runtime.options.mcp
                     : '/mcp'
                 runtime.options.mcp = createMcpSubstrate()
+
+                // Fan every engine log call out to MCP clients as
+                // `notifications/message`. Wraps in-place so the
+                // existing logger reference (held by plugins, render
+                // workers, useLogger consumers) gains the side-channel
+                // automatically — no second logger to thread through.
+                wireLoggerToMcp(runtime.engine.logger, runtime.options.mcp)
                 logger.info('MCP substrate ready (mounts at %s when server is up)', runtime.options.mcpPath)
             } catch (err) {
                 logger.error('Failed to enable MCP: %s', err.message)
