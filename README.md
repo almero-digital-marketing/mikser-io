@@ -71,9 +71,29 @@ Files-as-source isn't just a portability story — it makes the project unusuall
 
 …then in any Vue 3, React, or SvelteKit project — or in a blank directory — say *"add mikser to this app."* It detects the framework (or scaffolds a fresh starter via `create-vite` / `sv create`), wires the matching framework SDK without replacing your router, and optionally drops a `mikser-content/` sibling folder with Zod schemas and starter documents so the backend works on first run.
 
-**Your AI agent drives the running engine.** Add `--mcp` to your mikser command and any MCP-speaking client — Claude Desktop, Claude Code, ChatGPT, custom agents — connects to the live engine, not a stripped-down copy. It reads the catalog, drafts and writes new pages, renders previews on request, and watches every build log as it streams past. Ask *"draft three hero-section variants and show me previews"* — three layouts written, three previews returned inline, one chat turn. Ask *"why did the build break?"* — the agent answers from the same log stream your terminal sees. No glue code, no per-project agent wiring; plugins extend the toolset the same way they extend HTTP routes, so the agent's vocabulary grows with your stack. Full reference and twelve worked scenarios in [`documentation/mcp.md`](./documentation/mcp.md).
+The runtime half — the agent driving the live engine, not just reading the tree — gets its own section below.
 
 The honest caveat: this advantage is real on **content-shaped work** — adding pages, restructuring collections, generating new layouts, building frontends. It doesn't make mikser better for non-content tasks (concurrency bugs in the worker pool, database tuning elsewhere in your stack); those are plain Node debugging like anywhere else. The visibility advantage also degrades past ~10k documents — at that scale the agent queries via the SDK instead of grepping the tree, which is still good but less "see everything at once."
+
+## Control mikser from your AI agent
+
+Add `--mcp` to your mikser command and any MCP-speaking client — Claude Desktop, Claude Code, ChatGPT, custom agents — connects to the running engine. From inside a chat, your AI can:
+
+- read every entity in the catalog
+- write new content files (markdown, layouts, configuration) — writes land on disk and the next cycle picks them up
+- render any layout for preview without touching the output folder
+- watch every build log as it streams past
+- introspect engine state — current lifecycle phase, effective config, recent log buffer
+
+Plugins extend the tool surface the same way they mount HTTP routes; install the plugin, the agent gets new verbs. No glue code, no per-project agent wiring.
+
+```bash
+mikser --server --mcp           # mounts MCP at /mcp on the same port as --server
+```
+
+What that feels like in practice: *"draft three hero-section variants and show me previews"* — three layouts written, three previews returned inline, one chat turn. *"Why did the build break?"* — the agent reads the rolling log buffer and answers from the same view your terminal sees. Operator, AI, and any observer dashboard share the same engine because mikser is single-tenant by design.
+
+Full tool reference and twelve worked scenarios in [`documentation/mcp.md`](./documentation/mcp.md).
 
 ## Plugins on top of the engine
 
@@ -197,6 +217,7 @@ Mikser itself has a previous chapter: the [legacy 7.x line](https://github.com/a
 | [Entities](./documentation/entities.md)               | Users & Developers | Entity model, operations, journal, catalog         |
 | [Rendering](./documentation/rendering.md)             | Users & Developers | Render pipeline, render plugins, render modes      |
 | [Watch Mode](./documentation/watch-mode.md)           | Users              | File watching, scheduled tasks, incremental builds |
+| [MCP](./documentation/mcp.md)                         | Users              | The `--mcp` server — tool surface, `mikser://` resources, twelve worked AI-driven scenarios |
 | [Caching](./documentation/caching.md)                 | Users (production) | The `cache: true` disk cache + working nginx config for reverse-proxy failover |
 | [Architecture](./documentation/architecture.md)       | Developers         | Module-level reference — what's in each file       |
 | [API Reference](./documentation/api-reference.md)     | Developers         | Complete public API reference                      |
