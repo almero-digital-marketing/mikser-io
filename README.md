@@ -6,7 +6,7 @@
 
 **Mikser is the content layer of your application.** Business logic, user accounts, transactions live in their own services; mikser handles the parts that *are* content — pages, docs, the published catalog, multi-format outputs. [Vue](https://github.com/almero-digital-marketing/mikser-io-sdk-vue), [React](https://github.com/almero-digital-marketing/mikser-io-sdk-react), and [Svelte](https://github.com/almero-digital-marketing/mikser-io-sdk-svelte) SDKs are the seam between them — same surface across all three (`useDocument`, `useDocuments`, multilingual `useHref`, live SSE updates), each in its framework's idiomatic shape.
 
-Built for Node.js around a strict lifecycle, a composable plugin system, and direct control over every output. Every document, asset, and template flows through the same deterministic pipeline. Plugins hook in at any phase; nothing runs outside the cycle. It scales from a single markdown blog to a multi-language, multi-format publishing platform with image / video / AI pipelines, live SSE-driven editors, semantic search, and typed frontend contracts — and stays predictable in both directions.
+Built for Node.js around a strict lifecycle and a composable plugin system. Every document, asset, and template flows through the same pipeline; plugins hook in at any phase. The same engine runs a single markdown blog and a multi-language publishing platform with PDF / email / AI-augmented asset pipelines — same lifecycle, more plugins.
 
 It's MIT-licensed, runs on Node 18+, has zero hosted dependencies, and the entire content tree it manages is a folder of `.md` and `.yml` files you can copy, diff, and version-control. **The portability promise is the architecture, not a feature.**
 
@@ -44,13 +44,13 @@ Build mikser into the parts of your application that are content-shaped. Keep th
 
 **Outages don't take you down.** Headless CMSes (Contentful, Sanity, Strapi) treat the API as the source of truth — when it blinks, every frontend errors out. Mikser inverts that: reads become static files on disk, the live channel layers on top. A reverse proxy keeps serving the files when mikser blips. Visitors don't notice; live updates pause until mikser returns.
 
-**Library mode.** Mikser is also a library. `useRenderer`, `useCollection`, `findSimilar`, and direct lifecycle hooks let you embed the engine inside an existing Node app instead of running it as a CLI.
+**Library mode.** Mikser is also a library. `useRenderer`, `useCollection`, and direct lifecycle hooks let you embed the engine inside an existing Node app instead of running it as a CLI — plugins like `vector` add their own primitives the same way.
 
 **Open source.** MIT-licensed, on GitHub, no telemetry, no auth wall, no SaaS dependency. What you see is what runs.
 
 ## Built for AI-assisted development
 
-Files-as-source isn't just a portability story — it makes the project unusually friendly to AI coding agents. Most setups lose time configuring an agent's access to the data: tokens, schemas, MCP servers, sandboxed query environments. Mikser sidesteps all of it because the content is text files the agent can already read with the tools it already has.
+Files-as-source isn't just a portability story — it makes the project unusually friendly to AI coding agents. There's a static-time half (the agent reads your tree the way it reads any repo — no DB connection, no schema upload, no sandboxed query layer to learn) and a runtime half (when the agent needs to write or render, mikser ships its own MCP server in core, so it talks to the live engine instead of a parallel REST shim you have to maintain).
 
 **Zero infra friction for discovery.** An agent can `rg "type: product"` across the content tree to find every product doc in a second. No DB connection, no API token, no schema file to parse.
 
@@ -62,7 +62,14 @@ Files-as-source isn't just a portability story — it makes the project unusuall
 
 **Plugin-by-example.** Authoring a new plugin? There are 15+ existing ones in the same shape to pattern-match against. Convention is dense enough that new plugins look like the old ones without coaching.
 
-**One-shot bootstrap via Claude Code.** The [`mikser-io-claude-plugin`](https://github.com/almero-digital-marketing/mikser-io-claude-plugin) wraps the setup story above into a single skill. Register the repo as a Claude Code marketplace and install the plugin (`/plugin marketplace add almero-digital-marketing/mikser-io-claude-plugin` then `/plugin install mikser-io-claude-plugin@mikser-io`), then in any Vue 3, React, or SvelteKit project — or in a blank directory — say "add mikser to this app." It detects the framework (or scaffolds a fresh starter via `create-vite` / `sv create`), wires the matching framework SDK, composes with your existing router rather than replacing it, and optionally lays down a `mikser-content/` sibling folder with Zod schemas and starter documents so the backend works on first run.
+**One-shot bootstrap via Claude Code.** The [`mikser-io-claude-plugin`](https://github.com/almero-digital-marketing/mikser-io-claude-plugin) wraps the whole setup into a single skill. Register the marketplace, install once:
+
+```
+/plugin marketplace add almero-digital-marketing/mikser-io-claude-plugin
+/plugin install mikser-io-claude-plugin@mikser-io
+```
+
+…then in any Vue 3, React, or SvelteKit project — or in a blank directory — say *"add mikser to this app."* It detects the framework (or scaffolds a fresh starter via `create-vite` / `sv create`), wires the matching framework SDK without replacing your router, and optionally drops a `mikser-content/` sibling folder with Zod schemas and starter documents so the backend works on first run.
 
 **Your AI agent drives the running engine.** Add `--mcp` to your mikser command and any MCP-speaking client — Claude Desktop, Claude Code, ChatGPT, custom agents — connects to the live engine, not a stripped-down copy. It reads the catalog, drafts and writes new pages, renders previews on request, and watches every build log as it streams past. Ask *"draft three hero-section variants and show me previews"* — three layouts written, three previews returned inline, one chat turn. Ask *"why did the build break?"* — the agent answers from the same log stream your terminal sees. No glue code, no per-project agent wiring; plugins extend the toolset the same way they extend HTTP routes, so the agent's vocabulary grows with your stack. Full reference and twelve worked scenarios in [`documentation/mcp.md`](./documentation/mcp.md).
 
