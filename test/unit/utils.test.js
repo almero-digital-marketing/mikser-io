@@ -13,6 +13,7 @@ import {
     formatErrorContext,
     checksum,
     AbortError,
+    mimeForEntity,
 } from '../../src/utils.js'
 
 // ─── normalize ──────────────────────────────────────────────────────────────
@@ -295,5 +296,36 @@ describe('AbortError', () => {
         assert.ok(err instanceof Error)
         assert.equal(err.name, 'AbortError')
         assert.equal(err.message, 'cancelled')
+    })
+})
+
+describe('mimeForEntity', () => {
+    it('returns null for an entity without a destination', () => {
+        assert.equal(mimeForEntity({}), null)
+        assert.equal(mimeForEntity(null), null)
+    })
+
+    it('maps a .pdf destination to application/pdf', () => {
+        assert.equal(mimeForEntity({ destination: '/en/report.pdf' }), 'application/pdf')
+    })
+
+    it('maps a .html destination to text/html with charset', () => {
+        assert.match(mimeForEntity({ destination: '/index.html' }), /text\/html/)
+    })
+
+    it('maps common content-types from the extension', () => {
+        assert.match(mimeForEntity({ destination: '/feed.xml' }), /application\/xml/)
+        assert.match(mimeForEntity({ destination: '/feed.rss' }), /application\/rss\+xml/)
+        assert.match(mimeForEntity({ destination: '/api.json' }), /application\/json/)
+        assert.equal(mimeForEntity({ destination: '/logo.png' }), 'image/png')
+        assert.equal(mimeForEntity({ destination: '/clip.mp4' }), 'video/mp4')
+    })
+
+    it('returns null for an unrecognized extension', () => {
+        assert.equal(mimeForEntity({ destination: '/strange.bizarro' }), null)
+    })
+
+    it('is case-insensitive on the extension', () => {
+        assert.equal(mimeForEntity({ destination: '/Report.PDF' }), 'application/pdf')
     })
 })

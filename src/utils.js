@@ -6,6 +6,40 @@ import _ from 'lodash'
 import { minimatch } from 'minimatch'
 import path from 'path'
 
+// Extension → mime type lookup for rendered outputs. Used anywhere an
+// entity's destination is being served over HTTP (the api plugin's
+// /render endpoint, the preview plugin's /preview route, anywhere
+// else that produces Content-Type from an entity). Pure function; no
+// engine state — lives here rather than inside one plugin so other
+// plugins don't have to reach across the plugin folder for it.
+const MIME_BY_EXT = {
+    pdf:   'application/pdf',
+    html:  'text/html; charset=utf-8',
+    xml:   'application/xml; charset=utf-8',
+    xhtml: 'application/xhtml+xml; charset=utf-8',
+    rss:   'application/rss+xml; charset=utf-8',
+    atom:  'application/atom+xml; charset=utf-8',
+    json:  'application/json; charset=utf-8',
+    css:   'text/css; charset=utf-8',
+    js:    'application/javascript; charset=utf-8',
+    svg:   'image/svg+xml',
+    png:   'image/png',
+    jpg:   'image/jpeg',
+    jpeg:  'image/jpeg',
+    webp:  'image/webp',
+    gif:   'image/gif',
+    mp4:   'video/mp4',
+    webm:  'video/webm',
+    txt:   'text/plain; charset=utf-8',
+    md:    'text/markdown; charset=utf-8',
+}
+
+export function mimeForEntity(entity) {
+    if (!entity?.destination) return null
+    const ext = path.extname(entity.destination).toLowerCase().replace(/^\./, '')
+    return MIME_BY_EXT[ext] ?? null
+}
+
 export class AbortError extends Error {
     constructor(message) {
         super();

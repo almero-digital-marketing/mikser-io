@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import apiPlugin, { mimeForEntity, sendRenderOutput } from '../../../src/plugins/api.js'
+import apiPlugin, { sendRenderOutput } from '../../../src/plugins/api.js'
 import { createHarness } from '../plugin-harness.js'
 
 // Lightweight fake of the Express `res` object — captures enough state for
@@ -20,37 +20,6 @@ function createFakeRes() {
     }
     return { res, captured }
 }
-
-describe('api plugin: mimeForEntity', () => {
-    it('returns null for an entity without a destination', () => {
-        assert.equal(mimeForEntity({}), null)
-        assert.equal(mimeForEntity(null), null)
-    })
-
-    it('maps a .pdf destination to application/pdf', () => {
-        assert.equal(mimeForEntity({ destination: '/en/report.pdf' }), 'application/pdf')
-    })
-
-    it('maps a .html destination to text/html with charset', () => {
-        assert.match(mimeForEntity({ destination: '/index.html' }), /text\/html/)
-    })
-
-    it('maps common content-types from the extension', () => {
-        assert.match(mimeForEntity({ destination: '/feed.xml' }), /application\/xml/)
-        assert.match(mimeForEntity({ destination: '/feed.rss' }), /application\/rss\+xml/)
-        assert.match(mimeForEntity({ destination: '/api.json' }), /application\/json/)
-        assert.equal(mimeForEntity({ destination: '/logo.png' }), 'image/png')
-        assert.equal(mimeForEntity({ destination: '/clip.mp4' }), 'video/mp4')
-    })
-
-    it('returns null for an unrecognized extension', () => {
-        assert.equal(mimeForEntity({ destination: '/strange.bizarro' }), null)
-    })
-
-    it('is case-insensitive on the extension', () => {
-        assert.equal(mimeForEntity({ destination: '/Report.PDF' }), 'application/pdf')
-    })
-})
 
 describe('api plugin: sendRenderOutput', () => {
     it('responds 204 when output is null', async () => {

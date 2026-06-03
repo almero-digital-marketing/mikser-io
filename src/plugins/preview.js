@@ -27,7 +27,7 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { useRenderer } from '../api.js'
-import { mimeForEntity } from './api.js'
+import { mimeForEntity } from '../utils.js'
 
 export default ({
     runtime,
