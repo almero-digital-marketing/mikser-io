@@ -19,7 +19,7 @@ The transport is HTTP — the `--mcp [path]` option mounts the MCP endpoint on t
 ## Turning it on
 
 ```bash
-# Default port (3001) and path (/mcp):
+# Default port (3001) and path (/mcp), open (no token):
 mikser --server --mcp
 
 # Custom path:
@@ -29,6 +29,118 @@ mikser --server --mcp /ai
 import { setup } from 'mikser-io'
 await setup({ server: 3001, mcp: true })
 ```
+
+> **Single open endpoint is fine for loopback dev. For anything past loopback (ngrok, public reverse proxy, shared LAN) configure endpoints with tokens — next section.**
+
+## Endpoints (token-gated, scoped tool surfaces)
+
+Same shape as the api plugin's `endpoints` config: a named map, each entry with an optional `token` and a tool/resource scope.
+
+```js
+// mikser.config.js
+mcp: {
+    base: '/mcp',                  // optional, default '/mcp'
+    endpoints: {
+        public: {
+            tools: [
+                'mikser_ping',
+                'mikser_api_list_entities',
+                'mikser_api_read_entity',
+                'mikser_layouts_inspect',
+            ],
+            // No token → no auth header required
+            // No resources field → all mikser:// resources visible
+        },
+        admin: {
+            token: process.env.MIKSER_MCP_ADMIN_TOKEN,
+            tools: ['mikser_*'],   // glob — every mikser tool
+        },
+    },
+},
+```
+
+Produces:
+
+| URL | Auth | Tool surface |
+|---|---|---|
+| `/mcp/public` | none | 4 read-only tools |
+| `/mcp/admin` | `Authorization: Bearer <token>` | everything matching `mikser_*` |
+
+Endpoint options:
+
+| Field | Meaning | Default |
+|---|---|---|
+| `token` | Required Bearer token; unset = open endpoint | unset |
+| `tools` | Tool name list or globs (via minimatch). `'*'` or omit for all. | `'*'` |
+| `resources` | `mikser://` URI list or globs. `'*'` or omit for all. | `'*'` |
+
+Glob patterns are useful because tool names embed plugin ownership:
+
+- `mikser_api_*` — every tool from the api plugin
+- `mikser_layouts_*` — every tool from the layouts plugin
+- `mikser_*_render` — render-style actions across plugins (api's and preview's)
+- `mikser_*_read*` — any read-shaped action (read_entity today, more later)
+- `mikser_*` — everything mikser exposes
+
+### Client configuration
+
+**Claude Desktop** (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "mikser-public": {
+      "url": "http://localhost:3001/mcp/public"
+    },
+    "mikser-admin": {
+      "url": "http://localhost:3001/mcp/admin",
+      "headers": { "Authorization": "Bearer <token>" }
+    }
+  }
+}
+```
+
+**Claude Code** (`.claude/settings.json`): same shape as above under the `mcpServers` key.
+
+**curl probe:**
+
+```bash
+# Public — works without auth
+curl -X POST http://localhost:3001/mcp/public \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{...}}'
+
+# Admin — without token → 401; with token → full surface
+curl -X POST http://localhost:3001/mcp/admin \
+  -H "Authorization: Bearer $MIKSER_MCP_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{...}}'
+```
+
+### Boot log
+
+With endpoints configured:
+
+```
+MCP endpoint mounted: /mcp/public (tools=[mikser_ping,mikser_api_list_entities,...] [public])
+MCP endpoint mounted: /mcp/admin  (tools=[mikser_*] [token])
+```
+
+Without endpoints — the loud warning lets you know you're exposing everything:
+
+```
+MCP /mcp [OPEN — no token, all tools/resources]. Configure `mcp.endpoints` to gate access before exposing past loopback.
+```
+
+### A few things worth knowing
+
+- **Endpoints don't share sessions.** A client connected to `/mcp/public` has a separate MCP session from one connected to `/mcp/admin` — same engine underneath, but distinct session state, distinct tool surfaces, distinct logs (per-client log levels are per-session).
+- **Token via header only.** No `?token=` query-param fallback — query params leak into reverse-proxy access logs. Header-only is non-negotiable.
+- **Don't pass tokens via CLI flag.** Tokens live in config / env (`process.env.MIKSER_MCP_ADMIN_TOKEN`). CLI flags leak via `ps aux`.
+- **Per-tool gating is per-endpoint.** A client either has access to an endpoint or doesn't, and the endpoint narrows the surface. If you want truly per-tool ACLs ("this token can call render but not delete"), use two endpoints with overlapping but distinct `tools` lists.
+- **Generate tokens with `openssl rand -hex 32`** — 256 bits of randomness. Don't reuse production tokens in dev configs.
 
 Test it from the command line:
 

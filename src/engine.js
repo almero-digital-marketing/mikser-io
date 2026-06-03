@@ -212,8 +212,8 @@ export async function setup(options) {
             // server is fully reachable over HTTP for AI clients.
             if (runtime.options.mcp && runtime.options.mcpPath) {
                 const { mountMcpOnExpress } = await import('./mcp.js')
+                // mcp.js logs per-endpoint as it mounts — no extra log here.
                 await mountMcpOnExpress(runtime.options.app, runtime.options.mcp, runtime.options.mcpPath)
-                logger.info('MCP mounted: %s', runtime.options.mcpPath)
             }
 
             // Serve the output folder as the catch-all static route.

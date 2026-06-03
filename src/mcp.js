@@ -20,8 +20,25 @@
 import { randomUUID } from 'node:crypto'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
+import { minimatch } from 'minimatch'
 import packageInfo from '../package.json' with { type: 'json' }
 import runtime from './runtime.js'
+
+// Pattern matcher for endpoint tools/resources filters. Accepts
+// '*', an array of patterns, or undefined (= allow all). Glob
+// patterns like 'mikser_api_*' or 'mikser_*_render' work through
+// minimatch — same library mikser uses for content matching, so
+// the syntax is consistent across the codebase.
+function matchesAny(name, patterns) {
+    if (patterns == null) return true
+    if (patterns === '*') return true
+    if (!Array.isArray(patterns)) return false
+    for (const p of patterns) {
+        if (p === '*') return true
+        if (minimatch(name, p)) return true
+    }
+    return false
+}
 
 let pinoLevelToMcp = (pinoLevel) => {
     if (pinoLevel >= 50) return 'error'
@@ -55,10 +72,25 @@ export function createMcpSubstrate() {
     const LOG_BUFFER_CAP = 500
     const logBuffer = []
 
-    function bind(server) {
-        for (const args of registrations.tools) server.registerTool(...args)
-        for (const args of registrations.resources) server.registerResource(...args)
-        for (const args of registrations.prompts) server.registerPrompt(...args)
+    function bind(server, filters = {}) {
+        const { allowedTools, allowedResources, allowedPrompts } = filters
+        for (const args of registrations.tools) {
+            if (!matchesAny(args[0], allowedTools)) continue
+            server.registerTool(...args)
+        }
+        for (const args of registrations.resources) {
+            // Resource registrations are (name, uri, config, handler).
+            // Filter on the URI since that's the addressable identifier
+            // (`mikser://lifecycle` reads more naturally as the filter
+            // target than the short `mikser-lifecycle` name).
+            const uri = typeof args[1] === 'string' ? args[1] : args[0]
+            if (!matchesAny(uri, allowedResources)) continue
+            server.registerResource(...args)
+        }
+        for (const args of registrations.prompts) {
+            if (!matchesAny(args[0], allowedPrompts)) continue
+            server.registerPrompt(...args)
+        }
     }
 
     const substrate = {
@@ -95,13 +127,20 @@ export function createMcpSubstrate() {
         },
 
         // Create a fresh McpServer pre-loaded with every recorded
-        // registration. Called by the transport mount per new session.
-        _createServer() {
+        // registration that passes the endpoint's filters. Called by
+        // the transport mount per new session.
+        //
+        // Filters take patterns (exact name or glob via minimatch):
+        //   allowedTools:     ['mikser_api_*', 'mikser_ping']
+        //   allowedResources: ['mikser://lifecycle', 'mikser://logs/*']
+        // Omit a filter (or pass '*') to allow everything in that
+        // category — that's the backward-compat default.
+        _createServer({ allowedTools, allowedResources, allowedPrompts } = {}) {
             const server = new McpServer(
                 { name: 'mikser-io', version: packageInfo.version },
                 { capabilities: { tools: {}, resources: {}, logging: {} } },
             )
-            bind(server)
+            bind(server, { allowedTools, allowedResources, allowedPrompts })
             return server
         },
         _attach(server) { activeServers.add(server) },
@@ -315,26 +354,66 @@ function serverInfo() {
 }
 
 /**
- * Mount the MCP substrate on an Express app at the given path
- * (default `/mcp`). Each connecting client gets its own
- * McpServer + StreamableHTTPServerTransport pair (SDK constraint).
- * Sessions are tracked by `mcp-session-id` header — initialize
- * requests open a new session; subsequent requests echo their id.
+ * Mount the MCP substrate on an Express app. Two modes:
+ *
+ *   1. Single endpoint (backward compat): no `runtime.config.mcp.endpoints`
+ *      → mounts one open endpoint at `defaultPath` (default `/mcp`) with
+ *      all tools, all resources, no token. Matches the v7.0-7.6 shape.
+ *
+ *   2. Multiple endpoints: with `runtime.config.mcp.endpoints` set →
+ *      each endpoint mounts at `<mcp.base>/<name>` (default base `/mcp`)
+ *      with its own filters (`tools`, `resources`) and optional
+ *      `token` for Bearer auth.
+ *
+ * Each endpoint is its own session map — sessions don't cross endpoints.
+ * Same noun and shape as the api plugin's `endpoints` config.
  */
-export async function mountMcpOnExpress(app, substrate, path = '/mcp') {
-    // sessionId → transport. POSTs with an existing id route back
-    // to that transport so the SDK's session state stays consistent.
+export async function mountMcpOnExpress(app, substrate, defaultPath = '/mcp') {
+    const endpoints = runtime.config.mcp?.endpoints
+    const base = runtime.config.mcp?.base ?? defaultPath
+
+    if (endpoints && Object.keys(endpoints).length > 0) {
+        for (const [name, ep] of Object.entries(endpoints)) {
+            mountEndpoint(app, substrate, `${base}/${name}`, ep, name)
+        }
+    } else {
+        // Backward-compat single endpoint. Loud warning when there's
+        // no token so an operator exposing the engine past loopback
+        // (ngrok, public proxy) sees the risk in the boot output.
+        const logger = runtime.engine?.logger
+        mountEndpoint(app, substrate, defaultPath, {}, null)
+        if (logger) {
+            logger.warn('MCP %s [OPEN — no token, all tools/resources]. Configure `mcp.endpoints` to gate access before exposing past loopback.', defaultPath)
+        }
+    }
+}
+
+function mountEndpoint(app, substrate, path, ep, endpointName) {
     const transports = new Map()
+    const expectedAuth = ep.token ? `Bearer ${ep.token}` : null
 
     async function handle(req, res, body) {
+        // Token gate — same shape as the api plugin's auth middleware.
+        if (expectedAuth && req.headers.authorization !== expectedAuth) {
+            res.status(401).json({
+                jsonrpc: '2.0',
+                error: { code: -32001, message: 'MCP token required' },
+                id: null,
+            })
+            return
+        }
+
         const sessionId = req.headers['mcp-session-id']
         if (sessionId && transports.has(sessionId)) {
             return transports.get(sessionId).handleRequest(req, res, body)
         }
 
-        // No matching session — assume a new initialize request
-        // (the SDK will reject if it isn't actually an initialize).
-        const server = substrate._createServer()
+        // New session — server filtered for this endpoint's surface.
+        const server = substrate._createServer({
+            allowedTools:     ep.tools,
+            allowedResources: ep.resources,
+            allowedPrompts:   ep.prompts,
+        })
         const transport = new StreamableHTTPServerTransport({
             sessionIdGenerator: () => randomUUID(),
             onsessioninitialized: (id) => {
@@ -353,6 +432,19 @@ export async function mountMcpOnExpress(app, substrate, path = '/mcp') {
     app.post(path, (req, res) => handle(req, res, req.body))
     app.get(path,  (req, res) => handle(req, res))
     app.delete(path, (req, res) => handle(req, res))
+
+    const logger = runtime.engine?.logger
+    if (logger) {
+        const toolsLabel = ep.tools == null || ep.tools === '*'
+            ? '*'
+            : Array.isArray(ep.tools) ? ep.tools.join(',') : String(ep.tools)
+        const authLabel = ep.token ? 'token' : 'public'
+        if (endpointName) {
+            logger.info('MCP endpoint mounted: %s (tools=[%s] [%s])', path, toolsLabel, authLabel)
+        } else {
+            logger.info('MCP mounted: %s', path)
+        }
+    }
 }
 
 /**

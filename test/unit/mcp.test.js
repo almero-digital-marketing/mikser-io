@@ -14,7 +14,17 @@ function createFakeServer() {
     return {
         tools, resources, prompts, logs,
         registerTool(name, def, handler) { tools.push({ name, def, handler }) },
-        registerResource(name, def, handler) { resources.push({ name, def, handler }) },
+        // Match the SDK's variadic shape: resources can be (name, uri,
+        // config, handler) — 4 args — for static URIs. Record uri so
+        // the endpoint-filter test can assert on the URI.
+        registerResource(...args) {
+            const [name, uriOrConfig, configMaybe, handler] = args
+            if (typeof uriOrConfig === 'string') {
+                resources.push({ name, uri: uriOrConfig, def: configMaybe, handler })
+            } else {
+                resources.push({ name, def: uriOrConfig, handler: configMaybe })
+            }
+        },
         registerPrompt(name, def, handler) { prompts.push({ name, def, handler }) },
         async sendLoggingMessage(params) { logs.push(params) },
     }
@@ -220,5 +230,95 @@ describe('wireLoggerToMcp', () => {
         fakeLogger.info('survives broadcast failure')
         assert.equal(calls.length, 1)
         assert.deepEqual(calls[0], ['survives broadcast failure'])
+    })
+})
+
+describe('endpoint filters (_createServer with allowedTools / allowedResources)', () => {
+    // Helper that drives substrate._createServer using fake instead of
+    // a real McpServer. We monkey-patch the registration replay by
+    // attaching the fake first (via _attach), then calling _createServer
+    // — _createServer's bind() walks the recorded registrations and
+    // calls register* on the new server. We can't substitute the new
+    // server itself (it's created inside _createServer), so instead we
+    // assert via registrations recorded on a fake attached BEFORE the
+    // tools were registered.
+    //
+    // Cleaner approach: register tools on the substrate, then use bind
+    // semantics by calling registerTool directly on a filtered server.
+    // Since _createServer is the production path, we verify by attaching
+    // a fake as a "tap" — every `substrate.registerTool` after attach
+    // hits both the new tool's recorded list and the fake. Then we drive
+    // the same args through bind() shape by calling _createServer with
+    // filters and inspecting the resulting tool count on the returned
+    // server.
+    //
+    // The fake server SHAPE matches what bind() expects (registerTool /
+    // registerResource), so we wrap McpServer constructor to return our
+    // fake. Easier: just use a substrate's bind() directly.
+
+    it('allowedTools = ["mikser_api_*"] only registers tools matching the glob', () => {
+        const substrate = createMcpSubstrate()
+        // Built-in mikser_ping is already registered. Add a few more.
+        substrate.simpleTool('mikser_api_list_entities', 'desc', {}, async () => ({}))
+        substrate.simpleTool('mikser_api_render',        'desc', {}, async () => ({}))
+        substrate.simpleTool('mikser_layouts_inspect',   'desc', {}, async () => ({}))
+        substrate.simpleTool('mikser_preview_render',    'desc', {}, async () => ({}))
+
+        // _createServer uses the real McpServer — but tools/list survives
+        // as a registered Map on the server. We instead intercept by
+        // attaching a fake as a registration recorder AFTER all tools
+        // exist. Then _createServer({ allowedTools: ['mikser_api_*'] })
+        // returns a real McpServer whose registered tool count we can
+        // inspect via the SDK's internal map. Reach into _registeredTools.
+        const server = substrate._createServer({ allowedTools: ['mikser_api_*'] })
+        // The SDK stores tools at server._registeredTools (object map).
+        const toolNames = Object.keys(server._registeredTools)
+        assert.deepEqual(toolNames.sort(), ['mikser_api_list_entities', 'mikser_api_render'])
+    })
+
+    it('allowedTools = "*" registers everything', () => {
+        const substrate = createMcpSubstrate()
+        substrate.simpleTool('mikser_api_render',     'desc', {}, async () => ({}))
+        substrate.simpleTool('mikser_layouts_inspect','desc', {}, async () => ({}))
+
+        const server = substrate._createServer({ allowedTools: '*' })
+        const toolNames = Object.keys(server._registeredTools)
+        assert.ok(toolNames.includes('mikser_ping'))
+        assert.ok(toolNames.includes('mikser_api_render'))
+        assert.ok(toolNames.includes('mikser_layouts_inspect'))
+    })
+
+    it('omitting allowedTools (= undefined) registers everything', () => {
+        const substrate = createMcpSubstrate()
+        substrate.simpleTool('mikser_api_render', 'desc', {}, async () => ({}))
+
+        const server = substrate._createServer()
+        const toolNames = Object.keys(server._registeredTools)
+        assert.ok(toolNames.includes('mikser_ping'))
+        assert.ok(toolNames.includes('mikser_api_render'))
+    })
+
+    it('allowedTools = [] registers nothing — but still allows mikser_ping if listed', () => {
+        const substrate = createMcpSubstrate()
+        substrate.simpleTool('mikser_api_render', 'desc', {}, async () => ({}))
+
+        const onlyPing = substrate._createServer({ allowedTools: ['mikser_ping'] })
+        const onlyPingNames = Object.keys(onlyPing._registeredTools)
+        assert.deepEqual(onlyPingNames, ['mikser_ping'])
+
+        const empty = substrate._createServer({ allowedTools: [] })
+        const emptyNames = Object.keys(empty._registeredTools)
+        assert.deepEqual(emptyNames, [])
+    })
+
+    it('allowedResources filters by URI', () => {
+        const substrate = createMcpSubstrate()
+        // Built-in resources include mikser://lifecycle, mikser://server,
+        // mikser://runtime, mikser://config, mikser://logs/recent.
+        const server = substrate._createServer({
+            allowedResources: ['mikser://lifecycle', 'mikser://logs/*'],
+        })
+        const resourceUris = Object.keys(server._registeredResources)
+        assert.deepEqual(resourceUris.sort(), ['mikser://lifecycle', 'mikser://logs/recent'])
     })
 })
