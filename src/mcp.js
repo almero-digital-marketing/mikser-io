@@ -238,13 +238,34 @@ export function createMcpSubstrate() {
         }),
     )
 
+    // mikser://server — single-shot answer to "where do I put output
+    // so the user can see it?" Combines server state (running? on what
+    // URL?) and the path conventions agents should write to for
+    // preview-style outputs.
+    substrate.registerResource(
+        'mikser-server',
+        'mikser://server',
+        {
+            title: 'HTTP server location and preview conventions',
+            description: 'Where the running engine is reachable (URL, MCP path, preview path prefix) and what folder it serves. The single resource an agent needs to answer "where can the user see this output?"',
+            mimeType: 'application/json',
+        },
+        async (uri) => ({
+            contents: [{
+                uri: uri.href,
+                mimeType: 'application/json',
+                text: JSON.stringify(serverInfo(), null, 2),
+            }],
+        }),
+    )
+
     // Built-in liveness/identity tool. Also ensures tools/list works
     // before any plugin has registered (McpServer only advertises
     // tools/list capability after at least one registration).
     substrate.registerTool(
         'mikser_ping',
         {
-            description: 'Return mikser engine identity and the current lifecycle phase. Use to confirm the connection is live before issuing other tool calls.',
+            description: 'Return mikser engine identity, current lifecycle phase, and (if --server is on) where the HTTP server is reachable. Use to confirm the connection is live before issuing other tool calls and to learn the base URL for preview outputs.',
             inputSchema: {},
         },
         async () => ({
@@ -258,12 +279,49 @@ export function createMcpSubstrate() {
                     workingFolder: runtime.options.workingFolder,
                     outputFolder: runtime.options.outputFolder,
                     activeClients: substrate._activeServerCount(),
+                    server: serverInfo(),
                 }, null, 2),
             }],
         }),
     )
 
     return substrate
+}
+
+// Derive a stable snapshot of "where outputs are visible to the user."
+// Three cases:
+//   1. --server is on  → engine owns Express, knows port → full URL
+//   2. external app    → caller supplied runtime.options.app; URL not
+//                        visible to engine (port unknown), but the
+//                        outputFolder and path conventions are still
+//                        useful for preview-writing tools
+//   3. no server       → only the static folder layout applies; an
+//                        agent should not try to advertise a URL
+//
+// Kept as a function rather than a const so each call re-reads
+// runtime.options — covers the case where --server flips on after
+// the substrate was created (rare but possible programmatically).
+function serverInfo() {
+    const opts = runtime.options
+    const hasInternalServer = opts.server != null && opts.port != null
+    const hasExternalApp = opts.app && !hasInternalServer
+
+    const base = hasInternalServer
+        ? `http://localhost:${opts.port}`
+        : null
+
+    return {
+        running: hasInternalServer ? 'internal' : (hasExternalApp ? 'external' : 'none'),
+        port: opts.port ?? null,
+        url: base,
+        serves: opts.outputFolder ?? null,
+        mcpPath: opts.mcpPath ?? null,
+        mcpUrl: base && opts.mcpPath ? `${base}${opts.mcpPath}` : null,
+        // Convention for preview writes (used by mikser_preview). Agents
+        // can build URLs like `${url}${previewPathPrefix}/<file>` once
+        // a preview tool has written there.
+        previewPathPrefix: '/_preview',
+    }
 }
 
 /**

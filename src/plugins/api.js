@@ -1,6 +1,6 @@
 import path from 'node:path'
-import { access, writeFile, mkdir, rm } from 'node:fs/promises'
-import { createHash } from 'node:crypto'
+import { access, writeFile, readFile, mkdir, rm, unlink } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
 import _ from 'lodash'
 import sift from 'sift'
 import { z } from 'zod'
@@ -695,11 +695,12 @@ export default ({
 
             mcp.simpleTool(
                 'mikser_read_entity',
-                'Read a single entity by its catalog id (e.g. "/documents/about.md"). Returns the full entity record or null when not found.',
+                'Read a single entity by its catalog id (e.g. "/documents/about.md"). Returns the full entity record or null when not found. Pass include: ["content"] to also fetch the source file content from disk — useful for reading a layout template, document frontmatter+body, or any text-format source without dropping out to the filesystem.',
                 {
                     id: z.string().describe('Catalog id of the entity to read.'),
+                    include: z.array(z.enum(['content'])).optional().describe('Optional list of extra fields to populate. Currently only "content" is supported: reads the file at entity.uri and attaches it as .content (text formats only — md, html, yml, liquid, hbs, eta, json, css, js, svg, xml, mjml).'),
                 },
-                async ({ id }) => {
+                async ({ id, include }) => {
                     try {
                         if (!id) return fail('id is required')
                         const { items } = await runQuery({
@@ -708,7 +709,37 @@ export default ({
                             scope: null,
                             findEntities,
                         })
-                        return ok(items[0] ?? null)
+                        const entity = items[0]
+                        if (!entity) return ok(null)
+
+                        if (include?.includes('content') && entity.uri) {
+                            // Heuristic — read content only for text-like
+                            // formats. Binary types (png, pdf, mp4, etc.)
+                            // get a marker so the caller knows to use a
+                            // different tool (mikser_render, or fetch
+                            // directly) rather than expecting bytes back.
+                            const TEXT_EXTS = new Set([
+                                'md', 'markdown', 'html', 'htm', 'xhtml',
+                                'yml', 'yaml', 'json', 'jsonc',
+                                'txt', 'csv', 'tsv',
+                                'css', 'js', 'mjs', 'cjs', 'ts',
+                                'liquid', 'hbs', 'handlebars', 'eta', 'mustache',
+                                'svg', 'xml', 'mjml', 'rss', 'atom',
+                                'aml',
+                            ])
+                            const ext = path.extname(entity.uri).slice(1).toLowerCase()
+                            if (TEXT_EXTS.has(ext)) {
+                                try {
+                                    entity.content = await readFile(entity.uri, 'utf8')
+                                } catch (err) {
+                                    entity.contentError = err.message
+                                }
+                            } else {
+                                entity.contentSkipped = `Non-text format (.${ext}). Use mikser_render to materialize output or read the file directly at entity.uri.`
+                            }
+                        }
+
+                        return ok(entity)
                     } catch (err) {
                         logger.error('MCP mikser_read_entity error: %s', err.message)
                         return fail(err.message)
@@ -798,7 +829,87 @@ export default ({
                 },
             )
 
-            logger.info('MCP tools registered: list/read/update/delete/render')
+            // ---- mikser_preview --------------------------------------
+            // Same input shape as mikser_render but writes the produced
+            // bytes to <outputFolder>/_preview/<uuid>.<ext> and returns
+            // a URL served by the running --server. Auto-deletes after
+            // a configurable TTL so the preview folder doesn't grow.
+            //
+            // This is what makes "render a preview report and give the
+            // output to check" a single tool call ending in a clickable
+            // URL — instead of bytes embedded in the agent's chat
+            // response that the user has to manually save and open.
+            mcp.simpleTool(
+                'mikser_preview',
+                'Render an entity through the engine pipeline AND write the output to a temporary path served by the running --server, returning a clickable URL. Use this instead of mikser_render when the user needs to see the result in a browser. Requires --server. Files auto-expire (default 10 minutes).',
+                {
+                    entity:  z.record(z.any()).describe('Entity shape with at least { id, collection } and any meta/content the renderer needs. Same shape as mikser_render.'),
+                    options: z.record(z.any()).optional().describe('Renderer options. Same as mikser_render, plus { expiresInSeconds: number = 600 } controlling preview TTL.'),
+                },
+                async ({ entity = {}, options = {} }) => {
+                    try {
+                        if (!runtime.options.port) {
+                            return fail('mikser_preview requires --server to be running so the preview URL is reachable. Use mikser_render to get raw bytes inline instead.')
+                        }
+
+                        // Render with save:false / catalog:false so the
+                        // engine produces bytes but doesn't write to
+                        // entity.destination or persist a catalog row —
+                        // we own the file location for previews.
+                        const { expiresInSeconds = 600, ...renderOptions } = options ?? {}
+                        const { output, entity: rendered } = await mcpRender(entity, {
+                            ...renderOptions,
+                            save: false,
+                            catalog: false,
+                        })
+                        const result = output?.result
+                        if (result == null) {
+                            return fail('Render produced no output. Check that the entity has a resolvable layout and the layout matched a registered renderer.')
+                        }
+
+                        // Derive file extension from the rendered
+                        // entity's destination (set by the layouts +
+                        // postprocess pipeline). Fall back to "html" if
+                        // nothing resolved — most layouts default to it.
+                        const destExt = path.extname(rendered.destination || '').slice(1)
+                        const ext = destExt || 'html'
+
+                        const previewFolder = path.join(runtime.options.outputFolder, '_preview')
+                        await mkdir(previewFolder, { recursive: true })
+                        const fileName = `${randomUUID()}.${ext}`
+                        const filePath = path.join(previewFolder, fileName)
+                        await writeFile(filePath, result)
+
+                        // Cleanup timer. unref() so a pending preview
+                        // never holds the process open at shutdown.
+                        const ttl = Math.max(30, Math.min(3600, expiresInSeconds))
+                        const timer = setTimeout(() => {
+                            unlink(filePath).catch(() => { /* already gone */ })
+                        }, ttl * 1000)
+                        if (typeof timer.unref === 'function') timer.unref()
+
+                        const url = `http://localhost:${runtime.options.port}/_preview/${fileName}`
+                        const mime = mimeForEntity(rendered) ?? 'application/octet-stream'
+                        const bytes = Buffer.isBuffer(result) ? result.length : Buffer.byteLength(result)
+
+                        logger.info('MCP mikser_preview wrote %s (%d bytes, ttl %ds): %s', fileName, bytes, ttl, url)
+
+                        return ok({
+                            previewUrl: url,
+                            mimeType: mime,
+                            bytes,
+                            expiresInSeconds: ttl,
+                            filePath,
+                            instructions: 'Open previewUrl in a browser to view. The file auto-deletes after expiresInSeconds — re-run mikser_preview to refresh.',
+                        })
+                    } catch (err) {
+                        logger.error('MCP mikser_preview error: %s', err.message)
+                        return fail(err.message)
+                    }
+                },
+            )
+
+            logger.info('MCP tools registered: list/read/update/delete/render/preview')
         }
     })
 
