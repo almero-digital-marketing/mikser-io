@@ -473,10 +473,16 @@ function mountEndpoint(app, substrate, path, ep, endpointName) {
         const authLabel = ep.token
             ? 'token'
             : (ep.allowRemote ? 'public, REMOTE OPEN' : 'public, loopback-only')
+        // Print as a full URL when we know the port so the operator can
+        // copy/click straight from the log. Falls back to bare path for
+        // external-app setups where the engine doesn't own the listener.
+        const location = runtime.options.port
+            ? `http://localhost:${runtime.options.port}${path}`
+            : path
         if (endpointName) {
-            logger.info('MCP endpoint mounted: %s (tools=[%s] [%s])', path, toolsLabel, authLabel)
+            logger.info('MCP endpoint mounted: %s (tools=[%s] [%s])', location, toolsLabel, authLabel)
         } else {
-            logger.info('MCP mounted: %s [%s]', path, authLabel)
+            logger.info('MCP mounted: %s [%s]', location, authLabel)
         }
     }
 }

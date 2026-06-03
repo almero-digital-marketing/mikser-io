@@ -124,7 +124,12 @@ export default ({
             }
             res.type(entry.mime).send(entry.bytes)
         })
-        logger.info('Preview route mounted: %s (cache cap: %d MB)', cfg.path, Math.round(cfg.maxBytes / 1024 / 1024))
+        // Full URL when port is known; bare path otherwise. The /:filename
+        // segment is left off — it's filled at request time per preview.
+        const location = runtime.options.port
+            ? `http://localhost:${runtime.options.port}${cfg.path}`
+            : cfg.path
+        logger.info('Preview route mounted: %s (cache cap: %d MB)', location, Math.round(cfg.maxBytes / 1024 / 1024))
     })
 
     // Gating on runtime.options.mcp inside onLoaded matches the route-

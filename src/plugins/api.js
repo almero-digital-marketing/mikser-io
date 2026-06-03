@@ -637,8 +637,13 @@ export default ({
             const authLabel = ep.token
                 ? 'token'
                 : (ep.allowRemote ? 'public, REMOTE OPEN' : 'public, loopback-only')
-            logger.info('Api endpoint mounted: %s/%s (ops=[%s] [%s])',
-                base, name, [...allowedOps].join(','), authLabel)
+            // Full URL when the engine owns the listener (port is known).
+            // Falls back to the path alone for external-app setups.
+            const location = runtime.options.port
+                ? `http://localhost:${runtime.options.port}${base}/${name}`
+                : `${base}/${name}`
+            logger.info('Api endpoint mounted: %s (ops=[%s] [%s])',
+                location, [...allowedOps].join(','), authLabel)
         }
 
         // MCP tool registrations. MCP is in-process: whoever can reach
