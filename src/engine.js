@@ -184,7 +184,7 @@ export async function setup(options) {
                     if (req.method === 'OPTIONS') return res.sendStatus(204)
                     next()
                 })
-                logger.info('CORS enabled: %s', origin)
+                logger.debug('CORS enabled: %s', origin)
             }
         }
 

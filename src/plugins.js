@@ -63,7 +63,7 @@ onLoad(async () => {
     if (!userPlugins.length) {
         logger.info('No plugins loaded')
     } else {
-        logger.info('Loading plugins: %s', userPlugins)
+        logger.info('Loading plugins: %s', userPlugins.join(', '))
 
         for (let plugin of userPlugins) {
             await loadPlugin(plugin)
