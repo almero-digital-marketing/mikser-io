@@ -62,8 +62,6 @@ export function createMcpSubstrate() {
     }
 
     const substrate = {
-        // ---- plugin-facing surface (mirrors McpServer) -----------
-
         // The SDK's register* methods take different argument counts
         // (3 for tools, 4 for resources, 3 for prompts). We spread the
         // recorded args verbatim — substrate doesn't peek at the
@@ -96,8 +94,6 @@ export function createMcpSubstrate() {
             return substrate.registerTool(name, { description, inputSchema }, handler)
         },
 
-        // ---- engine-facing surface -------------------------------
-
         // Create a fresh McpServer pre-loaded with every recorded
         // registration. Called by the transport mount per new session.
         _createServer() {
@@ -112,8 +108,6 @@ export function createMcpSubstrate() {
         _detach(server) { activeServers.delete(server) },
         _activeServerCount() { return activeServers.size },
 
-        // ---- notification broadcast ------------------------------
-
         // Send a logging-message notification to every connected
         // client. The SDK's per-session level filtering applies.
         broadcastLog(params) {
@@ -127,8 +121,6 @@ export function createMcpSubstrate() {
                 } catch { /* swallow */ }
             }
         },
-
-        // ---- rolling log buffer ----------------------------------
 
         // Called by wireLoggerToMcp on every log call. Records a
         // monotonic seq number so clients can poll "give me lines

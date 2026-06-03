@@ -492,10 +492,10 @@ export default ({
         }
     })
 
-    // ---- MCP tool: mikser_inspect_layout -----------------------------
-    // Lives in the layouts plugin (not core) because "what does a layout
-    // expect?" is layout-specific knowledge. Follows ADR-0006: domain
-    // logic → plugin; the MCP substrate stays in core.
+    // mikser_inspect_layout lives in the layouts plugin (not core)
+    // because "what does a layout expect?" is layout-specific knowledge.
+    // Follows ADR-0006: domain logic → plugin; the MCP substrate stays
+    // in core.
     //
     // Gating on runtime.options.mcp inside onLoaded matches the Express
     // pattern (gating on runtime.options.app for route mounts) — same

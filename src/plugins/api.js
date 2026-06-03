@@ -642,9 +642,9 @@ export default ({
                 ep.token ? '[token]' : '[public]')
         }
 
-        // ---- MCP tool registrations -----------------------------------
-        // MCP is in-process: whoever can reach the /mcp transport already
-        // controls the engine. So the tool surface mirrors the *admin*-
+        // MCP tool registrations. MCP is in-process: whoever can reach
+        // the /mcp transport already controls the engine. So the tool
+        // surface mirrors the *admin*-
         // shape (list/query/read/update/delete/render) without the HTTP
         // endpoint's token gate or query scope — the catalog is global.
         // Tools register once (not per HTTP endpoint); plugin-author

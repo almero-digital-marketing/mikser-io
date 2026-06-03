@@ -51,8 +51,9 @@ export default ({
         path:        runtime.config.preview?.path        ?? '/preview',
     })
 
-    // ---- cache primitives ------------------------------------------
-
+    // Three primitives the rest of the plugin (and library-mode
+    // callers) build on: store(), get(), stats(). All operate against
+    // the closed-over `previews` Map and `bytesInUse` counter.
     function store({ filename, bytes, mime, ttlMs }) {
         const size = Buffer.isBuffer(bytes) ? bytes.length : Buffer.byteLength(bytes)
         const cfg = config()
@@ -98,8 +99,9 @@ export default ({
     // later plugin's onLoad / onLoaded can already see it.
     runtime.options.preview = { store, get, stats }
 
-    // ---- HTTP route ------------------------------------------------
-
+    // HTTP route: served regardless of whether MCP is on, so previews
+    // are also reachable from library-mode callers that stored bytes
+    // via runtime.options.preview.store() directly.
     onLoaded(async () => {
         const logger = useLogger()
         const app = runtime.options.app
@@ -125,12 +127,9 @@ export default ({
         logger.info('Preview route mounted: %s (cache cap: %d MB)', cfg.path, Math.round(cfg.maxBytes / 1024 / 1024))
     })
 
-    // ---- MCP tool --------------------------------------------------
-    //
     // Gating on runtime.options.mcp inside onLoaded matches the route-
     // mount pattern above. Same shape as `if (!app)`: check the flag
     // in the hook, register if present. No special wrapper needed.
-
     onLoaded(() => {
         if (!runtime.options.mcp) return
         const mcp = runtime.options.mcp
