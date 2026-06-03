@@ -37,7 +37,7 @@ describe('api: useRenderer', () => {
         const { render } = useRenderer(runtime)
         const { output, entity } = await render({ id: '/a.md', collection: 'documents' })
         assert.equal(output.result, 'rendered html')
-        assert.ok(entity._correlationId)
+        assert.ok(entity.options?.correlationId)
     })
 
     it('routes outputs to the right correlation id in a concurrent batch', async () => {
@@ -110,7 +110,7 @@ describe('api: useRenderer', () => {
         const runtime = createFakeRuntime({
             process: async () => {
                 for (const cb of [...runtime.hooks.completed]) {
-                    await cb({ entity: { _correlationId: '???' }, output: null })
+                    await cb({ entity: { options: { correlationId: '???' } }, output: null })
                 }
             },
         })
@@ -172,7 +172,7 @@ describe('api: useRenderer', () => {
         assert.equal(entities.length, 0)
     })
 
-    it('save: false — stamps the entity with _save:false so layouts.onComplete skips the disk write', async () => {
+    it('save: false — sets entity.options.save = false so layouts.onComplete skips the disk write', async () => {
         let submitted
         const runtime = createFakeRuntime({
             update: async (e) => { submitted = e },
@@ -186,10 +186,10 @@ describe('api: useRenderer', () => {
         const { render } = useRenderer(runtime)
         await render({ id: '/no-save', type: 'document', collection: 'documents' }, { save: false })
 
-        assert.equal(submitted._save, false)
+        assert.equal(submitted.options.save, false)
     })
 
-    it('save: true (default) — does NOT stamp _save (clean entity)', async () => {
+    it('save: true (default) — does NOT set entity.options.save (clean options)', async () => {
         let submitted
         const runtime = createFakeRuntime({
             update: async (e) => { submitted = e },
@@ -203,10 +203,10 @@ describe('api: useRenderer', () => {
         const { render } = useRenderer(runtime)
         await render({ id: '/saved', type: 'document', collection: 'documents' })
 
-        assert.equal('_save' in submitted, false, 'should not stamp _save on the default path')
+        assert.equal('save' in submitted.options, false, 'should not set save on the default path')
     })
 
-    it('save: only the literal false stamps the opt-out (strict)', async () => {
+    it('save: only the literal false sets the opt-out (strict)', async () => {
         for (const value of [null, undefined, 0, '', 'false', 'no', true]) {
             let submitted
             const runtime = createFakeRuntime({
@@ -219,7 +219,7 @@ describe('api: useRenderer', () => {
             })
             const { render } = useRenderer(runtime)
             await render({ id: '/s', type: 'document', collection: 'documents' }, { save: value })
-            assert.equal('_save' in submitted, false, `save: ${JSON.stringify(value)} should not opt out`)
+            assert.equal('save' in submitted.options, false, `save: ${JSON.stringify(value)} should not opt out`)
         }
     })
 

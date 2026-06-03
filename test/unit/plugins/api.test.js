@@ -330,9 +330,10 @@ describe('api plugin: /render endpoint (integration)', () => {
 
         // Capture the entity that the renderer was actually asked to
         // process — we want to assert that body.options.save:false ends
-        // up as entity._save:false (which the renderer stamps when
-        // explicitly opting out), and that `options` itself doesn't end
-        // up on the entity as a stray field.
+        // up as entity.options.save:false (set by useRenderer when
+        // explicitly opting out), and that other body.options fields
+        // (catalog: false in particular) don't leak onto entity.options
+        // as stray engine flags.
         let submitted
         h.runtime.update = async (entity) => { submitted = entity }
         h.runtime.process = async () => {
@@ -359,8 +360,9 @@ describe('api plugin: /render endpoint (integration)', () => {
             })
             assert.equal(submitted.id, '/docs/x.md')
             assert.equal(submitted.collection, 'documents')
-            assert.equal(submitted._save, false)
-            assert.equal('options' in submitted, false, 'options must not leak into the entity')
+            assert.equal(submitted.options.save, false, 'options.save:false should propagate to entity.options.save')
+            assert.equal('catalog' in submitted.options, false, 'options.catalog should not leak onto entity.options (handled via splice, not stamp)')
+            assert.ok(submitted.options.correlationId, 'useRenderer should set its own correlationId')
         } finally {
             await new Promise((r) => server.close(r))
         }

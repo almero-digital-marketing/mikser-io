@@ -444,11 +444,11 @@ export default ({
     onComplete(async ({ entity, options, output }) => {
         const logger = useLogger()
         if (entity.layout && !options?.ignore && output.result != null) {
-            // `_save: false` (stamped by useRenderer when called with
-            // { save: false }) opts out of writing the FINAL output to
-            // disk. The bytes still come back to the caller via
-            // output.result. Strict equality — only the literal `false`
-            // opts out, matching the catalog-flag pattern.
+            // `entity.options.save === false` (set by useRenderer when
+            // called with { save: false }) opts out of writing the
+            // FINAL output to disk. The bytes still come back to the
+            // caller via output.result. Strict equality — only the
+            // literal `false` opts out, matching the catalog-flag pattern.
             //
             // The intermediate file (when a postprocessor will run next)
             // must still exist somewhere on disk so the postprocessor
@@ -459,8 +459,9 @@ export default ({
             // task's outputFolder is rewritten in engine.js so post
             // plugins resolve `entity.origin` against the same base.
             const isFinal = !entity.layout.postprocessor || entity.origin != null
-            const skipWrite = entity._save === false && isFinal
-            const writeBase = (entity._save === false && !isFinal)
+            const previewMode = entity.options?.save === false
+            const skipWrite = previewMode && isFinal
+            const writeBase = (previewMode && !isFinal)
                 ? runtime.options.previewFolder
                 : runtime.options.outputFolder
 
@@ -482,10 +483,10 @@ export default ({
                 // the renderer's output — e.g. MJML→HTML on `*.html-mjml.*`
                 // layouts). Otherwise we'd delete our own final file.
                 //
-                // For preview flow (_save:false) the intermediate lived
-                // in previewFolder; for normal flow it lived in
-                // outputFolder. Pick the right base.
-                const originBase = entity._save === false
+                // For preview flow (entity.options.save === false) the
+                // intermediate lived in previewFolder; for normal flow
+                // it lived in outputFolder. Pick the right base.
+                const originBase = previewMode
                     ? runtime.options.previewFolder
                     : runtime.options.outputFolder
                 const originFile = path.join(originBase, entity.origin)

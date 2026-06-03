@@ -37,7 +37,7 @@ export function useRenderer(runtime, { defaultTimeout = 30_000 } = {}) {
         const remaining = new Map(batch.map(b => [b.correlationId, b]))
         const completedHooks = runtime.hooks.completed
         const hook = async (entry) => {
-            const cid = entry.entity?._correlationId
+            const cid = entry.entity?.options?.correlationId
             if (!cid) return
             const item = remaining.get(cid)
             if (!item) return
@@ -121,6 +121,12 @@ export function useRenderer(runtime, { defaultTimeout = 30_000 } = {}) {
      * regardless of either flag — `save` only affects whether they also
      * end up on disk.
      *
+     * Per-entity engine state (correlation id, control flags) lives at
+     * `entity.options.*` — same noun mikser uses for engine config
+     * (`runtime.options`) and plugin params, scoped to one entity's
+     * pass through the lifecycle. Consumers should not set
+     * `entity.options.correlationId` themselves; useRenderer owns it.
+     *
      * @param {object} entity                - any entity-shaped object
      * @param {object} [opts]
      * @param {number}  [opts.timeout]       - override the default timeout
@@ -131,12 +137,25 @@ export function useRenderer(runtime, { defaultTimeout = 30_000 } = {}) {
     async function render(entity, { timeout = defaultTimeout, catalog = true, save = true } = {}) {
         const result = await new Promise((resolve, reject) => {
             const correlationId = randomUUID()
-            const stamped = { ...entity, _correlationId: correlationId }
-            // Only stamp _save when explicitly opting out — keeps the
-            // entity object clean for the common case.
-            if (save === false) stamped._save = false
+            // Engine-set fields live under entity.options. The caller's
+            // render(entity, { save: false }) becomes
+            // entity.options.save = false here — same noun mikser uses
+            // for engine config (runtime.options) and plugin params,
+            // just scoped to one entity's pass through the lifecycle.
+            //
+            // Only set `save` when explicitly opting out — leaves the
+            // entity.options as a clean { correlationId } in the common
+            // case rather than carrying a redundant save:true.
+            const prepared = {
+                ...entity,
+                options: {
+                    ...entity.options,
+                    correlationId,
+                    ...(save === false ? { save: false } : {}),
+                },
+            }
             pending.push({
-                entity: stamped,
+                entity: prepared,
                 correlationId,
                 timeout,
                 resolve,

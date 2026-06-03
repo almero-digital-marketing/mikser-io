@@ -431,8 +431,9 @@ export async function setup(options) {
                         // resolve `entity.origin` against
                         // `options.outputFolder`, so swap it here so
                         // they look in the right place. No change for
-                        // normal builds (no _save flag → outputFolder).
-                        ...(entity._save === false
+                        // normal builds (entity.options.save unset →
+                        // outputFolder).
+                        ...(entity.options?.save === false
                             ? { outputFolder: runtime.options.previewFolder }
                             : {}),
                     },

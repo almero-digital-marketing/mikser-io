@@ -139,7 +139,7 @@ describe('layouts plugin', () => {
         })
     })
 
-    it('onComplete with entity._save === false skips the disk write (bytes-only mode)', async () => {
+    it('onComplete with entity.options.save === false skips the disk write (bytes-only mode)', async () => {
         await withTempWorking(async (workingFolder) => {
             const outputFolder = path.join(workingFolder, 'out')
             const h = createHarness({ options: { workingFolder, outputFolder } })
@@ -152,7 +152,7 @@ describe('layouts plugin', () => {
                 name: 'page',
                 destination: '/page.html',
                 layout: { name: 'page', format: 'html' },
-                _save: false,
+                options: { save: false },
             }
             await h.runHook('complete', { entity, options: {}, output: { result: '<h1>Hi</h1>' } })
 
@@ -161,7 +161,7 @@ describe('layouts plugin', () => {
         })
     })
 
-    it('onComplete writes the intermediate to previewFolder (not outputFolder) when _save:false and a postprocessor is configured', async () => {
+    it('onComplete writes the intermediate to previewFolder (not outputFolder) when options.save:false and a postprocessor is configured', async () => {
         await withTempWorking(async (workingFolder) => {
             const outputFolder = path.join(workingFolder, 'out')
             const previewFolder = path.join(workingFolder, 'runtime', 'preview')
@@ -170,18 +170,19 @@ describe('layouts plugin', () => {
             await h.runHook('loaded')
 
             // Intermediate: postprocessor is configured, no origin yet
-            // (we haven't entered the postprocess phase). _save:false
-            // means the FINAL output is skipped, but the intermediate
-            // still needs to land somewhere so the postprocessor can
-            // read it — that "somewhere" is previewFolder, not
-            // outputFolder. Keeps outputFolder clean for previews.
+            // (we haven't entered the postprocess phase).
+            // options.save:false means the FINAL output is skipped, but
+            // the intermediate still needs to land somewhere so the
+            // postprocessor can read it — that "somewhere" is
+            // previewFolder, not outputFolder. Keeps outputFolder
+            // clean for previews.
             const intermediate = {
                 id: '/documents/r.md',
                 collection: 'documents',
                 name: 'r',
                 destination: '/r.html',
                 layout: { name: 'r', format: 'html', postprocessor: 'pdf' },
-                _save: false,
+                options: { save: false },
             }
             await h.runHook('complete', { entity: intermediate, options: {}, output: { result: '<h1>R</h1>' } })
 
