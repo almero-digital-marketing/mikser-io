@@ -317,10 +317,9 @@ function serverInfo() {
         serves: opts.outputFolder ?? null,
         mcpPath: opts.mcpPath ?? null,
         mcpUrl: base && opts.mcpPath ? `${base}${opts.mcpPath}` : null,
-        // Convention for preview writes (used by mikser_preview). Agents
-        // can build URLs like `${url}${previewPathPrefix}/<file>` once
-        // a preview tool has written there.
-        previewPathPrefix: '/_preview',
+        // Preview URLs are returned directly by mikser_preview (api
+        // plugin), so we don't advertise a path convention here —
+        // doing so would be a lie when the api plugin isn't loaded.
     }
 }
 
