@@ -126,7 +126,7 @@ export function useSource(core, options) {
                 : `${prefix}/${context.relativePath.replace(/\\/g, '/')}`
             try {
                 await deleteEntity({ id, type, collection })
-                logger.info('%s removed: %s', collection, name)
+                logger.debug('%s removed: %s', collection, name)
             } catch (err) {
                 logger.warn('%s remove failed for %s: %s', collection, name, err.message)
             }
@@ -154,7 +154,7 @@ export function useSource(core, options) {
             ? folder
             : path.join(runtime.options.workingFolder, folder)
         runtime.options[`${collection}Folder`] = absFolder
-        logger.info('%s folder: %s', cap, absFolder)
+        logger.debug('%s folder: %s', cap, absFolder)
 
         await mkdir(absFolder, { recursive: true })
         watch(collection, absFolder)
@@ -222,7 +222,7 @@ export function useSource(core, options) {
             const write = action === ACTION.UPDATE ? updateEntity : createEntity
             await write(entity)
             if (phase !== 'import' || reload) {
-                logger.info('%s %s: %s', cap, reload ? 'reloaded' : 'loaded', name)
+                logger.debug('%s %s: %s', cap, reload ? 'reloaded' : 'loaded', name)
             }
         } catch (err) {
             logger.error('%s load failed for %s: %s', collection, name, err.message)

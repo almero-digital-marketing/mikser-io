@@ -233,7 +233,7 @@ export default ({
         runtime.options.layoutsFolder = path.join(runtime.options.workingFolder, runtime.options.layouts)
         runtime.options.layoutsStateFolder = path.join(runtime.options.outputFolder, 'state')
 
-        logger.info('Layouts folder: %s', runtime.options.layoutsFolder)
+        logger.debug('Layouts folder: %s', runtime.options.layoutsFolder)
         await mkdir(runtime.options.layoutsFolder, { recursive: true })
 
         watch(collection, runtime.options.layoutsFolder)

@@ -187,7 +187,7 @@ export default ({
                     const url = `http://localhost:${runtime.options.port}${cfg.path}/${filename}`
                     const bytes = Buffer.isBuffer(result) ? result.length : Buffer.byteLength(result)
 
-                    logger.info('MCP mikser_preview_render cached %s (%d bytes, ttl %ds): %s', filename, bytes, ttlSec, url)
+                    logger.debug('MCP mikser_preview_render cached %s (%d bytes, ttl %ds): %s', filename, bytes, ttlSec, url)
 
                     return ok({
                         previewUrl: url,

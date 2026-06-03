@@ -20,7 +20,7 @@ export default ({
         runtime.options.data = runtime.config.data?.dataFolder || 'data'
         runtime.options.dataFolder = path.join(runtime.options.outputFolder, runtime.options.data)
 
-        logger.info('Data folder: %s', runtime.options.dataFolder)
+        logger.debug('Data folder: %s', runtime.options.dataFolder)
         await mkdir(runtime.options.dataFolder, { recursive: true })
     })
 

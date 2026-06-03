@@ -25,7 +25,7 @@ export default ({
                 const sourceStat = await stat(sourceLocation)
 
                 await mkdir(destinationFolder, { recursive: true })
-                logger.info('Sharing: %s → %s', sourceLocation, destinationLocation)
+                logger.debug('Sharing: %s → %s', sourceLocation, destinationLocation)
                 if (sourceStat.isDirectory()) {
                     await symlink(path.resolve(sourceLocation), destinationLocation, 'dir')
                 } else {

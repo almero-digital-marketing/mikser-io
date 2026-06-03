@@ -119,16 +119,16 @@ export default ({
                 entity.checksum = await hash(JSON.stringify(entity.meta), { algorithm: 'md5' })
                 if (current) {
                     if (entity.checksum != current.checksum) {
-                        logger.info('Observer update: %s', id)
+                        logger.debug('Observer update: %s', id)
                         await updateEntity(entity)
                     }
                 } else {
-                    logger.info('Observer create: %s', id)
+                    logger.debug('Observer create: %s', id)
                     await createEntity(entity)
                 }
             } else {
                 if (current) {
-                    logger.info('Observer delete: %s', id)
+                    logger.debug('Observer delete: %s', id)
                     await deleteEntity(entity)
                 }
             }
@@ -157,7 +157,7 @@ export default ({
             const { origin } = new URL(runtime.config.observer[observerName].uri)
             onSync(origin, async ({ context }) => {
                 if (context.uri) {
-                    logger.info('Syncing observer: [%s] %s', observerName, context.uri)
+                    logger.debug('Syncing observer: [%s] %s', observerName, context.uri)
                     return syncEntities(observerName)
                 }
             })

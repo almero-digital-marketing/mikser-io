@@ -48,7 +48,7 @@ export default ({
 
         runtime.options.resources = runtime.config.resources?.resourcesFolder || collection
         runtime.options.resourcesFolder = path.join(runtime.options.workingFolder, runtime.options.resources)
-        logger.info('Resources folder: %s', runtime.options.resourcesFolder)
+        logger.debug('Resources folder: %s', runtime.options.resourcesFolder)
 
         for (let library in (runtime.config.resources?.libraries || [])) {
             let resource = runtime.config.resources.libraries[library]

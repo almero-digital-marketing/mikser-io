@@ -113,7 +113,7 @@ export default ({
         runtime.options.files = runtime.config.files?.filesFolder || collection
         runtime.options.filesFolder = path.join(runtime.options.workingFolder, runtime.options.files)
 
-        logger.info('Files folder: %s', runtime.options.filesFolder)
+        logger.debug('Files folder: %s', runtime.options.filesFolder)
         await mkdir(runtime.options.filesFolder, { recursive: true })
 
         watch(collection, runtime.options.filesFolder)

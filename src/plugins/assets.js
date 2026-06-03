@@ -119,12 +119,12 @@ export default ({
 
         runtime.options.presets = runtime.config.presets?.presetsFolder || collection
         runtime.options.presetsFolder = path.join(runtime.options.workingFolder, runtime.options.presets)
-        logger.info('Presets folder: %s', runtime.options.presetsFolder)
+        logger.debug('Presets folder: %s', runtime.options.presetsFolder)
         await mkdir(runtime.options.presetsFolder, { recursive: true })
 
         runtime.options.assets = runtime.config.assets?.assetsFolder || 'assets'
         runtime.options.assetsFolder = path.join(runtime.options.workingFolder, runtime.options.assets)
-        logger.info('Assets folder: %s', runtime.options.assetsFolder)
+        logger.debug('Assets folder: %s', runtime.options.assetsFolder)
         await mkdir(runtime.options.assetsFolder, { recursive: true })
 
         let link = path.join(runtime.options.outputFolder, runtime.options.assets)
