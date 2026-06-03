@@ -9,7 +9,7 @@ export default ({
 }) => {
     onProcess(async () => {
         const logger = useLogger()
-        for await (let { id, entity } of useJournal('Fron matter', [OPERATION.CREATE, OPERATION.UPDATE])) {
+        for await (let { id, entity } of useJournal('Front matter', [OPERATION.CREATE, OPERATION.UPDATE])) {
             if (entity.content && fm.test(entity.content)) {
                 const info = fm(entity.content)
                 if (info.attributes) {
