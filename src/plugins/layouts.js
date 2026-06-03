@@ -445,21 +445,27 @@ export default ({
         const logger = useLogger()
         if (entity.layout && !options?.ignore && output.result != null) {
             // `_save: false` (stamped by useRenderer when called with
-            // { save: false }) opts out of writing the final output to
+            // { save: false }) opts out of writing the FINAL output to
             // disk. The bytes still come back to the caller via
             // output.result. Strict equality — only the literal `false`
             // opts out, matching the catalog-flag pattern.
             //
             // The intermediate file (when a postprocessor will run next)
-            // must still be written so the postprocessor can consume it,
-            // so we only honour `_save: false` for the FINAL output —
-            // detected as either "no postprocessor configured" or "we're
-            // running on the postprocess side already" (origin set).
+            // must still exist somewhere on disk so the postprocessor
+            // can consume it. For save:true, that's outputFolder; for
+            // save:false, that's runtime.options.previewFolder — an
+            // engine-owned scratch path under runtimeFolder, never
+            // exposed in user-visible outputFolder. The postprocess
+            // task's outputFolder is rewritten in engine.js so post
+            // plugins resolve `entity.origin` against the same base.
             const isFinal = !entity.layout.postprocessor || entity.origin != null
             const skipWrite = entity._save === false && isFinal
+            const writeBase = (entity._save === false && !isFinal)
+                ? runtime.options.previewFolder
+                : runtime.options.outputFolder
 
             if (!skipWrite) {
-                const destinationFile = path.join(runtime.options.outputFolder, entity.destination)
+                const destinationFile = path.join(writeBase, entity.destination)
                 await mkdir(path.dirname(destinationFile), { recursive: true })
                 try {
                     await unlink(destinationFile)
@@ -475,7 +481,14 @@ export default ({
                 // wrote to (post plugins that produce the same extension as
                 // the renderer's output — e.g. MJML→HTML on `*.html-mjml.*`
                 // layouts). Otherwise we'd delete our own final file.
-                const originFile = path.join(runtime.options.outputFolder, entity.origin)
+                //
+                // For preview flow (_save:false) the intermediate lived
+                // in previewFolder; for normal flow it lived in
+                // outputFolder. Pick the right base.
+                const originBase = entity._save === false
+                    ? runtime.options.previewFolder
+                    : runtime.options.outputFolder
+                const originFile = path.join(originBase, entity.origin)
                 try {
                     await unlink(originFile)
                 } catch { }

@@ -139,7 +139,7 @@ export default ({
 
         mcp.simpleTool(
             'mikser_preview',
-            'Render an entity through the engine pipeline AND surface the output as a clickable URL served by the running --server. Use this instead of mikser_render when the user needs to see the result in a browser. Requires --server. Previews live in memory (not on disk, never under outputFolder) and auto-expire — default 10 minutes, clamped 30..3600 seconds.',
+            'Render an entity through the engine pipeline AND surface the FINAL output as a clickable URL served by the running --server. Use this instead of mikser_render when the user needs to see the result in a browser. The URL serves the pipeline\'s final output — PDF for a `*.html-pdf.*` layout, MJML-derived HTML for `*.html-mjml.*`, etc. Requires --server. Previews live in memory (not on disk, never under outputFolder) and auto-expire — default 10 minutes, clamped 30..3600 seconds.',
             {
                 entity:  z.record(z.any()).describe('Entity shape with at least { id, collection } and any meta/content the renderer needs. Same shape as mikser_render.'),
                 options: z.record(z.any()).optional().describe('Renderer options. Same as mikser_render, plus { expiresInSeconds: number = 600 } controlling preview TTL.'),

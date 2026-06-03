@@ -75,6 +75,12 @@ export async function setup(options) {
 
         runtime.options.runtimeFolder = path.join(runtime.options.workingFolder, runtime.options.runtimeFolder || 'runtime')
         runtime.options.outputFolder = path.join(runtime.options.workingFolder, runtime.options.outputFolder || 'out')
+        // Scratch path for intermediate render artifacts when a caller
+        // opted out of disk writes via render({ save: false }) but the
+        // layout has a postprocessor that still needs to read the
+        // intermediate. Lives under runtimeFolder so it's engine-owned
+        // and never appears in outputFolder.
+        runtime.options.previewFolder = path.join(runtime.options.runtimeFolder, 'preview')
 
         if (runtime.options.clear) {
             try {
@@ -415,7 +421,21 @@ export async function setup(options) {
                         origin: entity.destination,
                         destination
                     },
-                    options: { postprocessor: options.postprocessor, tasks: options.tasks },
+                    options: {
+                        postprocessor: options.postprocessor,
+                        tasks: options.tasks,
+                        // When the originating render call passed
+                        // `save: false`, the layouts plugin wrote the
+                        // intermediate into runtime.options.previewFolder
+                        // rather than outputFolder. Postprocess plugins
+                        // resolve `entity.origin` against
+                        // `options.outputFolder`, so swap it here so
+                        // they look in the right place. No change for
+                        // normal builds (no _save flag → outputFolder).
+                        ...(entity._save === false
+                            ? { outputFolder: runtime.options.previewFolder }
+                            : {}),
+                    },
                     context
                 })
             }

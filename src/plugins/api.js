@@ -791,7 +791,7 @@ export default ({
 
             mcp.simpleTool(
                 'mikser_render',
-                'Render a transient entity through the engine pipeline (parse → layouts → resources → render → postprocess) and return the produced bytes. Use this for "preview this layout against this data" without writing the entity to disk. Set options.save=false to skip the disk write; options.catalog=false to prune the catalog row after rendering.',
+                'Render a transient entity through the engine pipeline (parse → layouts → resources → render → postprocess) and return the FINAL produced bytes. Use this for "preview this layout against this data" without writing the entity to disk. The returned bytes are the pipeline\'s final output — PDF for a `*.html-pdf.*` layout, MJML-derived HTML for `*.html-mjml.*`, etc. Set options.save=false to skip the disk write; options.catalog=false to prune the catalog row after rendering.',
                 {
                     entity:  z.record(z.any()).describe('Entity shape with at least { id, collection } and any meta/content the renderer needs.'),
                     options: z.record(z.any()).optional().describe('Renderer options: { save: false, catalog: false, renderer: "...", postprocessor: "..." }.'),

@@ -161,17 +161,20 @@ describe('layouts plugin', () => {
         })
     })
 
-    it('onComplete still writes the intermediate when a postprocessor is configured (save:false honored only on FINAL output)', async () => {
+    it('onComplete writes the intermediate to previewFolder (not outputFolder) when _save:false and a postprocessor is configured', async () => {
         await withTempWorking(async (workingFolder) => {
             const outputFolder = path.join(workingFolder, 'out')
-            const h = createHarness({ options: { workingFolder, outputFolder } })
+            const previewFolder = path.join(workingFolder, 'runtime', 'preview')
+            const h = createHarness({ options: { workingFolder, outputFolder, previewFolder } })
             layoutsPlugin(h.core)
             await h.runHook('loaded')
 
             // Intermediate: postprocessor is configured, no origin yet
             // (we haven't entered the postprocess phase). _save:false
-            // should be IGNORED here because the postprocessor needs to
-            // read the file.
+            // means the FINAL output is skipped, but the intermediate
+            // still needs to land somewhere so the postprocessor can
+            // read it — that "somewhere" is previewFolder, not
+            // outputFolder. Keeps outputFolder clean for previews.
             const intermediate = {
                 id: '/documents/r.md',
                 collection: 'documents',
@@ -182,8 +185,15 @@ describe('layouts plugin', () => {
             }
             await h.runHook('complete', { entity: intermediate, options: {}, output: { result: '<h1>R</h1>' } })
 
-            const intermediateFile = path.join(outputFolder, 'r.html')
-            await assert.doesNotReject(() => access(intermediateFile), 'intermediate must be written for postprocess to consume')
+            // Lands in previewFolder, not outputFolder.
+            await assert.doesNotReject(
+                () => access(path.join(previewFolder, 'r.html')),
+                'intermediate must be written to previewFolder for postprocess to consume',
+            )
+            await assert.rejects(
+                () => access(path.join(outputFolder, 'r.html')),
+                'intermediate must NOT appear in outputFolder during preview flow',
+            )
         })
     })
 })

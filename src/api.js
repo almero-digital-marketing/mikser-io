@@ -41,6 +41,16 @@ export function useRenderer(runtime, { defaultTimeout = 30_000 } = {}) {
             if (!cid) return
             const item = remaining.get(cid)
             if (!item) return
+            // Only resolve on the FINAL completion. For postprocessor-
+            // equipped entities the engine fires runtime.complete twice:
+            // once after render (intermediate bytes, entity.origin not
+            // set) and once after postprocess (final bytes, entity.origin
+            // set to the intermediate destination). useRenderer's
+            // contract is "return the pipeline's final output", so we
+            // skip the intermediate fire and wait for the final.
+            const hasPostprocessor = entry.entity?.layout?.postprocessor
+            const isFinal = !hasPostprocessor || entry.entity?.origin != null
+            if (!isFinal) return
             remaining.delete(cid)
             clearTimeout(item.timer)
             item.resolve({ output: entry.output, entity: entry.entity })
@@ -99,8 +109,13 @@ export function useRenderer(runtime, { defaultTimeout = 30_000 } = {}) {
      *   skip the final disk write; the bytes still come back via
      *   `output.result` for you to pipe wherever you want (HTTP
      *   response, S3, …). For layouts with a postprocessor (e.g.
-     *   `*.html-pdf.*`), the intermediate file is still written so the
-     *   postprocessor can consume it; only the FINAL output is skipped.
+     *   `*.html-pdf.*`), the intermediate is written to a scratch path
+     *   under `runtime.options.previewFolder` (engine-owned, never
+     *   in outputFolder) so the postprocessor can consume it; only
+     *   the FINAL output is skipped from disk. `output.result` is
+     *   always the FINAL pipeline output — PDF bytes for a
+     *   `*.html-pdf.*` layout, MJML-derived HTML for
+     *   `*.html-mjml.*`, etc., not the intermediate.
      *
      * The rendered output's bytes are always returned in `output.result`
      * regardless of either flag — `save` only affects whether they also
