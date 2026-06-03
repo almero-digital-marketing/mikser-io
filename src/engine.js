@@ -133,6 +133,34 @@ export async function setup(options) {
                 : Number(runtime.options.server) || 3001
             logger.info('Server starting on port %d', runtime.options.port)
 
+            // Trust-proxy: when mikser is behind a reverse proxy
+            // (nginx, Caddy, an Express app, ngrok with edge), the
+            // socket peer is the proxy — not the real client. Setting
+            // trust proxy makes Express's req.ip walk X-Forwarded-For
+            // back to the original requester, which is what mikser's
+            // loopback-only auth check compares against.
+            //
+            // Accepted values (Express semantics):
+            //   true                 — trust every hop (only safe when
+            //                          the proxy strips/rewrites
+            //                          X-Forwarded-* headers)
+            //   'loopback'           — trust 127.0.0.1, ::1, and other
+            //                          loopback addresses (correct for
+            //                          a proxy on the same host)
+            //   '10.0.0.0/8'         — trust a specific subnet
+            //   false (default)      — no trust; req.ip == socket peer
+            //
+            // Without this and behind a proxy, mikser sees every
+            // request as coming from the proxy's loopback address and
+            // unauthenticated requests through the proxy would pass
+            // the loopback gate. The startup warning below catches
+            // some of those misconfigurations.
+            const trustProxy = runtime.config.server?.trustProxy
+            if (trustProxy !== undefined) {
+                runtime.options.app.set('trust proxy', trustProxy)
+                logger.info('Server trust proxy: %s', String(trustProxy))
+            }
+
             // CORS — a server exists to be fetched, and in dev the
             // frontend is almost always on a different origin (a dev
             // server on another port, a separate domain). So CORS is ON

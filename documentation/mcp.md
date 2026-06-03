@@ -32,9 +32,32 @@ await setup({ server: 3001, mcp: true })
 
 > **Single open endpoint is fine for loopback dev. For anything past loopback (ngrok, public reverse proxy, shared LAN) configure endpoints with tokens — next section.**
 
-## Endpoints (token-gated, scoped tool surfaces)
+## Endpoints (token-gated + loopback-trusted, scoped tool surfaces)
 
 Same shape as the api plugin's `endpoints` config: a named map, each entry with an optional `token` and a tool/resource scope.
+
+### The auth rule
+
+Uniform across both `mcp.endpoints` and `api.endpoints`. A request is allowed if **either**:
+
+1. It carries a valid `Authorization: Bearer <token>` matching the endpoint's configured token, OR
+2. It comes from a loopback address (`127.0.0.0/8`, `::1`, `::ffff:127.x.x.x`).
+
+If neither holds, the request is rejected:
+
+- Wrong token presented → `401 Invalid token` (intent to authenticate, must validate)
+- No token from non-loopback → `403 Token required from non-loopback sources` (or, for endpoints with no token configured: *Endpoint accepts loopback connections only*)
+
+This is the "trusted local host" model — same shape Postgres' trust-auth and Redis' default-no-password use. A process on the mikser host can hit any endpoint without the token; remote callers can't unless they have one. If a process on your host is hostile you have bigger problems than mikser's tools.
+
+To bypass the loopback restriction for a specific endpoint (deliberate exposure, no token):
+
+```js
+intranet: {
+    tools: ['mikser_ping'],
+    allowRemote: true,   // explicit: I know this is open to the world
+},
+```
 
 ```js
 // mikser.config.js
@@ -70,7 +93,8 @@ Endpoint options:
 
 | Field | Meaning | Default |
 |---|---|---|
-| `token` | Required Bearer token; unset = open endpoint | unset |
+| `token` | Bearer token required for remote (non-loopback) access. Loopback is allowed without it. | unset |
+| `allowRemote` | When `true`, no-token requests from non-loopback sources are allowed. Use deliberately. | `false` |
 | `tools` | Tool name list or globs (via minimatch). `'*'` or omit for all. | `'*'` |
 | `resources` | `mikser://` URI list or globs. `'*'` or omit for all. | `'*'` |
 
@@ -121,26 +145,23 @@ curl -X POST http://localhost:3001/mcp/admin \
 
 ### Boot log
 
-With endpoints configured:
+```
+MCP endpoint mounted: /mcp/public   (tools=[mikser_ping,...] [public, loopback-only])
+MCP endpoint mounted: /mcp/intranet (tools=[mikser_ping]     [public, REMOTE OPEN])
+MCP endpoint mounted: /mcp/admin    (tools=[mikser_*]        [token])
+```
 
-```
-MCP endpoint mounted: /mcp/public (tools=[mikser_ping,mikser_api_list_entities,...] [public])
-MCP endpoint mounted: /mcp/admin  (tools=[mikser_*] [token])
-```
-
-Without endpoints — the loud warning lets you know you're exposing everything:
-
-```
-MCP /mcp [OPEN — no token, all tools/resources]. Configure `mcp.endpoints` to gate access before exposing past loopback.
-```
+The bracketed label is the reachability state — `loopback-only` is the safe default, `REMOTE OPEN` is the deliberate opt-in, `token` means the endpoint is gated.
 
 ### A few things worth knowing
 
 - **Endpoints don't share sessions.** A client connected to `/mcp/public` has a separate MCP session from one connected to `/mcp/admin` — same engine underneath, but distinct session state, distinct tool surfaces, distinct logs (per-client log levels are per-session).
+- **Behind a reverse proxy, set `server.trustProxy`.** Without it, mikser sees every request as coming from the proxy's loopback IP and the trusted-host fallback would let unauthenticated remote requests through. Set `runtime.config.server.trustProxy = 'loopback'` (proxy on the same host) or a CIDR for a known proxy IP range. Express's `trust proxy` semantics apply.
 - **Token via header only.** No `?token=` query-param fallback — query params leak into reverse-proxy access logs. Header-only is non-negotiable.
 - **Don't pass tokens via CLI flag.** Tokens live in config / env (`process.env.MIKSER_MCP_ADMIN_TOKEN`). CLI flags leak via `ps aux`.
 - **Per-tool gating is per-endpoint.** A client either has access to an endpoint or doesn't, and the endpoint narrows the surface. If you want truly per-tool ACLs ("this token can call render but not delete"), use two endpoints with overlapping but distinct `tools` lists.
 - **Generate tokens with `openssl rand -hex 32`** — 256 bits of randomness. Don't reuse production tokens in dev configs.
+- **The loopback default protects accidents, not deliberate tunnels.** If you point nginx on `:443` at `127.0.0.1:3001`, mikser sees the connection as loopback and the trusted-host fallback applies. The right gate in that case is a token. Don't deploy mikser publicly through a tunnel and rely on the loopback default.
 
 Test it from the command line:
 

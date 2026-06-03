@@ -14,6 +14,8 @@ import {
     checksum,
     AbortError,
     mimeForEntity,
+    isLoopback,
+    loopbackOnly,
 } from '../../src/utils.js'
 
 // ─── normalize ──────────────────────────────────────────────────────────────
@@ -327,5 +329,97 @@ describe('mimeForEntity', () => {
 
     it('is case-insensitive on the extension', () => {
         assert.equal(mimeForEntity({ destination: '/Report.PDF' }), 'application/pdf')
+    })
+})
+
+describe('isLoopback', () => {
+    it('recognizes IPv4 127.0.0.1', () => {
+        assert.equal(isLoopback('127.0.0.1'), true)
+    })
+
+    it('recognizes the rest of 127.0.0.0/8', () => {
+        assert.equal(isLoopback('127.0.0.2'), true)
+        assert.equal(isLoopback('127.1.2.3'), true)
+        assert.equal(isLoopback('127.255.255.254'), true)
+    })
+
+    it('recognizes IPv6 ::1', () => {
+        assert.equal(isLoopback('::1'), true)
+    })
+
+    it('recognizes IPv4-mapped IPv6 loopback (::ffff:127.x.x.x)', () => {
+        assert.equal(isLoopback('::ffff:127.0.0.1'), true)
+        assert.equal(isLoopback('::ffff:127.1.2.3'), true)
+    })
+
+    it('rejects non-loopback IPv4 addresses', () => {
+        assert.equal(isLoopback('1.2.3.4'), false)
+        assert.equal(isLoopback('10.0.0.1'), false)
+        assert.equal(isLoopback('192.168.1.1'), false)
+        assert.equal(isLoopback('128.0.0.1'), false)   // adjacent to 127/8
+    })
+
+    it('rejects non-loopback IPv6 addresses', () => {
+        assert.equal(isLoopback('::2'), false)
+        assert.equal(isLoopback('fe80::1'), false)
+        assert.equal(isLoopback('2001:db8::1'), false)
+    })
+
+    it('rejects malformed and falsy input', () => {
+        assert.equal(isLoopback(''), false)
+        assert.equal(isLoopback(null), false)
+        assert.equal(isLoopback(undefined), false)
+        assert.equal(isLoopback(0), false)
+        assert.equal(isLoopback('not-an-ip'), false)
+        assert.equal(isLoopback('127'), false)
+        assert.equal(isLoopback('127.0.0'), false)
+        assert.equal(isLoopback('127.0.0.1.1'), false)
+    })
+})
+
+describe('loopbackOnly', () => {
+    function fakeReqRes(ip) {
+        const req = { ip, socket: { remoteAddress: ip } }
+        const res = {
+            statusCode: null,
+            body: null,
+            status(c) { this.statusCode = c; return this },
+            json(b) { this.body = b; return this },
+        }
+        return { req, res }
+    }
+
+    it('calls next() for a loopback request', () => {
+        const mw = loopbackOnly()
+        const { req, res } = fakeReqRes('127.0.0.1')
+        let nextCalled = false
+        mw(req, res, () => { nextCalled = true })
+        assert.equal(nextCalled, true)
+        assert.equal(res.statusCode, null)
+    })
+
+    it('responds 403 for a non-loopback request', () => {
+        const mw = loopbackOnly()
+        const { req, res } = fakeReqRes('1.2.3.4')
+        let nextCalled = false
+        mw(req, res, () => { nextCalled = true })
+        assert.equal(nextCalled, false)
+        assert.equal(res.statusCode, 403)
+        assert.ok(res.body.error)
+    })
+
+    it('honors a custom message', () => {
+        const mw = loopbackOnly({ message: 'go away' })
+        const { req, res } = fakeReqRes('1.2.3.4')
+        mw(req, res, () => {})
+        assert.equal(res.body.error, 'go away')
+    })
+
+    it('treats ::ffff:127.0.0.1 as loopback', () => {
+        const mw = loopbackOnly()
+        const { req, res } = fakeReqRes('::ffff:127.0.0.1')
+        let nextCalled = false
+        mw(req, res, () => { nextCalled = true })
+        assert.equal(nextCalled, true)
     })
 })

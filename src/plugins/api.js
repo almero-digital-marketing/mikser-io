@@ -5,7 +5,7 @@ import _ from 'lodash'
 import sift from 'sift'
 import { z } from 'zod'
 import { useRenderer, useCollection } from '../api.js'
-import { mimeForEntity } from '../utils.js'
+import { mimeForEntity, isLoopback } from '../utils.js'
 
 // Mongo-style operators recognised in URL query params as `<path>.$<op>=...`.
 // $in / $nin take comma-separated values; $exists takes a truthy/falsy
@@ -403,10 +403,33 @@ export default ({
             }
             const cacheEnabled = ep.cache === true
 
+            // Uniform mikser auth rule (same as MCP endpoints):
+            //   - Token presented and matches → allow (from anywhere)
+            //   - Token presented and doesn't match → 401
+            //   - No token presented → require loopback unless allowRemote
+            //
+            // Endpoints with a token are still reachable from loopback
+            // without the token — the "trusted local host" model. To
+            // require the token everywhere, run mikser bound to a
+            // non-loopback interface only (or behind a proxy that
+            // doesn't forward loopback origin).
+            const expectedAuth = ep.token ? `Bearer ${ep.token}` : null
             const auth = (req, res, next) => {
-                if (!ep.token) return next()
-                if (req.headers.authorization === `Bearer ${ep.token}`) return next()
-                res.status(401).json({ error: 'Unauthorized' })
+                const presented = req.headers.authorization
+                if (expectedAuth && presented && presented !== expectedAuth) {
+                    return res.status(401).json({ error: 'Unauthorized' })
+                }
+                if (presented === expectedAuth && expectedAuth) {
+                    return next()   // valid token from anywhere
+                }
+                if (ep.allowRemote || isLoopback(req.ip)) {
+                    return next()
+                }
+                res.status(403).json({
+                    error: expectedAuth
+                        ? 'Token required from non-loopback sources'
+                        : 'Endpoint accepts loopback connections only — configure a token or set allowRemote: true to enable remote access',
+                })
             }
 
             const allow = (op) => (req, res, next) => {
@@ -610,9 +633,12 @@ export default ({
             })
 
             app.use(`${base}/${name}`, router)
-            logger.info('Api endpoint mounted: %s/%s (ops=[%s] %s)',
-                base, name, [...allowedOps].join(','),
-                ep.token ? '[token]' : '[public]')
+            // Mirror MCP's boot log shape — same three reachability states.
+            const authLabel = ep.token
+                ? 'token'
+                : (ep.allowRemote ? 'public, REMOTE OPEN' : 'public, loopback-only')
+            logger.info('Api endpoint mounted: %s/%s (ops=[%s] [%s])',
+                base, name, [...allowedOps].join(','), authLabel)
         }
 
         // MCP tool registrations. MCP is in-process: whoever can reach

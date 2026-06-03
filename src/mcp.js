@@ -23,6 +23,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { minimatch } from 'minimatch'
 import packageInfo from '../package.json' with { type: 'json' }
 import runtime from './runtime.js'
+import { isLoopback } from './utils.js'
 
 // Pattern matcher for endpoint tools/resources filters. Accepts
 // '*', an array of patterns, or undefined (= allow all). Glob
@@ -377,14 +378,12 @@ export async function mountMcpOnExpress(app, substrate, defaultPath = '/mcp') {
             mountEndpoint(app, substrate, `${base}/${name}`, ep, name)
         }
     } else {
-        // Backward-compat single endpoint. Loud warning when there's
-        // no token so an operator exposing the engine past loopback
-        // (ngrok, public proxy) sees the risk in the boot output.
-        const logger = runtime.engine?.logger
+        // Backward-compat single endpoint. With no `mcp.endpoints`
+        // configured, mount one open + loopback-only endpoint — same
+        // safe default as a per-endpoint config with no token. The
+        // boot log line itself (from mountEndpoint) shows the state;
+        // no extra warning needed because the default IS the safe one.
         mountEndpoint(app, substrate, defaultPath, {}, null)
-        if (logger) {
-            logger.warn('MCP %s [OPEN — no token, all tools/resources]. Configure `mcp.endpoints` to gate access before exposing past loopback.', defaultPath)
-        }
     }
 }
 
@@ -393,14 +392,42 @@ function mountEndpoint(app, substrate, path, ep, endpointName) {
     const expectedAuth = ep.token ? `Bearer ${ep.token}` : null
 
     async function handle(req, res, body) {
-        // Token gate — same shape as the api plugin's auth middleware.
-        if (expectedAuth && req.headers.authorization !== expectedAuth) {
-            res.status(401).json({
-                jsonrpc: '2.0',
-                error: { code: -32001, message: 'MCP token required' },
-                id: null,
-            })
-            return
+        // Auth rule (uniform across mikser plugins):
+        //   - Token presented and matches → allow (from anywhere)
+        //   - Token presented and doesn't match → 401
+        //   - No token presented → require loopback unless allowRemote
+        //
+        // This means an endpoint with a token can still be called from
+        // localhost without the token — the "trusted host" model. Same
+        // pattern Postgres trust-auth and Redis default use. If the host
+        // is compromised mikser's tools are the least of your worries.
+        const presented = req.headers.authorization
+        if (expectedAuth) {
+            if (presented && presented !== expectedAuth) {
+                res.status(401).json({
+                    jsonrpc: '2.0',
+                    error: { code: -32001, message: 'Invalid MCP token' },
+                    id: null,
+                })
+                return
+            }
+            // No header presented falls through to the loopback check
+            // below — token-gated endpoints still accept loopback.
+        }
+        if (!presented || presented !== expectedAuth) {
+            if (!ep.allowRemote && !isLoopback(req.ip)) {
+                res.status(403).json({
+                    jsonrpc: '2.0',
+                    error: {
+                        code: -32001,
+                        message: expectedAuth
+                            ? 'Token required from non-loopback sources'
+                            : 'Endpoint accepts loopback connections only — configure a token or set allowRemote: true to enable remote access',
+                    },
+                    id: null,
+                })
+                return
+            }
         }
 
         const sessionId = req.headers['mcp-session-id']
@@ -438,11 +465,18 @@ function mountEndpoint(app, substrate, path, ep, endpointName) {
         const toolsLabel = ep.tools == null || ep.tools === '*'
             ? '*'
             : Array.isArray(ep.tools) ? ep.tools.join(',') : String(ep.tools)
-        const authLabel = ep.token ? 'token' : 'public'
+        // Three reachability states: token (anyone with the token from
+        // anywhere), loopback-only (no token + no allowRemote, default),
+        // or REMOTE OPEN (no token + allowRemote, deliberate exposure).
+        // The all-caps "REMOTE OPEN" mirrors the boot warning style so
+        // an operator scanning startup output sees the risk.
+        const authLabel = ep.token
+            ? 'token'
+            : (ep.allowRemote ? 'public, REMOTE OPEN' : 'public, loopback-only')
         if (endpointName) {
             logger.info('MCP endpoint mounted: %s (tools=[%s] [%s])', path, toolsLabel, authLabel)
         } else {
-            logger.info('MCP mounted: %s', path)
+            logger.info('MCP mounted: %s [%s]', path, authLabel)
         }
     }
 }

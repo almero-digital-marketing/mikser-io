@@ -496,21 +496,29 @@ describe('api plugin: per-endpoint auth + scope', () => {
         }
     })
 
-    it('returns 401 when a token-gated endpoint receives no Authorization header', async () => {
+    it('honors mikser\'s uniform auth rule: valid token passes; wrong token 401s; absent token passes from loopback', async () => {
+        // Uniform rule (v7.8.0+): a request is allowed if EITHER it
+        // presents a valid token OR it comes from loopback. A wrong
+        // token signals intent to authenticate and is rejected even
+        // from loopback. The test runs against 127.0.0.1 so loopback
+        // bypass applies — that's the canonical local-dev shape.
         const { server, port } = await mount({
             endpoints: {
                 admin: { token: 's3cret', operations: ['list'] },
             },
         })
         try {
+            // No header from loopback → allowed (trusted-host fallback)
             const noAuth = await fetch(`http://127.0.0.1:${port}/api/admin/entities`)
-            assert.equal(noAuth.status, 401)
+            assert.equal(noAuth.status, 200, 'absent token from loopback should pass under reading B')
 
+            // Wrong header even from loopback → 401 (intent to authenticate, must validate)
             const wrong = await fetch(`http://127.0.0.1:${port}/api/admin/entities`, {
                 headers: { authorization: 'Bearer nope' },
             })
             assert.equal(wrong.status, 401)
 
+            // Valid token → 200 from anywhere
             const ok = await fetch(`http://127.0.0.1:${port}/api/admin/entities`, {
                 headers: { authorization: 'Bearer s3cret' },
             })
