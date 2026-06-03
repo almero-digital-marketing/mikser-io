@@ -506,7 +506,7 @@ export default ({
         }
     })
 
-    // mikser_inspect_layout lives in the layouts plugin (not core)
+    // mikser_layouts_inspect lives in the layouts plugin (not core)
     // because "what does a layout expect?" is layout-specific knowledge.
     // Follows ADR-0006: domain logic → plugin; the MCP substrate stays
     // in core.
@@ -518,10 +518,10 @@ export default ({
         if (!runtime.options.mcp) return
         const mcp = runtime.options.mcp
         mcp.simpleTool(
-            'mikser_inspect_layout',
+            'mikser_layouts_inspect',
             'Inspect a layout: template source, variables it references, the postprocessor it produces, and sample entities currently using it. Use this to answer "what data does this layout need?" before drafting a preview render — saves a guess-and-render-empty cycle.',
             {
-                id: z.string().describe('Layout id, e.g. "/layouts/reports/royalty.html-pdf.liquid". Use mikser_list_entities with { collection: "layouts" } to discover ids.'),
+                id: z.string().describe('Layout id, e.g. "/layouts/reports/royalty.html-pdf.liquid". Use mikser_api_list_entities with { collection: "layouts" } to discover ids.'),
                 samples: z.number().int().min(0).max(10).optional().describe('How many existing entities currently using this layout to include as data-shape examples. Default 3. Only entities with explicit meta.layout match; auto-matched layouts are not surfaced.'),
             },
             async ({ id, samples = 3 }) => {
@@ -576,13 +576,13 @@ export default ({
                                 samples: sampleEntities,
                                 notes: [
                                     'references.variables is a naive regex pass across liquid/handlebars/eta — false positives possible, but covers the common `{{ document.meta.X }}` and `<%= entity.X %>` patterns.',
-                                    'samples only includes entities with explicit meta.layout. Auto-matched layouts are not listed; use mikser_list_entities with a filename-pattern filter for those.',
+                                    'samples only includes entities with explicit meta.layout. Auto-matched layouts are not listed; use mikser_api_list_entities with a filename-pattern filter for those.',
                                 ],
                             }, null, 2),
                         }],
                     }
                 } catch (err) {
-                    logger.error('MCP mikser_inspect_layout error: %s', err.message)
+                    logger.error('MCP mikser_layouts_inspect error: %s', err.message)
                     return {
                         isError: true,
                         content: [{ type: 'text', text: err.message }],
@@ -591,7 +591,7 @@ export default ({
             },
         )
         const logger = useLogger()
-        logger.info('MCP tool registered: mikser_inspect_layout (layouts plugin)')
+        logger.info('MCP tool registered: mikser_layouts_inspect (layouts plugin)')
     })
 
     return {

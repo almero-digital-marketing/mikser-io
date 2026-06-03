@@ -4,7 +4,7 @@
 //   1. An in-memory cache (Map<filename, { bytes, mime, expiresAt, size }>)
 //      with LRU eviction past a configurable byte cap.
 //   2. An Express GET /preview/:filename route that serves cache entries.
-//   3. The mikser_preview MCP tool, registered on the substrate when
+//   3. The mikser_preview_render MCP tool, registered on the substrate when
 //      --mcp is active.
 //
 // Lives outside the api plugin because preview is not a REST catalog
@@ -20,7 +20,7 @@
 // Library-mode surface: this plugin exposes
 //   runtime.options.preview = { store, get, stats }
 // so any plugin or programmatic caller can stash bytes and get a URL
-// back without going through MCP. The mikser_preview tool is a thin
+// back without going through MCP. The mikser_preview_render tool is a thin
 // wrapper over this surface.
 
 import path from 'node:path'
@@ -138,11 +138,11 @@ export default ({
         })
 
         mcp.simpleTool(
-            'mikser_preview',
-            'Render an entity through the engine pipeline AND surface the FINAL output as a clickable URL served by the running --server. Use this instead of mikser_render when the user needs to see the result in a browser. The URL serves the pipeline\'s final output — PDF for a `*.html-pdf.*` layout, MJML-derived HTML for `*.html-mjml.*`, etc. Requires --server. Previews live in memory (not on disk, never under outputFolder) and auto-expire — default 10 minutes, clamped 30..3600 seconds.',
+            'mikser_preview_render',
+            'Render an entity through the engine pipeline AND surface the FINAL output as a clickable URL served by the running --server. Use this instead of mikser_api_render when the user needs to see the result in a browser. The URL serves the pipeline\'s final output — PDF for a `*.html-pdf.*` layout, MJML-derived HTML for `*.html-mjml.*`, etc. Requires --server. Previews live in memory (not on disk, never under outputFolder) and auto-expire — default 10 minutes, clamped 30..3600 seconds.',
             {
-                entity:  z.record(z.any()).describe('Entity shape with at least { id, collection } and any meta/content the renderer needs. Same shape as mikser_render.'),
-                options: z.record(z.any()).optional().describe('Renderer options. Same as mikser_render, plus { expiresInSeconds: number = 600 } controlling preview TTL.'),
+                entity:  z.record(z.any()).describe('Entity shape with at least { id, collection } and any meta/content the renderer needs. Same shape as mikser_api_render.'),
+                options: z.record(z.any()).optional().describe('Renderer options. Same as mikser_api_render, plus { expiresInSeconds: number = 600 } controlling preview TTL.'),
             },
             async ({ entity = {}, options = {} }) => {
                 const logger = useLogger()
@@ -156,7 +156,7 @@ export default ({
 
                 try {
                     if (!runtime.options.port) {
-                        return fail('mikser_preview requires --server to be running so the preview URL is reachable. Use mikser_render to get raw bytes inline instead.')
+                        return fail('mikser_preview_render requires --server to be running so the preview URL is reachable. Use mikser_api_render to get raw bytes inline instead.')
                     }
 
                     const { expiresInSeconds = config().defaultTtl, ...renderOptions } = options ?? {}
@@ -182,24 +182,24 @@ export default ({
                     const url = `http://localhost:${runtime.options.port}${cfg.path}/${filename}`
                     const bytes = Buffer.isBuffer(result) ? result.length : Buffer.byteLength(result)
 
-                    logger.info('MCP mikser_preview cached %s (%d bytes, ttl %ds): %s', filename, bytes, ttlSec, url)
+                    logger.info('MCP mikser_preview_render cached %s (%d bytes, ttl %ds): %s', filename, bytes, ttlSec, url)
 
                     return ok({
                         previewUrl: url,
                         mimeType: mime,
                         bytes,
                         expiresInSeconds: ttlSec,
-                        instructions: 'Open previewUrl in a browser to view. The preview lives in mikser memory and auto-expires after expiresInSeconds — re-run mikser_preview to refresh.',
+                        instructions: 'Open previewUrl in a browser to view. The preview lives in mikser memory and auto-expires after expiresInSeconds — re-run mikser_preview_render to refresh.',
                     })
                 } catch (err) {
-                    logger.error('MCP mikser_preview error: %s', err.message)
+                    logger.error('MCP mikser_preview_render error: %s', err.message)
                     return fail(err.message)
                 }
             },
         )
 
         const logger = useLogger()
-        logger.info('MCP tool registered: mikser_preview (preview plugin)')
+        logger.info('MCP tool registered: mikser_preview_render (preview plugin)')
     })
 
     return { name: 'preview' }

@@ -308,9 +308,9 @@ function serverInfo() {
         serves: opts.outputFolder ?? null,
         mcpPath: opts.mcpPath ?? null,
         mcpUrl: base && opts.mcpPath ? `${base}${opts.mcpPath}` : null,
-        // Preview URLs are returned directly by mikser_preview (api
-        // plugin), so we don't advertise a path convention here —
-        // doing so would be a lie when the api plugin isn't loaded.
+        // Preview URLs are returned directly by mikser_preview_render
+        // (preview plugin), so we don't advertise a path convention here —
+        // doing so would be a lie when the preview plugin isn't loaded.
     }
 }
 

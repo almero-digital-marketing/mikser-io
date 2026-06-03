@@ -55,23 +55,23 @@ Tool ownership follows the plugin that owns the concept. Core ships one tool (th
 
 | Tool                  | What it does                                                                          |
 | --------------------- | ------------------------------------------------------------------------------------- |
-| `mikser_list_entities`| Paginated list of catalog entities with sift-compatible filter, sort, projection.     |
-| `mikser_read_entity`  | Read one entity by id. Pass `include: ["content"]` to also fetch the source file (text formats only). |
-| `mikser_update_entity`| Write/overwrite a content file inside a collection. Triggers a new lifecycle cycle.   |
-| `mikser_delete_entity`| Remove a content file from a collection.                                              |
-| `mikser_render`       | Render a transient entity through the full pipeline and return the produced bytes.    |
+| `mikser_api_list_entities`| Paginated list of catalog entities with sift-compatible filter, sort, projection.     |
+| `mikser_api_read_entity`  | Read one entity by id. Pass `include: ["content"]` to also fetch the source file (text formats only). |
+| `mikser_api_update_entity`| Write/overwrite a content file inside a collection. Triggers a new lifecycle cycle.   |
+| `mikser_api_delete_entity`| Remove a content file from a collection.                                              |
+| `mikser_api_render`       | Render a transient entity through the full pipeline and return the produced bytes.    |
 
 **`layouts` plugin** (template introspection):
 
 | Tool                    | What it does                                                                          |
 | ----------------------- | ------------------------------------------------------------------------------------- |
-| `mikser_inspect_layout` | Returns a layout's template source, the variables it references, its expected postprocessor, and sample entities currently using it. Use before drafting a preview to learn what data shape the layout expects. |
+| `mikser_layouts_inspect` | Returns a layout's template source, the variables it references, its expected postprocessor, and sample entities currently using it. Use before drafting a preview to learn what data shape the layout expects. |
 
 **`preview` plugin** (transient render + clickable URL):
 
 | Tool              | What it does                                                                          |
 | ----------------- | ------------------------------------------------------------------------------------- |
-| `mikser_preview`  | Render an entity AND surface the output at a clickable `http://localhost:<port>/preview/<id>.<ext>` URL. Previews live in memory (not on disk, never under `outputFolder`), auto-expire (default 10 min), and LRU-evict past a 100 MB cap. Requires `--server`. |
+| `mikser_preview_render`  | Render an entity AND surface the output at a clickable `http://localhost:<port>/preview/<id>.<ext>` URL. Previews live in memory (not on disk, never under `outputFolder`), auto-expire (default 10 min), and LRU-evict past a 100 MB cap. Requires `--server`. |
 
 Other plugins are expected to follow the same shape — `vector` will add `find_similar`, `schemas` will add `list_schemas` / `get_schema_shape`, and so on.
 
@@ -98,7 +98,7 @@ These are written as the conversation an operator would have with their AI. The 
 The AI translates the request into a single filter call:
 
 ```json
-→ mikser_list_entities {
+→ mikser_api_list_entities {
     "filter": { "collection": "documents", "meta.published": true, "meta.lang": "en" },
     "sort": { "meta.date": -1 },
     "fields": ["id", "meta.title", "meta.date"],
@@ -113,10 +113,10 @@ The `fields` projection keeps the response small; the AI gets back a summary lis
 Two-step: fetch the entity, then render it through the engine.
 
 ```json
-→ mikser_read_entity { "id": "/documents/about.md" }
+→ mikser_api_read_entity { "id": "/documents/about.md" }
 ← { meta: {...}, content: "..." }
 
-→ mikser_render { "entity": { ...the entity from step 1... }, "options": { "save": false } }
+→ mikser_api_render { "entity": { ...the entity from step 1... }, "options": { "save": false } }
 ← { content: [{ type: "resource", resource: { mimeType: "text/html", text: "<html>..." } }] }
 ```
 
@@ -125,13 +125,13 @@ Two-step: fetch the entity, then render it through the engine.
 ### 3. "Create a draft invoice layout and preview it with this customer data."
 
 ```json
-→ mikser_update_entity {
+→ mikser_api_update_entity {
     "collection": "layouts",
     "relativePath": "invoice-draft.hbs",
     "content": "<!DOCTYPE html>\n<h1>Invoice {{number}}</h1>\n..."
   }
 
-→ mikser_render {
+→ mikser_api_render {
     "entity": {
       "id": "/preview/invoice-1.json",
       "collection": "documents",
@@ -147,19 +147,19 @@ Two-step: fetch the entity, then render it through the engine.
 
 ### 4. "Add this image to my files folder and use it in the homepage."
 
-Files in mikser are just files on disk, so the AI uses `mikser_update_entity` for both writes:
+Files in mikser are just files on disk, so the AI uses `mikser_api_update_entity` for both writes:
 
 ```json
-→ mikser_update_entity {
+→ mikser_api_update_entity {
     "collection": "files",
     "relativePath": "images/hero.svg",
     "content": "<svg xmlns='http://www.w3.org/2000/svg'>...</svg>"
   }
 
-→ mikser_read_entity { "id": "/documents/index.md" }
+→ mikser_api_read_entity { "id": "/documents/index.md" }
 ← { meta: { hero: null, ... }, content: "..." }
 
-→ mikser_update_entity {
+→ mikser_api_update_entity {
     "collection": "documents",
     "relativePath": "index.md",
     "content": "---\nhero: /files/images/hero.svg\n---\n# Welcome\n..."
@@ -171,7 +171,7 @@ The next lifecycle cycle picks up both writes, re-renders the homepage with the 
 ### 5. "Find every page that mentions our old company name."
 
 ```json
-→ mikser_list_entities {
+→ mikser_api_list_entities {
     "filter": { "content": { "$regex": "Acme Corp", "$options": "i" } },
     "fields": ["id", "meta.title"]
   }
@@ -187,14 +187,14 @@ The AI doesn't have to call anything special. The moment its session is initiali
 Render error: /documents/about.md (layouts/main.hbs:14:8) Helper "fmtDate" not defined
 ```
 
-…lands in the AI's context the instant it happens. The AI can then call `mikser_read_entity` on `/layouts/main.hbs` to look at line 14 and propose a fix.
+…lands in the AI's context the instant it happens. The AI can then call `mikser_api_read_entity` on `/layouts/main.hbs` to look at line 14 and propose a fix.
 
 ### 7. "Convert all my Markdown frontmatter from `date` to `publishedAt`."
 
 The AI walks the catalog, reads each doc, rewrites it, and writes it back. No special migration tool — the same five verbs.
 
 ```json
-→ mikser_list_entities {
+→ mikser_api_list_entities {
     "filter": { "collection": "documents", "format": "md", "meta.date": { "$exists": true } },
     "fields": ["id"],
     "limit": 100
@@ -202,8 +202,8 @@ The AI walks the catalog, reads each doc, rewrites it, and writes it back. No sp
 ← { items: [{ id: "/documents/2025/launch.md" }, ...] }
 
 # For each:
-→ mikser_read_entity { "id": "/documents/2025/launch.md" }
-→ mikser_update_entity {
+→ mikser_api_read_entity { "id": "/documents/2025/launch.md" }
+→ mikser_api_update_entity {
     "collection": "documents",
     "relativePath": "2025/launch.md",
     "content": "---\npublishedAt: 2025-04-12\n---\n# Launch\n..."
@@ -218,7 +218,7 @@ If the AI gets it wrong on the first file, the user sees the diff in chat before
 → mikser_ping
 ← { name: "mikser-io", version: "...", started: true, activeClients: 1 }
 
-→ mikser_list_entities { "filter": { "id": "/documents/nav.yml" }, "fields": ["stamp", "time"] }
+→ mikser_api_list_entities { "filter": { "id": "/documents/nav.yml" }, "fields": ["stamp", "time"] }
 ```
 
 The AI checks the entity's `stamp` (last source change) against `time` (last cycle processed) and notices they're equal — there's nothing new to render. It can then check what *triggers* a nav refresh in the layouts and propose adding an explicit `runtime.process()` call.
@@ -226,14 +226,14 @@ The AI checks the entity's `stamp` (last source change) against `time` (last cyc
 ### 9. "Clean up old test fixtures from the documents folder."
 
 ```json
-→ mikser_list_entities {
+→ mikser_api_list_entities {
     "filter": { "collection": "documents", "id": { "$regex": "^/documents/test-" } },
     "fields": ["id"]
   }
 ← { items: [{ id: "/documents/test-x.md" }, ...] }
 
 # For each:
-→ mikser_delete_entity { "collection": "documents", "relativePath": "test-x.md" }
+→ mikser_api_delete_entity { "collection": "documents", "relativePath": "test-x.md" }
 ```
 
 Each delete removes the source file *and* prunes its rendered outputs from the manifest on the next cycle. The AI can ask for confirmation before destructive batches.
@@ -241,7 +241,7 @@ Each delete removes the source file *and* prunes its rendered outputs from the m
 ### 10. "Generate a sitemap of every published doc, grouped by language."
 
 ```json
-→ mikser_list_entities {
+→ mikser_api_list_entities {
     "filter": { "meta.published": true },
     "sort": { "meta.lang": 1, "meta.date": -1 },
     "fields": ["id", "meta.title", "meta.lang", "meta.href"],
@@ -252,7 +252,7 @@ Each delete removes the source file *and* prunes its rendered outputs from the m
 The AI groups the response by `meta.lang` and writes a single sitemap document back:
 
 ```json
-→ mikser_update_entity {
+→ mikser_api_update_entity {
     "collection": "documents",
     "relativePath": "sitemap.json",
     "content": "{\n  \"en\": [...],\n  \"bg\": [...]\n}"
@@ -262,13 +262,13 @@ The AI groups the response by `meta.lang` and writes a single sitemap document b
 ### 11. "Generate three layout variants for the same hero section. Show me previews."
 
 ```json
-→ mikser_update_entity { "collection": "layouts", "relativePath": "hero-a.hbs", "content": "<!-- centered version -->..." }
-→ mikser_update_entity { "collection": "layouts", "relativePath": "hero-b.hbs", "content": "<!-- left-aligned with image -->..." }
-→ mikser_update_entity { "collection": "layouts", "relativePath": "hero-c.hbs", "content": "<!-- full-bleed video -->..." }
+→ mikser_api_update_entity { "collection": "layouts", "relativePath": "hero-a.hbs", "content": "<!-- centered version -->..." }
+→ mikser_api_update_entity { "collection": "layouts", "relativePath": "hero-b.hbs", "content": "<!-- left-aligned with image -->..." }
+→ mikser_api_update_entity { "collection": "layouts", "relativePath": "hero-c.hbs", "content": "<!-- full-bleed video -->..." }
 
-→ mikser_render { "entity": { "id": "/preview-a.json", "collection": "documents", "format": "json", "meta": { "layout": "hero-a" } }, "options": { "save": false } }
-→ mikser_render { "entity": { "id": "/preview-b.json", "collection": "documents", "format": "json", "meta": { "layout": "hero-b" } }, "options": { "save": false } }
-→ mikser_render { "entity": { "id": "/preview-c.json", "collection": "documents", "format": "json", "meta": { "layout": "hero-c" } }, "options": { "save": false } }
+→ mikser_preview_render { "entity": { "id": "/preview-a.json", "collection": "documents", "format": "json", "meta": { "layout": "hero-a" } } }
+→ mikser_preview_render { "entity": { "id": "/preview-b.json", "collection": "documents", "format": "json", "meta": { "layout": "hero-b" } } }
+→ mikser_preview_render { "entity": { "id": "/preview-c.json", "collection": "documents", "format": "json", "meta": { "layout": "hero-c" } } }
 ```
 
 Three writes + three renders, three HTML previews in the chat. The user picks one, the AI deletes the other two layouts.
@@ -276,7 +276,7 @@ Three writes + three renders, three HTML previews in the chat. The user picks on
 ### 12. "Audit my site for missing meta descriptions."
 
 ```json
-→ mikser_list_entities {
+→ mikser_api_list_entities {
     "filter": { "collection": "documents", "$or": [
       { "meta.description": { "$exists": false } },
       { "meta.description": "" }
@@ -285,7 +285,7 @@ Three writes + three renders, three HTML previews in the chat. The user picks on
   }
 ```
 
-The AI gets the list, can `mikser_read_entity` each one to read its content, draft a description, and propose the edits in batch.
+The AI gets the list, can `mikser_api_read_entity` each one to read its content, draft a description, and propose the edits in batch.
 
 ## Plugin authors: registering your own tools
 
@@ -320,13 +320,13 @@ For the full surface — `registerTool`, `registerResource`, `registerPrompt` �
 
 Mikser is single-tenant. The catalog, the file system, the lifecycle — there's one of each. The MCP substrate honors that: when multiple AI clients connect, they all see the same catalog state and they all receive every log line. There is no per-client view of "your" data.
 
-The practical implication: if two clients call `mikser_update_entity` for the same file in the same second, the second write wins. No locking, no merge — same semantics as two editors saving the same file.
+The practical implication: if two clients call `mikser_api_update_entity` for the same file in the same second, the second write wins. No locking, no merge — same semantics as two editors saving the same file.
 
 ## Limitations and pitfalls
 
-- **No streaming render output.** `mikser_render` returns the complete output as a single tool response. For very large renders (multi-MB PDFs), this is fine for chat clients but inappropriate as a load-bearing API. Use the HTTP `/api/<endpoint>/render` route for that.
-- **No undo.** `mikser_delete_entity` is final. Wrap destructive flows in your client's confirmation UI.
-- **Resources are not entities.** Four `mikser://` introspection resources ship with core — `mikser://lifecycle`, `mikser://runtime`, `mikser://config`, `mikser://logs/recent` — and surface engine state (current phase, options, merged config, rolling 500-line log buffer). They're for introspection, not catalog content. Don't conflate them with `mikser_read_entity`.
+- **No streaming render output.** `mikser_api_render` returns the complete output as a single tool response. For very large renders (multi-MB PDFs), this is fine for chat clients but inappropriate as a load-bearing API. Use the HTTP `/api/<endpoint>/render` route for that.
+- **No undo.** `mikser_api_delete_entity` is final. Wrap destructive flows in your client's confirmation UI.
+- **Resources are not entities.** Four `mikser://` introspection resources ship with core — `mikser://lifecycle`, `mikser://runtime`, `mikser://config`, `mikser://logs/recent` — and surface engine state (current phase, options, merged config, rolling 500-line log buffer). They're for introspection, not catalog content. Don't conflate them with `mikser_api_read_entity`.
 - **Late tool registration.** Plugins that register tools deep in `onLoaded` will only appear after their hook runs. Until then, `tools/list` won't include them. Clients should re-list on `notifications/tools/list_changed`.
 
 ## Why this is in core, not a plugin

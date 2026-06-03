@@ -309,7 +309,7 @@ export default ({
         // Preview workflow (render → cache → URL) lives in its own
         // plugin (src/plugins/preview.js) as of v7.3.0. The api plugin
         // stays focused on REST catalog access; preview is a separate
-        // domain. To use mikser_preview, load `preview` alongside `api`.
+        // domain. To use mikser_preview_render, load `preview` alongside `api`.
 
         // cachedEndpoints is hoisted above (shared with onFinalize).
         // Per-endpoint setup loop pushes into it when cache: true is set.
@@ -637,7 +637,7 @@ export default ({
             })
 
             mcp.simpleTool(
-                'mikser_list_entities',
+                'mikser_api_list_entities',
                 'List entities from mikser\'s catalog with optional filter / sort / projection. Use this for "show me all documents about X" or "what entities are in collection Y." Returns paginated results in the same envelope shape as the HTTP /entities endpoint.',
                 {
                     filter: z.record(z.any()).optional().describe('Mongo-style filter (sift-compatible). Defaults to no filter — every entity.'),
@@ -665,14 +665,14 @@ export default ({
                             hasNext: effectiveSkip + effectiveLimit < total,
                         })
                     } catch (err) {
-                        logger.error('MCP mikser_list_entities error: %s', err.message)
+                        logger.error('MCP mikser_api_list_entities error: %s', err.message)
                         return fail(err.message)
                     }
                 },
             )
 
             mcp.simpleTool(
-                'mikser_read_entity',
+                'mikser_api_read_entity',
                 'Read a single entity by its catalog id (e.g. "/documents/about.md"). Returns the full entity record or null when not found. Pass include: ["content"] to also fetch the source file content from disk — useful for reading a layout template, document frontmatter+body, or any text-format source without dropping out to the filesystem.',
                 {
                     id: z.string().describe('Catalog id of the entity to read.'),
@@ -694,7 +694,7 @@ export default ({
                             // Heuristic — read content only for text-like
                             // formats. Binary types (png, pdf, mp4, etc.)
                             // get a marker so the caller knows to use a
-                            // different tool (mikser_render, or fetch
+                            // different tool (mikser_api_render, or fetch
                             // directly) rather than expecting bytes back.
                             const TEXT_EXTS = new Set([
                                 'md', 'markdown', 'html', 'htm', 'xhtml',
@@ -713,20 +713,20 @@ export default ({
                                     entity.contentError = err.message
                                 }
                             } else {
-                                entity.contentSkipped = `Non-text format (.${ext}). Use mikser_render to materialize output or read the file directly at entity.uri.`
+                                entity.contentSkipped = `Non-text format (.${ext}). Use mikser_api_render to materialize output or read the file directly at entity.uri.`
                             }
                         }
 
                         return ok(entity)
                     } catch (err) {
-                        logger.error('MCP mikser_read_entity error: %s', err.message)
+                        logger.error('MCP mikser_api_read_entity error: %s', err.message)
                         return fail(err.message)
                     }
                 },
             )
 
             mcp.simpleTool(
-                'mikser_update_entity',
+                'mikser_api_update_entity',
                 'Create or update a content file inside a mikser collection. The file is written to disk and the next lifecycle cycle picks it up — same path the HTTP PUT /entities endpoint takes. Use this to author new documents, layouts, or other content from AI.',
                 {
                     collection:   z.string().describe('Collection name (e.g. "documents", "layouts").'),
@@ -738,14 +738,14 @@ export default ({
                         await useCollection(runtime, collection).write(relativePath, content)
                         return ok({ ok: true, collection, relativePath })
                     } catch (err) {
-                        logger.error('MCP mikser_update_entity error: %s', err.message)
+                        logger.error('MCP mikser_api_update_entity error: %s', err.message)
                         return fail(err.message)
                     }
                 },
             )
 
             mcp.simpleTool(
-                'mikser_delete_entity',
+                'mikser_api_delete_entity',
                 'Remove a content file from a mikser collection. Mirrors HTTP DELETE /entities — deletes the source file, and the next lifecycle cycle prunes its rendered outputs from the manifest.',
                 {
                     collection:   z.string().describe('Collection name.'),
@@ -756,15 +756,15 @@ export default ({
                         await useCollection(runtime, collection).remove(relativePath)
                         return ok({ ok: true, collection, relativePath })
                     } catch (err) {
-                        logger.error('MCP mikser_delete_entity error: %s', err.message)
+                        logger.error('MCP mikser_api_delete_entity error: %s', err.message)
                         return fail(err.message)
                     }
                 },
             )
 
             mcp.simpleTool(
-                'mikser_render',
-                'Render a transient entity through the engine pipeline (parse → layouts → resources → render → postprocess) and return the FINAL produced bytes. Use this for "preview this layout against this data" without writing the entity to disk. The returned bytes are the pipeline\'s final output — PDF for a `*.html-pdf.*` layout, MJML-derived HTML for `*.html-mjml.*`, etc. Set options.save=false to skip the disk write; options.catalog=false to prune the catalog row after rendering.',
+                'mikser_api_render',
+                'Render a transient entity through the engine pipeline (parse → layouts → resources → render → postprocess) and return the FINAL produced bytes. Use this for "preview this layout against this data" without writing the entity to disk. The returned bytes are the pipeline\'s final output — PDF for a `*.html-pdf.*` layout, MJML-derived HTML for `*.html-mjml.*`, etc. Set options.save=false to skip the disk write; options.catalog=false to prune the catalog row after rendering. For a clickable preview URL instead of raw bytes, use mikser_preview_render (preview plugin).',
                 {
                     entity:  z.record(z.any()).describe('Entity shape with at least { id, collection } and any meta/content the renderer needs.'),
                     options: z.record(z.any()).optional().describe('Renderer options: { save: false, catalog: false, renderer: "...", postprocessor: "..." }.'),
@@ -801,13 +801,13 @@ export default ({
                             }],
                         }
                     } catch (err) {
-                        logger.error('MCP mikser_render error: %s', err.message)
+                        logger.error('MCP mikser_api_render error: %s', err.message)
                         return fail(err.message)
                     }
                 },
             )
 
-            logger.info('MCP tools registered: list/read/update/delete/render (api plugin)')
+            logger.info('MCP tools registered: mikser_api_{list_entities,read_entity,update_entity,delete_entity,render} (api plugin)')
         }
     })
 
