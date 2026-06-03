@@ -1,8 +1,83 @@
 import path from 'node:path'
-import { mkdir, writeFile, unlink, rmdir } from 'node:fs/promises'
+import { mkdir, writeFile, unlink, rmdir, readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { globby } from 'globby'
 import _ from 'lodash'
+import { z } from 'zod'
+import { whenMcpActive } from '../mcp.js'
+
+// Liquid / Handlebars / Eta keywords we don't want surfaced as
+// "variables this layout references." Anything that looks like a path
+// (`document.meta.X`) survives; bare keywords filter out.
+const TEMPLATE_KEYWORDS = new Set([
+    'if', 'else', 'elsif', 'endif', 'unless', 'endunless',
+    'for', 'endfor', 'each', 'break', 'continue', 'in', 'of',
+    'case', 'when', 'endcase', 'switch',
+    'capture', 'endcapture', 'assign', 'include', 'layout', 'block',
+    'endblock', 'comment', 'endcomment', 'raw', 'endraw',
+    'true', 'false', 'nil', 'null', 'and', 'or', 'not', 'with',
+])
+
+// Naive multi-engine template scan. Hits liquid (`{{ X }}`, `{% ... %}`),
+// handlebars (`{{ X }}`, `{{#each X}}`), and eta (`<%= X %>`,
+// `<% for X of Y %>`). Returns up to three buckets:
+//   variables  — bare identifier paths used in output position
+//   includes   — referenced sub-templates (liquid `include` / `layout`)
+//   iterations — `for X in Y` / `each X` shapes so the caller knows
+//                where array fields are expected
+//
+// "Naive" is the right word: regex pass, not an AST walk. False positives
+// possible; per-engine plugins can register smarter parsers later.
+function parseTemplateReferences(source) {
+    const empty = { variables: [], includes: [], iterations: [] }
+    if (typeof source !== 'string' || !source) return empty
+
+    const variables = new Set()
+    const includes = new Set()
+    const iterations = []
+
+    // {{ X.Y.Z }} and <%= X.Y.Z %> — output expressions. Capture leading
+    // identifier path; ignore filters (`| upcase`), pipes, and anything
+    // after a space.
+    const outputExpr = /(?:\{\{=?|<%=)\s*([^}%|]+?)(?:\s*\||\s*\}\}|\s*-?%>)/g
+    for (const m of source.matchAll(outputExpr)) {
+        const expr = m[1].trim()
+        const ident = expr.match(/^[a-zA-Z_$][\w$]*(?:\.[a-zA-Z_$][\w$]*)*/)
+        if (ident && !TEMPLATE_KEYWORDS.has(ident[0])) {
+            variables.add(ident[0])
+        }
+    }
+
+    // Liquid include / layout — sub-template references.
+    for (const m of source.matchAll(/\{%\s*include\s+['"]([^'"]+)['"]/g)) {
+        includes.add(m[1])
+    }
+    for (const m of source.matchAll(/\{%\s*layout\s+['"]([^'"]+)['"]/g)) {
+        includes.add(m[1])
+    }
+
+    // Liquid `{% for X in Y %}` and `{% for X in Y.Z %}`.
+    for (const m of source.matchAll(/\{%\s*for\s+(\w+)\s+in\s+([\w.]+)/g)) {
+        iterations.push({ item: m[1], collection: m[2] })
+        variables.add(m[2])
+    }
+    // Handlebars `{{#each X.Y}}`.
+    for (const m of source.matchAll(/\{\{#each\s+([\w.]+)/g)) {
+        iterations.push({ item: '(each)', collection: m[1] })
+        variables.add(m[1])
+    }
+    // Eta `<% for (const X of Y) { %>` / `<% for X of Y %>`.
+    for (const m of source.matchAll(/<%\s*for\s*\(?\s*(?:const|let|var)?\s*(\w+)\s+of\s+([\w.]+)/g)) {
+        iterations.push({ item: m[1], collection: m[2] })
+        variables.add(m[2])
+    }
+
+    return {
+        variables: Array.from(variables).sort(),
+        includes: Array.from(includes).sort(),
+        iterations,
+    }
+}
 
 export default ({
     runtime,
@@ -416,6 +491,88 @@ export default ({
                 } catch { }
             }
         }
+    })
+
+    // ---- MCP tool: mikser_inspect_layout -----------------------------
+    // Lives in the layouts plugin (not core) because "what does a layout
+    // expect?" is layout-specific knowledge. Follows ADR-0006: domain
+    // logic → plugin; the MCP substrate stays in core.
+    whenMcpActive((mcp) => {
+        mcp.simpleTool(
+            'mikser_inspect_layout',
+            'Inspect a layout: template source, variables it references, the postprocessor it produces, and sample entities currently using it. Use this to answer "what data does this layout need?" before drafting a preview render — saves a guess-and-render-empty cycle.',
+            {
+                id: z.string().describe('Layout id, e.g. "/layouts/reports/royalty.html-pdf.liquid". Use mikser_list_entities with { collection: "layouts" } to discover ids.'),
+                samples: z.number().int().min(0).max(10).optional().describe('How many existing entities currently using this layout to include as data-shape examples. Default 3. Only entities with explicit meta.layout match; auto-matched layouts are not surfaced.'),
+            },
+            async ({ id, samples = 3 }) => {
+                const logger = useLogger()
+                try {
+                    const layout = await findEntity({ id })
+                    if (!layout || layout.collection !== collection) {
+                        return {
+                            isError: true,
+                            content: [{ type: 'text', text: `Layout not found: ${id}` }],
+                        }
+                    }
+
+                    let template = ''
+                    try {
+                        template = await readFile(layout.uri, 'utf8')
+                    } catch (err) {
+                        return {
+                            isError: true,
+                            content: [{
+                                type: 'text',
+                                text: `Layout entity exists but template file unreadable (${layout.uri}): ${err.message}`,
+                            }],
+                        }
+                    }
+
+                    const references = parseTemplateReferences(template)
+
+                    let sampleEntities = []
+                    if (samples > 0) {
+                        const all = await findEntities()
+                        sampleEntities = all
+                            .filter(e => e.meta?.layout === layout.name)
+                            .slice(0, samples)
+                            .map(e => ({ id: e.id, name: e.name, meta: e.meta }))
+                    }
+
+                    return {
+                        content: [{
+                            type: 'text',
+                            text: JSON.stringify({
+                                layout: {
+                                    id: layout.id,
+                                    name: layout.name,
+                                    uri: layout.uri,
+                                    format: layout.format,
+                                    template: layout.template,
+                                    postprocessor: layout.postprocessor ?? null,
+                                },
+                                templateSource: template,
+                                references,
+                                samples: sampleEntities,
+                                notes: [
+                                    'references.variables is a naive regex pass across liquid/handlebars/eta — false positives possible, but covers the common `{{ document.meta.X }}` and `<%= entity.X %>` patterns.',
+                                    'samples only includes entities with explicit meta.layout. Auto-matched layouts are not listed; use mikser_list_entities with a filename-pattern filter for those.',
+                                ],
+                            }, null, 2),
+                        }],
+                    }
+                } catch (err) {
+                    logger.error('MCP mikser_inspect_layout error: %s', err.message)
+                    return {
+                        isError: true,
+                        content: [{ type: 'text', text: err.message }],
+                    }
+                }
+            },
+        )
+        const logger = useLogger()
+        logger.info('MCP tool registered: mikser_inspect_layout (layouts plugin)')
     })
 
     return {
