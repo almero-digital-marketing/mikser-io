@@ -17,7 +17,11 @@ describe('layouts plugin', () => {
     it('registers all the expected hooks', () => {
         const h = createHarness()
         layoutsPlugin(h.core)
-        assert.equal(h.hooks.loaded.length, 1)
+        // Two onLoaded handlers: one for state init, one for the
+        // gated MCP tool registration (no-op when MCP isn't active).
+        // The MCP gate goes through the same lifecycle as Express
+        // route mounting — onLoaded + runtime-option check.
+        assert.equal(h.hooks.loaded.length, 2)
         assert.equal(h.hooks.import.length, 1)
         assert.equal(h.hooks.processed.length, 1)
         assert.equal(h.hooks.beforeRender.length, 1)

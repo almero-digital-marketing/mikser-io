@@ -4,7 +4,6 @@ import { existsSync } from 'node:fs'
 import { globby } from 'globby'
 import _ from 'lodash'
 import { z } from 'zod'
-import { whenMcpActive } from '../mcp.js'
 
 // Liquid / Handlebars / Eta keywords we don't want surfaced as
 // "variables this layout references." Anything that looks like a path
@@ -497,7 +496,13 @@ export default ({
     // Lives in the layouts plugin (not core) because "what does a layout
     // expect?" is layout-specific knowledge. Follows ADR-0006: domain
     // logic → plugin; the MCP substrate stays in core.
-    whenMcpActive((mcp) => {
+    //
+    // Gating on runtime.options.mcp inside onLoaded matches the Express
+    // pattern (gating on runtime.options.app for route mounts) — same
+    // shape, no special wrapper. The check happens once per boot.
+    onLoaded(() => {
+        if (!runtime.options.mcp) return
+        const mcp = runtime.options.mcp
         mcp.simpleTool(
             'mikser_inspect_layout',
             'Inspect a layout: template source, variables it references, the postprocessor it produces, and sample entities currently using it. Use this to answer "what data does this layout need?" before drafting a preview render — saves a guess-and-render-empty cycle.',

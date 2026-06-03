@@ -22,7 +22,6 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import packageInfo from '../package.json' with { type: 'json' }
 import runtime from './runtime.js'
-import { onLoaded } from './lifecycle.js'
 
 let pinoLevelToMcp = (pinoLevel) => {
     if (pinoLevel >= 50) return 'error'
@@ -432,11 +431,15 @@ function pinoLevelNumber(name) {
     return { trace: 10, debug: 20, info: 30, warn: 40, error: 50, fatal: 60 }[name] ?? 30
 }
 
-// Convenience for plugins that want to gate their tool registrations
-// behind "is MCP active?". Equivalent to checking runtime.options.mcp
-// directly but reads better at the call site.
-export function whenMcpActive(callback) {
-    onLoaded(async () => {
-        if (runtime.options.mcp) await callback(runtime.options.mcp)
-    })
-}
+// (whenMcpActive was removed in v7.4.0 — plugins now use the same
+// inline pattern as Express route registration: gate on the runtime
+// option inside whichever lifecycle hook makes sense.
+//
+//   onLoaded(async () => {
+//       if (runtime.options.mcp) {
+//           runtime.options.mcp.simpleTool(...)
+//       }
+//   })
+//
+// Reveals timing, matches the Express pattern, doesn't lock the
+// registration into onLoaded.)

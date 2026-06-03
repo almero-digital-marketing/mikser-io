@@ -28,7 +28,6 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { useRenderer } from '../api.js'
 import { mimeForEntity } from './api.js'
-import { whenMcpActive } from '../mcp.js'
 
 export default ({
     runtime,
@@ -127,8 +126,14 @@ export default ({
     })
 
     // ---- MCP tool --------------------------------------------------
+    //
+    // Gating on runtime.options.mcp inside onLoaded matches the route-
+    // mount pattern above. Same shape as `if (!app)`: check the flag
+    // in the hook, register if present. No special wrapper needed.
 
-    whenMcpActive((mcp) => {
+    onLoaded(() => {
+        if (!runtime.options.mcp) return
+        const mcp = runtime.options.mcp
         const { render: previewRender } = useRenderer(runtime, {
             defaultTimeout: runtime.config.preview?.renderTimeout ?? 30_000,
         })
