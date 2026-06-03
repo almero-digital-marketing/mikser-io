@@ -838,7 +838,7 @@ export default ({
                 },
             )
 
-            logger.info('MCP tools registered: mikser_api_{list_entities,read_entity,update_entity,delete_entity,render} (api plugin)')
+            logger.debug('MCP tools registered: mikser_api_{list_entities,read_entity,update_entity,delete_entity,render} (api plugin)')
         }
     })
 

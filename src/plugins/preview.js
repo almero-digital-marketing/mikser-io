@@ -204,7 +204,7 @@ export default ({
         )
 
         const logger = useLogger()
-        logger.info('MCP tool registered: mikser_preview_render (preview plugin)')
+        logger.debug('MCP tool registered: mikser_preview_render (preview plugin)')
     })
 
     return { name: 'preview' }
