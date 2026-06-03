@@ -1,6 +1,6 @@
 import path from 'node:path'
 import { access, writeFile, readFile, mkdir, rm } from 'node:fs/promises'
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import _ from 'lodash'
 import sift from 'sift'
 import { z } from 'zod'
@@ -333,56 +333,10 @@ export default ({
         const globalPageSize = runtime.config.api?.pageSize ?? 10
         const globalRenderTimeout = runtime.config.api?.renderTimeout ?? 30_000
 
-        // ---- In-memory preview cache + route ----------------------
-        // mikser_preview stores rendered bytes here keyed by filename;
-        // GET /preview/:filename serves them. Memory-bound with LRU
-        // eviction so multi-client / long-session use can't run away
-        // with RAM. Lives in-process so previews share the engine's
-        // lifecycle (gone on shutdown) and don't pollute outputFolder.
-        const PREVIEW_CACHE_MAX_BYTES = runtime.config.api?.previewCacheMaxBytes ?? (100 * 1024 * 1024)
-        const previews = new Map()   // filename → { bytes, mime, expiresAt, size }
-        let previewBytesInUse = 0
-
-        function storePreview({ filename, bytes, mime, ttlMs }) {
-            const size = Buffer.isBuffer(bytes) ? bytes.length : Buffer.byteLength(bytes)
-            // LRU evict until there's room. JS Map preserves insertion
-            // order — `keys().next().value` is the oldest entry.
-            while (previewBytesInUse + size > PREVIEW_CACHE_MAX_BYTES && previews.size > 0) {
-                const oldestKey = previews.keys().next().value
-                const oldest = previews.get(oldestKey)
-                previewBytesInUse -= oldest.size
-                previews.delete(oldestKey)
-            }
-            previews.set(filename, { bytes, mime, expiresAt: Date.now() + ttlMs, size })
-            previewBytesInUse += size
-        }
-
-        function getPreview(filename) {
-            const entry = previews.get(filename)
-            if (!entry) return null
-            if (entry.expiresAt < Date.now()) {
-                previewBytesInUse -= entry.size
-                previews.delete(filename)
-                return null
-            }
-            // Touch — move to end for LRU recency.
-            previews.delete(filename)
-            previews.set(filename, entry)
-            return entry
-        }
-
-        // Single GET route. Mounted directly on the app (not under
-        // apiBase) because preview URLs are user-facing — short paths
-        // read better in chat ("http://localhost:3001/preview/abc.pdf")
-        // and don't need the /api/ token semantics.
-        app.get('/preview/:filename', (req, res) => {
-            const entry = getPreview(req.params.filename)
-            if (!entry) {
-                res.status(404).type('text/plain').send('Preview expired or not found')
-                return
-            }
-            res.type(entry.mime).send(entry.bytes)
-        })
+        // Preview workflow (render → cache → URL) lives in its own
+        // plugin (src/plugins/preview.js) as of v7.3.0. The api plugin
+        // stays focused on REST catalog access; preview is a separate
+        // domain. To use mikser_preview, load `preview` alongside `api`.
 
         // cachedEndpoints is hoisted above (shared with onFinalize).
         // Per-endpoint setup loop pushes into it when cache: true is set.
@@ -880,84 +834,7 @@ export default ({
                 },
             )
 
-            // ---- mikser_preview --------------------------------------
-            // Same input shape as mikser_render but stores the produced
-            // bytes in an in-memory cache served by the running --server
-            // at /preview/<uuid>.<ext>, returning a clickable URL.
-            //
-            // No filesystem writes, no folder under outputFolder, no
-            // race with build cycles. Previews live in the engine's
-            // memory, evict LRU past the cache cap, and die when the
-            // process exits — which is exactly what "ephemeral preview"
-            // should mean.
-            //
-            // This is what makes "render a preview and give the output
-            // to check" a single tool call ending in a clickable URL,
-            // instead of base64 bytes the user can't open in a browser.
-            mcp.simpleTool(
-                'mikser_preview',
-                'Render an entity through the engine pipeline AND surface the output as a clickable URL served by the running --server. Use this instead of mikser_render when the user needs to see the result in a browser. Requires --server. Previews live in memory and auto-expire (default 10 minutes); they are not written to disk and never appear under outputFolder.',
-                {
-                    entity:  z.record(z.any()).describe('Entity shape with at least { id, collection } and any meta/content the renderer needs. Same shape as mikser_render.'),
-                    options: z.record(z.any()).optional().describe('Renderer options. Same as mikser_render, plus { expiresInSeconds: number = 600, clamped 30..3600 } controlling preview TTL.'),
-                },
-                async ({ entity = {}, options = {} }) => {
-                    try {
-                        if (!runtime.options.port) {
-                            return fail('mikser_preview requires --server to be running so the preview URL is reachable. Use mikser_render to get raw bytes inline instead.')
-                        }
-
-                        // Render with save:false / catalog:false so the
-                        // engine produces bytes without writing to
-                        // entity.destination or persisting a catalog
-                        // row. Preview lifecycle is fully in-memory.
-                        const { expiresInSeconds = 600, ...renderOptions } = options ?? {}
-                        const { output, entity: rendered } = await mcpRender(entity, {
-                            ...renderOptions,
-                            save: false,
-                            catalog: false,
-                        })
-                        const result = output?.result
-                        if (result == null) {
-                            return fail('Render produced no output. Check that the entity has a resolvable layout and the layout matched a registered renderer.')
-                        }
-
-                        // File extension from rendered.destination so
-                        // the URL ends in .pdf / .html / .png and the
-                        // browser handles it right. Fallback to .html.
-                        const destExt = path.extname(rendered.destination || '').slice(1)
-                        const ext = destExt || 'html'
-                        const filename = `${randomUUID()}.${ext}`
-                        const mime = mimeForEntity(rendered) ?? 'application/octet-stream'
-                        const ttlSec = Math.max(30, Math.min(3600, expiresInSeconds))
-
-                        storePreview({
-                            filename,
-                            bytes: result,
-                            mime,
-                            ttlMs: ttlSec * 1000,
-                        })
-
-                        const url = `http://localhost:${runtime.options.port}/preview/${filename}`
-                        const bytes = Buffer.isBuffer(result) ? result.length : Buffer.byteLength(result)
-
-                        logger.info('MCP mikser_preview cached %s (%d bytes, ttl %ds): %s', filename, bytes, ttlSec, url)
-
-                        return ok({
-                            previewUrl: url,
-                            mimeType: mime,
-                            bytes,
-                            expiresInSeconds: ttlSec,
-                            instructions: 'Open previewUrl in a browser to view. The preview lives in mikser memory and auto-expires after expiresInSeconds — re-run mikser_preview to refresh.',
-                        })
-                    } catch (err) {
-                        logger.error('MCP mikser_preview error: %s', err.message)
-                        return fail(err.message)
-                    }
-                },
-            )
-
-            logger.info('MCP tools registered: list/read/update/delete/render/preview')
+            logger.info('MCP tools registered: list/read/update/delete/render (api plugin)')
         }
     })
 

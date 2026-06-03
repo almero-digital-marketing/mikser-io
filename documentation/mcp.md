@@ -41,30 +41,50 @@ curl -X POST http://localhost:3001/mcp \
 
 You'll get an SSE response with the server identity and your session id. From a real client (Claude Desktop, etc.), just point at `http://localhost:3001/mcp`.
 
-## Built-in tools (api plugin)
+## Tools by plugin
 
-Loading the `api` plugin with `--mcp` registers six tools on the engine's MCP substrate. Their names are prefixed with `mikser_` so they don't collide with tools from other servers in a multi-server client.
+Tool ownership follows the plugin that owns the concept. Core ships one tool (the liveness probe); the rest come from whatever plugins are loaded. This is the same pattern as HTTP routes — plugins compose their surface, the engine doesn't enumerate it.
+
+**Core substrate:**
 
 | Tool                  | What it does                                                                          |
 | --------------------- | ------------------------------------------------------------------------------------- |
-| `mikser_ping`         | Engine identity + lifecycle phase. Liveness check.                                    |
+| `mikser_ping`         | Engine identity + current lifecycle phase + `--server` URL (if running). Liveness check. |
+
+**`api` plugin** (catalog read/write):
+
+| Tool                  | What it does                                                                          |
+| --------------------- | ------------------------------------------------------------------------------------- |
 | `mikser_list_entities`| Paginated list of catalog entities with sift-compatible filter, sort, projection.     |
-| `mikser_read_entity`  | Read one entity by id.                                                                |
+| `mikser_read_entity`  | Read one entity by id. Pass `include: ["content"]` to also fetch the source file (text formats only). |
 | `mikser_update_entity`| Write/overwrite a content file inside a collection. Triggers a new lifecycle cycle.   |
 | `mikser_delete_entity`| Remove a content file from a collection.                                              |
 | `mikser_render`       | Render a transient entity through the full pipeline and return the produced bytes.    |
+
+**`layouts` plugin** (template introspection):
+
+| Tool                    | What it does                                                                          |
+| ----------------------- | ------------------------------------------------------------------------------------- |
+| `mikser_inspect_layout` | Returns a layout's template source, the variables it references, its expected postprocessor, and sample entities currently using it. Use before drafting a preview to learn what data shape the layout expects. |
+
+**`preview` plugin** (transient render + clickable URL):
+
+| Tool              | What it does                                                                          |
+| ----------------- | ------------------------------------------------------------------------------------- |
+| `mikser_preview`  | Render an entity AND surface the output at a clickable `http://localhost:<port>/preview/<id>.<ext>` URL. Previews live in memory (not on disk, never under `outputFolder`), auto-expire (default 10 min), and LRU-evict past a 100 MB cap. Requires `--server`. |
 
 Other plugins are expected to follow the same shape — `vector` will add `find_similar`, `schemas` will add `list_schemas` / `get_schema_shape`, and so on.
 
 ## Built-in resources
 
-Four introspection resources ship with core — read-only views into the running engine. They use the `mikser://` scheme and return JSON.
+Five introspection resources ship with core — read-only views into the running engine. They use the `mikser://` scheme and return JSON.
 
 | Resource                  | What it shows                                                                                  |
 | ------------------------- | ---------------------------------------------------------------------------------------------- |
 | `mikser://lifecycle`      | Current lifecycle phase (`initialize`, `process`, `render`, etc.) — `null` between phases.      |
 | `mikser://runtime`        | Resolved `runtime.options` — folders, plugins, server port, current phase.                      |
 | `mikser://config`         | Effective `runtime.config` — the merged config plugins see, including per-plugin keys.          |
+| `mikser://server`         | HTTP server location (`url`, `mcpUrl`, `serves`). Single-call answer to "where can outputs be seen?" |
 | `mikser://logs/recent`    | Rolling 500-line buffer of log lines. Each carries `seq`, `level`, and `data.msg`.              |
 
 Use the log buffer to debug failures that scrolled past the live `notifications/message` stream — e.g. an AI joining mid-cycle can read what happened before its session opened.

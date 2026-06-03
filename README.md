@@ -116,6 +116,7 @@ The engine is what stays stable — the lifecycle, the catalog, the file-based c
 |---|---|
 | `data` | JSON snapshots of entities / context / catalog, written to disk for static serving |
 | `api` | REST endpoints with sift-backed queries, per-endpoint tokens, optional render, opt-in [per-query disk cache](./documentation/caching.md) for reverse-proxy failover |
+| `preview` | In-memory render cache + `GET /preview/:filename` route. Companion to the [`mikser_preview`](./documentation/mcp.md) MCP tool — transient render bytes served at a clickable URL, no filesystem footprint |
 
 **Integrations:**
 
