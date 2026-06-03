@@ -131,7 +131,7 @@ export async function setup(options) {
             runtime.options.port = runtime.options.server === true
                 ? 3001
                 : Number(runtime.options.server) || 3001
-            logger.info('Server starting on port %d', runtime.options.port)
+            logger.debug('Server starting on port %d', runtime.options.port)
 
             // Trust-proxy: when mikser is behind a reverse proxy
             // (nginx, Caddy, an Express app, ngrok with edge), the
@@ -211,7 +211,7 @@ export async function setup(options) {
                 // workers, useLogger consumers) gains the side-channel
                 // automatically — no second logger to thread through.
                 wireLoggerToMcp(runtime.engine.logger, runtime.options.mcp)
-                logger.info('MCP substrate ready (mounts at %s when server is up)', runtime.options.mcpPath)
+                logger.debug('MCP substrate ready (mounts at %s when server is up)', runtime.options.mcpPath)
             } catch (err) {
                 logger.error('Failed to enable MCP: %s', err.message)
             }
