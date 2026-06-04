@@ -106,6 +106,33 @@ describe('api: useRenderer', () => {
         await assert.rejects(() => render({ id: '/y' }), /did not complete/)
     })
 
+    it('tags the "did not complete" error with status 422 and an actionable, layout-aware message', async () => {
+        const runtime = createFakeRuntime({ process: async () => { /* no-op */ } })
+        const { render } = useRenderer(runtime)
+
+        // No meta.layout → message explains "no layout matched" + the fix.
+        await assert.rejects(
+            () => render({ id: '/no-layout.md' }),
+            (err) => {
+                assert.equal(err.status, 422)
+                assert.match(err.message, /no meta\.layout and matched no layout/)
+                assert.match(err.message, /layouts\.match rule/)
+                return true
+            },
+        )
+
+        // meta.layout set → message points at "Layout not found" / "Render error".
+        await assert.rejects(
+            () => render({ id: '/bad-layout.md', meta: { layout: 'ghost' } }),
+            (err) => {
+                assert.equal(err.status, 422)
+                assert.match(err.message, /requested layout "ghost"/)
+                assert.match(err.message, /Layout not found|Render error/)
+                return true
+            },
+        )
+    })
+
     it('cleans up its completed hook after each batch', async () => {
         const runtime = createFakeRuntime({
             process: async () => {

@@ -337,7 +337,7 @@ describe('api plugin: /render endpoint (integration)', () => {
         }
     })
 
-    it('returns 500 "did not complete" when the cycle finishes without firing the entity\'s hook', async () => {
+    it('returns 422 with an actionable message when a render produces no output (no layout)', async () => {
         const { default: express } = await import('express')
         const app = express()
         const h = createHarness({
@@ -349,8 +349,8 @@ describe('api plugin: /render endpoint (integration)', () => {
             config: { api: { endpoints: { default: { operations: ['render'] } } } },
         })
         // Cycle finishes immediately, but the completed hook is never fired
-        // for this entity (e.g. no layout matched, or the renderer failed
-        // and the postprocess phase skipped it).
+        // for this entity (e.g. no layout matched). useRenderer rejects with
+        // a 422-tagged "did not complete" error.
         h.runtime.process = async () => { /* no-op */ }
         h.runtime.hooks.completed = h.runtime.hooks.complete
 
@@ -365,11 +365,15 @@ describe('api plugin: /render endpoint (integration)', () => {
             const response = await fetch(`http://127.0.0.1:${port}/api/default/render`, {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
-                body: JSON.stringify({ id: '/docs/x.md' }),
+                body: JSON.stringify({ id: '/docs/x.md' }),   // no meta.layout
             })
-            assert.equal(response.status, 500)
+            // Unrenderable entity → client error, not 500.
+            assert.equal(response.status, 422)
             const body = await response.json()
             assert.match(body.error, /did not complete/)
+            // Message names the actual cause + the fix (no-meta.layout branch).
+            assert.match(body.error, /no meta\.layout and matched no layout/)
+            assert.match(body.error, /layouts\.match rule/)
         } finally {
             await new Promise((r) => server.close(r))
         }

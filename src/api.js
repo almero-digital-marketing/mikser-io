@@ -7,6 +7,31 @@ import { writeFile, unlink, mkdir } from 'node:fs/promises'
 import path from 'node:path'
 import './lifecycle.js' // side-effect: attaches runtime.create / update / delete
 
+// Build the error thrown when a submitted entity goes through a full
+// process cycle but never renders. useRenderer can't see *why* — by the
+// time it gives up, the journal is cleared — but it knows what it
+// submitted, so it branches on whether a layout was even requested and
+// points at the log line carrying the authoritative reason (the layouts
+// plugin warns when a render-requested entity matches no layout).
+//
+// `.status = 422` (Unprocessable Entity): the request was well-formed
+// but the entity can't be rendered as submitted. The API endpoint reads
+// err.status (defaulting to 500) so a no-layout render returns a client
+// error, not a server fault.
+function incompleteRenderError(entity) {
+    const id = entity?.id ?? '<unknown>'
+    const msg = entity?.meta?.layout
+        ? `Render did not complete for ${id}: it requested layout "${entity.meta.layout}" ` +
+          `but produced no output. Check the log for a "Layout not found" warning (the name ` +
+          `may not exist) or a "Render error" (the layout matched but threw).`
+        : `Render did not complete for ${id}: the entity has no meta.layout and matched no ` +
+          `layout, so nothing rendered it. Set meta.layout, add a layouts.match rule, or name ` +
+          `it to match a layout (auto-layout).`
+    const err = new Error(msg)
+    err.status = 422
+    return err
+}
+
 /**
  * Bind to the runtime and return an on-demand renderer that pipelines
  * concurrent calls into the minimum number of `runtime.process()` cycles.
@@ -79,7 +104,7 @@ export function useRenderer(runtime, { defaultTimeout = 30_000 } = {}) {
         } finally {
             for (const item of remaining.values()) {
                 clearTimeout(item.timer)
-                item.reject(new Error(`Render did not complete for ${item.entity.id}`))
+                item.reject(incompleteRenderError(item.entity))
             }
             const idx = completedHooks.indexOf(hook)
             if (idx >= 0) completedHooks.splice(idx, 1)

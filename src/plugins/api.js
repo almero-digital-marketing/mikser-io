@@ -627,7 +627,9 @@ export default ({
                 } catch (err) {
                     logger.error('Api[%s] render error: %s', name, err.message)
                     if (!res.headersSent) {
-                        res.status(500).json({ error: err.message })
+                        // useRenderer tags an unrenderable entity (no layout)
+                        // with err.status = 422; everything else is a 500.
+                        res.status(err.status ?? 500).json({ error: err.message })
                     }
                 }
             })

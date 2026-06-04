@@ -112,6 +112,63 @@ describe('layouts plugin', () => {
         })
     })
 
+    it('warns when a render-requested entity (carries correlationId) matches no layout', async () => {
+        await withTempWorking(async (workingFolder) => {
+            const h = createHarness({
+                options: { workingFolder, outputFolder: path.join(workingFolder, 'out') },
+                config: { layouts: { autoLayouts: true } },
+            })
+            layoutsPlugin(h.core)
+            await h.runHook('loaded')
+
+            // A render-submitted entity: no meta.layout, name won't
+            // auto-match any layout, and it carries useRenderer's
+            // correlationId under entity.options.
+            const rendered = {
+                id: '/archive/franchises/38f8.json',
+                collection: 'archive',
+                name: 'franchises/38f8',
+                format: 'json',
+                meta: { company: 'Acme' },
+                options: { correlationId: 'abc-123' },
+            }
+            h.journal.push({ id: 99, entity: rendered, operation: 'create', context: {}, options: {}, output: null })
+
+            await h.runHook('processed', { aborted: false })
+
+            assert.equal(rendered.layout, undefined, 'no layout should have matched')
+            const warned = h.logs.some(l =>
+                l.level === 'warn' && l.args.join(' ').includes('Render requested') && l.args.join(' ').includes('no layout matched'))
+            assert.ok(warned, 'should warn that the render-requested entity matched no layout')
+        })
+    })
+
+    it('stays silent for a normal layout-less entity (no correlationId)', async () => {
+        await withTempWorking(async (workingFolder) => {
+            const h = createHarness({
+                options: { workingFolder, outputFolder: path.join(workingFolder, 'out') },
+                config: { layouts: { autoLayouts: true } },
+            })
+            layoutsPlugin(h.core)
+            await h.runHook('loaded')
+
+            // Same shape, but NOT a render request — no correlationId.
+            const plain = {
+                id: '/files/data/blob.json',
+                collection: 'files',
+                name: 'data/blob',
+                format: 'json',
+                meta: {},
+            }
+            h.journal.push({ id: 99, entity: plain, operation: 'create', context: {}, options: {}, output: null })
+
+            await h.runHook('processed', { aborted: false })
+
+            const warned = h.logs.some(l => l.level === 'warn' && l.args.join(' ').includes('Render requested'))
+            assert.equal(warned, false, 'normal layout-less files must not trigger the render warning')
+        })
+    })
+
     it('onSync returns false when relativePath is missing', async () => {
         const h = createHarness()
         layoutsPlugin(h.core)

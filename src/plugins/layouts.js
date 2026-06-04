@@ -304,6 +304,19 @@ export default ({
                     if (entity.meta?.layout && !entity.layout) {
                         logger.warn('Layout not found for %s: %s', entity.collection, entity.id)
                     }
+                    // A render-requested entity (carries useRenderer's
+                    // correlationId) that resolved to no layout will
+                    // silently produce nothing — the caller just gets
+                    // api.js's "did not complete". Surface the real reason
+                    // here, where we authoritatively know no layout matched.
+                    // Gated on correlationId so the thousands of normal
+                    // layout-less content files stay quiet.
+                    if (!entity.layout && entity.options?.correlationId) {
+                        logger.warn(
+                            'Render requested for %s but no layout matched — set meta.layout, add a layouts.match rule, or name it to match a layout (auto-layout). Entities without a layout are not rendered.',
+                            entity.id,
+                        )
+                    }
 
                     if (entity.layout && entity.meta?.postprocessor) {
                         entity.layout.postprocessor = entity.meta.postprocessor
