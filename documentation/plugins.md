@@ -269,6 +269,17 @@ assets: {
 
 `presets/<name>.js` next to your `mikser.config.js` is the preset module for that name.
 
+#### Where a preset comes from
+
+A preset name resolves in two places, local first:
+
+1. **`presets/<name>.js`** in your project — the common case.
+2. **An npm package `mikser-io-preset-<name>`** — when no local file exists, the plugin resolves the name from your project's `node_modules`. Install a shared preset (`npm install mikser-io-preset-thumbnail`) and reference it by name in `assets.presets` with no local file. Same resolution convention as `post-*` plugins.
+
+A local file always wins over an npm package of the same name — drop `presets/thumbnail.js` to override one preset from a package while leaving the rest. The two have different update lifetimes: local presets reload on file change in watch mode; npm presets are versioned by their package (bump the dependency to update). `node_modules` is never watched.
+
+If a configured preset name resolves to neither a local file nor an npm package, the plugin logs `Preset not found: <name> ...` and skips it — the rest of the build proceeds.
+
 #### Preset module shape
 
 A preset is a default-exported async function. It receives the entity being processed (with `source`, `destination`, `preset`, `name`, etc.), runs whatever code it needs, and resolves (or rejects) when done.

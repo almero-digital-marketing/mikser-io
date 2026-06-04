@@ -1,5 +1,7 @@
 import path from 'node:path'
 import { mkdir, writeFile, unlink, rm, readFile, symlink, } from 'fs/promises'
+import { existsSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { globby } from 'globby'
 import _ from 'lodash'
 import map from 'p-map'
@@ -40,6 +42,50 @@ export default ({
             }
         }
         return entityPresets
+    }
+
+    // Resolve a preset name to an importable module location. Local
+    // files in presetsFolder win; names with no local file fall back to
+    // an npm package named `mikser-io-preset-<name>`, resolved from the
+    // project's node_modules. Mirrors how postprocess.js resolves
+    // post-* plugins — local override first, then the npm convention.
+    // Returns { uri, watchable } or null when neither exists.
+    //
+    // `watchable` distinguishes the two lifetimes: local presets are
+    // re-imported (cache-busted) on every load so watch-mode edits take
+    // effect; npm presets are versioned by their package, imported once.
+    function resolvePreset(name) {
+        const local = path.join(runtime.options.presetsFolder, `${name}.js`)
+        if (existsSync(local)) {
+            return { uri: local, watchable: true }
+        }
+        try {
+            const require = createRequire(path.join(runtime.options.workingFolder, 'package.json'))
+            const uri = require.resolve(`mikser-io-preset-${name}`)
+            return { uri, watchable: false }
+        } catch {
+            return null
+        }
+    }
+
+    // Import a preset module and build its catalog entity. One place for
+    // the (revision, format, options) export contract so onImport and
+    // onSync stay in sync. Cache-busts local presets so watch-mode edits
+    // reload; npm presets import once (their version is the cache key).
+    async function buildPreset({ name, uri, watchable }) {
+        const cacheBust = watchable ? `?stamp=${Date.now()}` : ''
+        const { revision = 1, format, options } = await import(`${uri}${cacheBust}`)
+        return {
+            id: `/presets/${name}`,
+            collection,
+            type,
+            uri,
+            name,
+            source: uri,
+            format,
+            checksum: revision,
+            options,
+        }
     }
 
     async function getRevisions(entity) {
@@ -147,26 +193,16 @@ export default ({
         const logger = useLogger()
         const { presets } = runtime.state.assets
 
+        // Watch only fires for files in presetsFolder, so these are
+        // always local presets — watchable: true.
         const name = relativePath.replace(path.extname(relativePath), '')
         const uri = path.join(runtime.options.presetsFolder, relativePath)
-        const source = uri
 
         let synced = true
         switch (action) {
             case ACTION.CREATE:
                 try {
-                    const { revision = 1, format, options } = await import(`${uri}?stamp=${Date.now()}`)
-                    const preset = {
-                        id: path.join('/presets', relativePath),
-                        collection,
-                        type,
-                        uri,
-                        name: relativePath.replace(path.extname(relativePath), ''),
-                        source,
-                        format,
-                        checksum: revision,
-                        options
-                    }
+                    const preset = await buildPreset({ name, uri, watchable: true })
                     presets[name] = preset
                     await createEntity(preset)
                 } catch (err) {
@@ -176,19 +212,12 @@ export default ({
                 break
             case ACTION.UPDATE:
                 try {
-                    const { revision = 1, format, options } = await import(`${uri}?stamp=${Date.now()}`)
-                    const preset = {
-                        id: path.join('/presets', relativePath),
-                        collection,
-                        type,
-                        uri,
-                        name: relativePath.replace(path.extname(relativePath), ''),
-                        checksum: revision,
-                        source,
-                        format,
-                        options
-                    }
-                    if (!preset[name]) {
+                    const preset = await buildPreset({ name, uri, watchable: true })
+                    // Was `!preset[name]` — a typo for `!presets[name]`
+                    // that made every UPDATE take the create branch
+                    // (preset[name] is always undefined). Fixed: only
+                    // re-emit when the revision actually changed.
+                    if (!presets[name]) {
                         presets[name] = preset
                         await createEntity(preset)
                     } else if (presets[name].checksum != preset.checksum) {
@@ -218,31 +247,43 @@ export default ({
         const logger = useLogger()
         const { presets } = runtime.state.assets
 
+        // Local presets: scan the presets folder. Loads every *.js
+        // there, keyed by filename. Local always wins.
         const paths = await globby('*.js', { cwd: runtime.options.presetsFolder })
         for (let relativePath of paths) {
+            const name = relativePath.replace(path.extname(relativePath), '')
             const uri = path.join(runtime.options.presetsFolder, relativePath)
-            const source = uri
             try {
-                const { revision = 1, format, options } = await import(`${uri}?stamp=${Date.now()}`)
-                const name = relativePath.replace(path.extname(relativePath), '')
-
-                const preset = {
-                    id: path.join('/presets', relativePath),
-                    collection,
-                    type,
-                    uri,
-                    name: relativePath.replace(path.extname(relativePath), ''),
-                    source,
-                    format,
-                    checksum: revision,
-                    options,
-                    options
-                }
-
+                const preset = await buildPreset({ name, uri, watchable: true })
                 await createEntity(preset)
                 presets[name] = preset
             } catch (err) {
                 logger.error(err, 'Preset loading error: %s', uri)
+            }
+        }
+
+        // npm presets: any preset name referenced in config that no
+        // local file already provided resolves to an npm package
+        // `mikser-io-preset-<name>`. Config is the source of truth for
+        // which presets a project uses; this fills the names a folder
+        // scan can't (the code lives in node_modules, not presets/).
+        for (const name of Object.keys(runtime.config.assets?.presets || {})) {
+            if (presets[name]) continue   // a local file already loaded it
+            const resolved = resolvePreset(name)
+            if (!resolved) {
+                logger.error(
+                    'Preset not found: %s (no presets/%s.js, no npm package mikser-io-preset-%s)',
+                    name, name, name,
+                )
+                continue
+            }
+            try {
+                const preset = await buildPreset({ name, uri: resolved.uri, watchable: resolved.watchable })
+                await createEntity(preset)
+                presets[name] = preset
+                logger.debug('Preset loaded from npm: mikser-io-preset-%s', name)
+            } catch (err) {
+                logger.error(err, 'Preset loading error (npm): mikser-io-preset-%s', name)
             }
         }
     })
