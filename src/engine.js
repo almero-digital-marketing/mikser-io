@@ -10,7 +10,7 @@ import { onInitialize, onInitialized, onLoad, onRender, onCancel, onCancelled, o
 import { useJournal, updateEntry } from './journal.js'
 import { globby } from 'globby'
 import { OPERATION, TASKS } from './constants.js'
-import { changeExtension, formatErrorContext } from './utils.js'
+import { changeExtension, formatErrorContext, projectMeta } from './utils.js'
 import render from './render.js'
 import postprocess, { loadPlugin as loadPostPlugin } from './postprocess.js'
 import map from 'p-map'
@@ -294,8 +294,20 @@ export async function setup(options) {
             const jobId = entity.id + ':' + entity.destination
             if (!renderJobs.has(jobId) && !options.ignore) {
                 renderJobs.add(jobId)
+                // Project reference-marker keys (`$author`, `$hero`, …)
+                // into their normalized form (`author`, `hero`) before
+                // the entity crosses into the renderer — applies whether
+                // the render runs in-process or on a worker thread.
+                // Templates and renderer plugins see plain field names;
+                // the canonical `$`-keyed form stays in the catalog entry
+                // where the schemas and refs plugins consume it.
+                // Per ADR-0007 A4, on collision the `$`-version wins
+                // deterministically in the projection.
+                const renderEntity = entity?.meta
+                    ? { ...entity, meta: projectMeta(entity.meta) }
+                    : entity
                 const renderOptions = {
-                    entity,
+                    entity: renderEntity,
                     options: {
                         tasks: TASKS.POOL,
                         ...runtime.options,

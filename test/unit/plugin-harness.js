@@ -126,10 +126,16 @@ export function createHarness({
         addEntries: async (entries) => entries.forEach(addEntry),
         updateEntry,
         useJournal,
-        findEntity: async (query) =>
-            !query ? entities[0] : entities.find(e => Object.entries(query).every(([k, v]) => e[k] === v)),
-        findEntities: async (query) =>
-            !query ? [...entities] : entities.filter(e => Object.entries(query).every(([k, v]) => e[k] === v)),
+        findEntity: async (query) => {
+            if (!query) return entities[0]
+            if (typeof query === 'function') return entities.find(query)
+            return entities.find(e => Object.entries(query).every(([k, v]) => e[k] === v))
+        },
+        findEntities: async (query) => {
+            if (!query) return [...entities]
+            if (typeof query === 'function') return entities.filter(query)
+            return entities.filter(e => Object.entries(query).every(([k, v]) => e[k] === v))
+        },
 
         // Rendering & postprocessing — capture for assertions
         renderEntities: async (tasks) => renderTasks.push(...tasks),

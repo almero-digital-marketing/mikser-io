@@ -6,6 +6,48 @@ import { globby } from 'globby'
 import _ from 'lodash'
 import map from 'p-map'
 
+// Normalize a `runtime.config.assets.presets[name]` value to a consistent
+// { matches, options } shape so callers don't have to inspect which form
+// the config used.
+//
+// Two formats supported, detected from the value shape:
+//
+//   // 1. Existing — string or array of match patterns:
+//   presets: {
+//       'thumbnail': '@/images/*',
+//       'small-image': ['/files/images/*.jpg', '/resources/**/*.jpg'],
+//   }
+//
+//   // 2. New — object with `match` and per-preset `options`:
+//   presets: {
+//       'medium-image': {
+//           match: '/files/images/*.jpg',
+//           options: { width: 800, height: 600, quality: 80 },
+//       },
+//   }
+//
+// Options merge over the preset module's own `options` export at render
+// time — module-side defaults, config-side overrides.
+//
+// Caveat: changing config-side options does NOT automatically invalidate
+// already-rendered assets on disk. Bump the preset's `revision` export
+// to force a re-render, or run `mikser --clear` to start fresh.
+export function normalizePresetConfig(value) {
+    if (value == null) return { matches: [], options: {} }
+    if (typeof value === 'string') return { matches: [value], options: {} }
+    if (Array.isArray(value))      return { matches: value, options: {} }
+    if (typeof value === 'object' && ('match' in value || 'options' in value)) {
+        const m = value.match
+        return {
+            matches: Array.isArray(m) ? m : (m == null ? [] : [m]),
+            options: value.options ?? {},
+        }
+    }
+    // Fallback — treat the value itself as a single match pattern
+    // (object literal with a custom matcher, or a function).
+    return { matches: [value], options: {} }
+}
+
 export default ({
     runtime,
     onLoaded,
@@ -34,7 +76,7 @@ export default ({
     async function getEntityPresets(entity) {
         const entityPresets = []
         for (let preset in (runtime.config.assets?.presets || {})) {
-            const matches = Array.isArray(runtime.config.assets.presets[preset]) ? runtime.config.assets.presets[preset] : [runtime.config.assets.presets[preset]]
+            const { matches } = normalizePresetConfig(runtime.config.assets.presets[preset])
             for (let match of matches) {
                 if (matchEntity(entity, match)) {
                     entityPresets.push(preset)
@@ -131,6 +173,13 @@ export default ({
             for (let entityPreset of assetsMap[entityToRender.id] || []) {
                 const entity = _.cloneDeep(entityToRender)
                 entity.preset = presets[entityPreset]
+                // Per-preset config options override the preset module's
+                // defaults. Looked up at render time so config edits are
+                // picked up on the next cycle without rebuilding the
+                // preset entity from its module.
+                const { options: configOptions } = normalizePresetConfig(
+                    runtime.config.assets?.presets?.[entityPreset]
+                )
                 let destination = entity.name
                 if (entity.preset.format) {
                     destination = changeExtension(destination, entity.preset.format)
@@ -140,7 +189,8 @@ export default ({
                 tasks.push({
                     entity,
                     options: {
-                        ...entity.preset.options,
+                        ...entity.preset.options,    // module defaults
+                        ...configOptions,             // config overrides
                         renderer: 'preset',
                         ignore
                     }

@@ -1,0 +1,25 @@
+{{log "🔗 Rendering refs-demo" document.id}}
+<!doctype html>
+<html lang="{{document.meta.lang}}">
+    <head>
+        <meta charset="utf-8" />
+        <title>{{document.meta.title}}</title>
+    </head>
+    <body>
+        <article>
+            <h1>{{document.meta.title}}</h1>
+            <p class="byline">
+                {{!--
+                    Source on disk has `$author:` (canonical, with the
+                    reference marker). After ADR-0007 A3's render-context
+                    normalization the template sees `meta.author` — the
+                    href string. No `$`-key access from templates ever.
+                --}}
+                Author: {{document.meta.author}}
+            </p>
+            <div class="content">
+                {{{markdown document.content}}}
+            </div>
+        </article>
+    </body>
+</html>

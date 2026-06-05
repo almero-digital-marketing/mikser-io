@@ -125,14 +125,32 @@ export default {
     assetsFolder: 'assets',     // Source folder for assets. Default: 'assets'
     outputFolder: '',           // Output subfolder. Default: root
 
-    // Preset definitions: preset name → array of entity match patterns
+    // Preset definitions: preset name → match patterns (and optional config).
+    // Two shapes accepted:
     presets: {
+      // 1. Bare string or array — backwards-compatible match patterns.
       'thumbnail': ['@/images/*'],
-      'hero': ['@/images/hero*']
+      'hero': '@/images/hero*',
+
+      // 2. Object with `match` and per-preset `options` — options merge
+      //    over the preset module's own defaults at render time
+      //    (config-side overrides win on overlap).
+      'medium-image': {
+        match: ['@/images/*', '@/files/photos/*'],
+        options: {
+          width: 800,
+          height: 600,
+          quality: 80,
+        },
+      },
     }
   }
 }
 ```
+
+Per-preset `options` from config let a generic preset module (e.g. a `resize` package that reads `options.width` / `options.height`) be reused with different parameters per project — no need to fork the module for each variant. Module-side defaults under `options` still apply for anything the config doesn't override.
+
+Caveat: changing config-side options doesn't automatically invalidate already-rendered assets on disk. Bump the preset module's `revision` export to force a re-render, or run `mikser --clear`.
 
 ### `resources`
 

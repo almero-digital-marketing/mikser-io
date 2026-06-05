@@ -53,18 +53,29 @@ That's the only engine-side change. Once a cacheable endpoint exists, every succ
 
 ## File layout
 
-The cache file path mirrors the request URL exactly — no hashing, no encoding magic. The segment after `/entities/` is the raw query string the client sent (URL-encoded), or `index` when there's no query:
+Cache files are named by a sha256 prefix of the query string. Slashes, percent-encodings, brackets, unicode in filter values — any character a URL spec allows — would break a raw-query-string filename on real filesystems (path separators, length limits, reserved chars). Hashing sidesteps all of that.
 
 ```
-out/api/public/entities/index.json                              ← GET /api/public/entities
-out/api/public/entities/meta.published=true.json                ← GET /api/public/entities?meta.published=true
-out/api/public/entities/id=%2Fdocs%2Fwelcome.json               ← GET /api/public/entities?id=%2Fdocs%2Fwelcome
+out/api/public/entities/index.json                  ← GET /api/public/entities  (empty query → 'index')
+out/api/public/entities/4f3a2c1d8e9b6f7a.json       ← GET /api/public/entities?meta.published=true
+out/api/public/entities/8e2c0a1b5d9f4e3a.json       ← GET /api/public/entities?id=/docs/welcome&expand=author
 ```
 
-Two consequences worth noting:
+The filename is `sha256(queryString).slice(0, 16) + '.json'` — 16 hex chars, 64 bits of address space, comfortably collision-resistant for any realistic cache population.
 
-1. **The proxy doesn't need to know mikser's filename scheme.** It just maps `$args` (nginx's raw query string variable) to a file path the same way mikser does. No hashing on either end.
-2. **Structurally-equal queries with different parameter orders create different files.** `?a=1&b=2` and `?b=2&a=1` would be the same query semantically but write to two separate cache files. The SDK uses a stable parameter order, so this only matters for hand-crafted URLs. Soft inefficiency, not a correctness bug.
+The trade-off this introduces: nginx can't compute the hash with stock primitives. To keep the failover working without Lua, **the SDK provides the hash as a `cache=<hash>` URL parameter, and nginx uses `$arg_cache` to find the file**.
+
+### The `cache` URL parameter
+
+The SDK's `list()` automatically appends `&cache=<hash>` to every GET request:
+
+```
+GET /api/public/entities?expand=author&cache=4f3a2c1d8e9b6f7a
+```
+
+Both sides compute the same hash from the same query string. The server strips `cache` from the query before computing its own hash (so the param is invisible to the cache key — see `cacheNameForQueryString` in `src/plugins/api.js`). The two hashes match by construction.
+
+A client that lies about the hash, or doesn't send one, just produces a cache miss in nginx — the request falls through to mikser, which writes the file at the correct name. No cache poisoning is possible because the server is always the source of truth.
 
 ## Stock nginx, no Lua, no extra modules
 
@@ -79,9 +90,10 @@ location /api/public/entities {
 
 location @cache {
     root /var/www/out;
-    # $args is the raw query string mikser used as the cache filename.
-    # Falls through to index.json for the no-params case.
-    try_files /api/public/entities/$args.json
+    # $arg_cache is the hash the SDK appended as &cache=<hash>.
+    # Falls through to index.json for the no-params case and
+    # to a 502 when the file doesn't exist (truly catastrophic).
+    try_files /api/public/entities/$arg_cache.json
               /api/public/entities/index.json
               =502;
 }
@@ -90,7 +102,7 @@ location @cache {
 What this gives you:
 
 - **Live request when mikser is up.** `proxy_pass` reaches mikser, which serves a fresh response. As a side effect mikser writes the cache file to disk — the proxy doesn't have to do anything special.
-- **Cached response when mikser is down.** nginx's `proxy_intercept_errors` catches the 5xx, falls through to `@cache`, and serves the file at the matching `$args` path. The client sees a 200 with the last-cached payload.
+- **Cached response when mikser is down.** nginx's `proxy_intercept_errors` catches the 5xx, falls through to `@cache`, and serves the file at the matching `$arg_cache` path. The client sees a 200 with the last-cached payload.
 - **Same URL in both cases.** The client never has to know about a separate cache URL; the SDK never needs special configuration for "fast path vs live path."
 
 For multiple cacheable endpoints, repeat the location block per endpoint, or use a regex location that captures the endpoint name and rewrites the `try_files` paths accordingly.
@@ -102,7 +114,7 @@ If you want the proxy to read from cache by default and only fall through to mik
 ```nginx
 location /api/public/entities {
     root /var/www/out;
-    try_files /api/public/entities/$args.json
+    try_files /api/public/entities/$arg_cache.json
               /api/public/entities/index.json
               @mikser;
 }
@@ -113,6 +125,10 @@ location @mikser {
 ```
 
 The trade-off: the cache file may exist but be stale because invalidation hasn't run yet (catalog change in mikser hasn't been observed by the file system). For most read-heavy workloads where staleness on the order of seconds is acceptable, this is the better config. For workloads where reads must reflect the very latest catalog state, stick with the proxy-first variant above.
+
+### Non-SDK clients (curl, search engines, etc.)
+
+Requests without a `cache` param miss the nginx fast path entirely — `$arg_cache` is empty, `try_files` skips that line, and the proxy directive runs. That's correct degradation: non-SDK clients just don't benefit from CDN/nginx acceleration. They still get correct responses. If a non-SDK consumer wants the fast path, they compute the same `sha256(queryString).slice(0, 16)` and append `&cache=...` themselves.
 
 ## Other reverse proxies
 
@@ -127,7 +143,8 @@ example.com {
             @cacheable status 502 503 504
             handle_response @cacheable {
                 root * /var/www/out
-                try_files /api/public/entities/{query}.json /api/public/entities/index.json
+                # `query.cache` is the hash the SDK appended as &cache=<hash>.
+                try_files /api/public/entities/{query.cache}.json /api/public/entities/index.json
                 file_server
             }
         }
@@ -141,8 +158,11 @@ example.com {
 export default {
     async fetch(request, env) {
         const url = new URL(request.url)
-        const cacheKey = url.searchParams.toString() || 'index'
-        const cachePath = `api/public/entities/${cacheKey}.json`
+        // Use the client-provided hash hint when present; fall back to
+        // 'index' for empty queries. For clients that didn't send a
+        // hash, this becomes a cache miss — the upstream fetch handles it.
+        const cacheHint = url.searchParams.get('cache') ?? 'index'
+        const cachePath = `api/public/entities/${cacheHint}.json`
 
         try {
             const upstream = await fetch(`https://mikser-origin.internal${url.pathname}${url.search}`)
@@ -172,13 +192,14 @@ export default {
 
 <Location /cache-fallback>
     RewriteEngine On
-    RewriteCond /var/www/out/api/public/entities/%{QUERY_STRING}.json -f
-    RewriteRule .* /var/www/out/api/public/entities/%{QUERY_STRING}.json [L]
+    # Extract &cache=<hash> from the query string; fall back to 'index'.
+    RewriteCond %{QUERY_STRING} (^|&)cache=([0-9a-f]{16})($|&)
+    RewriteRule .* /var/www/out/api/public/entities/%2.json [L]
     RewriteRule .* /var/www/out/api/public/entities/index.json [L]
 </Location>
 ```
 
-The key invariant across all of these: the proxy must be able to derive the cache file path from the request URL using only what the request gives it (path + raw query string). The naming scheme means no hashing, no JSON parsing, no shared secret.
+The key invariant across all of these: the proxy must be able to derive the cache file path from the request URL using only what the request gives it. With the client-provided `cache=<hash>` hint, that derivation is trivial — extract the value, append `.json`. No hashing, no JSON parsing, no shared secret beyond the algorithm itself (sha256, first 16 hex chars).
 
 ## Invalidation
 

@@ -4,14 +4,14 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import assetsPlugin from '../../../src/plugins/assets.js'
+import assetsPlugin, { normalizePresetConfig } from '../../../src/plugins/assets.js'
 import { createHarness } from '../plugin-harness.js'
 
 // Spin up a temp workingFolder with an optional npm preset package and
 // optional local preset file, run the assets plugin through onLoaded +
 // onImport, and hand the harness back for assertions. Cleans up the
 // temp dir afterward.
-async function withPresetProject({ npmPresets = {}, localPresets = {}, config }, fn) {
+async function withPresetProject({ npmPresets = {}, localPresets = {}, config, entities = [] }, fn) {
     const workingFolder = await mkdtemp(path.join(tmpdir(), 'mikser-presets-'))
     try {
         // Lay down npm-style packages under node_modules.
@@ -33,6 +33,7 @@ async function withPresetProject({ npmPresets = {}, localPresets = {}, config },
         const h = createHarness({
             options: { workingFolder, outputFolder: path.join(workingFolder, 'out') },
             config,
+            entities,
         })
         assetsPlugin(h.core)
         await h.runHook('loaded')
@@ -120,5 +121,156 @@ describe('assets plugin', () => {
         assert.ok(h.hooks.complete.length >= 1)
         assert.ok(h.hooks.finalize.length >= 1)
         assert.ok(h.sync.has('presets'))
+    })
+})
+
+describe('normalizePresetConfig', () => {
+    it('treats a bare string as a single match pattern', () => {
+        assert.deepEqual(
+            normalizePresetConfig('/files/images/*.jpg'),
+            { matches: ['/files/images/*.jpg'], options: {} },
+        )
+    })
+
+    it('treats an array as a list of match patterns', () => {
+        assert.deepEqual(
+            normalizePresetConfig(['/files/**/*.jpg', '/resources/**/*.jpg']),
+            { matches: ['/files/**/*.jpg', '/resources/**/*.jpg'], options: {} },
+        )
+    })
+
+    it('accepts the object form with match + options', () => {
+        assert.deepEqual(
+            normalizePresetConfig({
+                match: ['/files/images/*.jpg'],
+                options: { width: 800, height: 600, quality: 80 },
+            }),
+            {
+                matches: ['/files/images/*.jpg'],
+                options: { width: 800, height: 600, quality: 80 },
+            },
+        )
+    })
+
+    it('accepts a single-string match inside the object form', () => {
+        assert.deepEqual(
+            normalizePresetConfig({
+                match: '/files/images/*.jpg',
+                options: { width: 800 },
+            }),
+            { matches: ['/files/images/*.jpg'], options: { width: 800 } },
+        )
+    })
+
+    it('accepts options without match (preset configured but matches nothing yet)', () => {
+        assert.deepEqual(
+            normalizePresetConfig({ options: { width: 800 } }),
+            { matches: [], options: { width: 800 } },
+        )
+    })
+
+    it('falls back to treating the value as a single matcher for object literals without match/options keys', () => {
+        // matchEntity also accepts plain object literals as patterns
+        // — { type: 'document' } means "match entities of type document".
+        // The normalizer shouldn't interpret these as the new-format
+        // shape, so they pass through as bare matchers.
+        const matcher = { type: 'document' }
+        assert.deepEqual(
+            normalizePresetConfig(matcher),
+            { matches: [matcher], options: {} },
+        )
+    })
+
+    it('falls back gracefully on a function matcher', () => {
+        const matcher = (e) => e.format === 'jpg'
+        assert.deepEqual(
+            normalizePresetConfig(matcher),
+            { matches: [matcher], options: {} },
+        )
+    })
+
+    it('returns empty matches and options for null/undefined', () => {
+        assert.deepEqual(normalizePresetConfig(null),      { matches: [], options: {} })
+        assert.deepEqual(normalizePresetConfig(undefined), { matches: [], options: {} })
+    })
+})
+
+// End-to-end: a preset module exports its own default options; the
+// config supplies overrides; the render task should see the merged
+// result with config taking precedence.
+describe('assets plugin: per-preset options from config', () => {
+    // Synthetic entity matched by the `@/files/*` pattern (matchEntity
+    // strips the `@/` prefix to match the entity's `name`).
+    const fileEntity = {
+        id:         '/files/hero.jpg',
+        name:       'files/hero',
+        collection: 'files',
+        type:       'file',
+        format:     'jpg',
+        checksum:   'abc',
+    }
+
+    it('merges module options with config options at render time — config wins on overlap', async () => {
+        await withPresetProject({
+            entities: [fileEntity],
+            npmPresets: {
+                // Module ships sensible defaults; the config overrides.
+                resize:
+                    `export const revision = 1\n` +
+                    `export const format = 'webp'\n` +
+                    `export const options = { width: 400, height: 300, quality: 70, checksum: false }\n` +
+                    `export default () => {}\n`,
+            },
+            config: {
+                assets: {
+                    presets: {
+                        resize: {
+                            match: '@/files/*',
+                            options: { width: 800, quality: 90 },
+                        },
+                    },
+                },
+            },
+        }, async (h) => {
+            await h.addJournalEntry({ operation: h.constants.OPERATION.CREATE, entity: fileEntity })
+            await h.runHook('processed')
+            await h.runHook('beforeRender')
+
+            const task = h.renderTasks.find(t => t.entity?.id === '/files/hero.jpg')
+            assert.ok(task, 'expected a render task for the matched entity')
+            assert.equal(task.options.width,    800, 'config-side width overrides module default')
+            assert.equal(task.options.height,   300, 'module-default height passes through')
+            assert.equal(task.options.quality,   90, 'config-side quality overrides module default')
+            assert.equal(task.options.renderer, 'preset')
+        })
+    })
+
+    it('still works when the preset config uses the existing string form (no options merge)', async () => {
+        await withPresetProject({
+            entities: [fileEntity],
+            npmPresets: {
+                thumbnail:
+                    `export const revision = 1\n` +
+                    `export const format = 'webp'\n` +
+                    `export const options = { width: 128, checksum: false }\n` +
+                    `export default () => {}\n`,
+            },
+            config: {
+                assets: {
+                    presets: {
+                        thumbnail: '@/files/*',          // backwards-compatible string form
+                    },
+                },
+            },
+        }, async (h) => {
+            await h.addJournalEntry({ operation: h.constants.OPERATION.CREATE, entity: fileEntity })
+            await h.runHook('processed')
+            await h.runHook('beforeRender')
+
+            const task = h.renderTasks.find(t => t.entity?.id === '/files/hero.jpg')
+            assert.ok(task, 'expected a render task')
+            assert.equal(task.options.width, 128, 'module options pass through untouched')
+            assert.equal(task.options.renderer, 'preset')
+        })
     })
 })

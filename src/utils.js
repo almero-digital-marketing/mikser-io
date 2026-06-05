@@ -1,10 +1,12 @@
 import { hashFile, hash } from 'hasha'
-import { stat } from 'node:fs/promises'
+import { stat, readFile, writeFile, mkdir } from 'node:fs/promises'
 import TruncateStream from 'truncate-stream'
 import { createReadStream } from 'node:fs'
 import _ from 'lodash'
 import { minimatch } from 'minimatch'
 import path from 'path'
+import fm from 'front-matter'
+import yaml from 'yaml'
 
 // Extension → mime type lookup for rendered outputs. Used anywhere an
 // entity's destination is being served over HTTP (the api plugin's
@@ -165,6 +167,352 @@ export function formatLogArgs(args) {
             return String(arg)
         })
         .join(' ')
+}
+
+// True when `key` is a reference marker per ADR-0007 — a string starting
+// with `$` and at least one further character. Bare `$` is treated as a
+// regular field name, not a marker, so existing meta that happens to use
+// `$` as a key keeps working unchanged.
+//
+// Pure structural check — no semantic validation, no catalog lookup.
+// Validation (does the ref resolve? does the target's layout match?) is
+// the schemas plugin's job; see ADR-0007 A6 for the deferred-validation
+// model.
+export function isRefKey(key) {
+    return typeof key === 'string' && key.length > 1 && key.charCodeAt(0) === 36
+}
+
+// Recursively project canonical meta into normalized form by stripping the
+// `$` prefix from every reference key. Used at the render-context boundary
+// and by the SDK to produce a view where templates do `{{ meta.author }}`
+// instead of `{{ meta.[$author] }}`.
+//
+// On collision (both `author:` and `$author:` declared in the same entity),
+// the `$`-keyed value wins — ADR-0007 A4. The plain key is dropped from
+// the projection but is still visible in the canonical catalog row and in
+// the source file. The schemas plugin (if loaded) surfaces the collision
+// as a warning naming the entity.
+//
+// Pure function: returns a new tree; input is not mutated. Strings,
+// numbers, booleans, null, and undefined pass through. Arrays are mapped
+// element-wise. Objects are rebuilt with normalized keys.
+export function projectMeta(meta) {
+    if (meta === null || typeof meta !== 'object') return meta
+    if (Array.isArray(meta)) return meta.map(projectMeta)
+    const out = {}
+    // Two passes so `$`-keyed values overwrite plain ones on collision.
+    // Iterating once and conditionally overwriting works too, but two
+    // passes are simpler to reason about — pass 1 establishes the
+    // baseline, pass 2 promotes refs into the same namespace.
+    for (const [k, v] of Object.entries(meta)) {
+        if (!isRefKey(k)) out[k] = projectMeta(v)
+    }
+    for (const [k, v] of Object.entries(meta)) {
+        if (isRefKey(k)) out[k.slice(1)] = projectMeta(v)
+    }
+    return out
+}
+
+// Walk `meta` and return every reference declaration — any `$`-keyed field
+// whose value is a string, or whose value is an array containing strings.
+// `$`-keys with other value shapes (numbers, plain objects, etc.) are
+// skipped here; the schemas plugin walks meta itself when it needs to
+// surface shape warnings.
+//
+// Returns an array of { path, ref } where `path` is a dotted string
+// locating the reference inside `meta` — for example `$author`,
+// `seo.$ogImage`, or `sections.0.$image`. Indexes are used for array
+// positions so the path uniquely identifies one ref site.
+//
+// Pure: does not consult the catalog. Resolution is the caller's job.
+export function extractRefs(meta) {
+    const refs = []
+    walk(meta, '')
+    return refs
+
+    function walk(node, prefix) {
+        if (node === null || typeof node !== 'object') return
+        if (Array.isArray(node)) {
+            for (let i = 0; i < node.length; i++) {
+                walk(node[i], prefix ? `${prefix}.${i}` : String(i))
+            }
+            return
+        }
+        for (const [k, v] of Object.entries(node)) {
+            const path = prefix ? `${prefix}.${k}` : k
+            if (isRefKey(k)) {
+                if (typeof v === 'string') {
+                    refs.push({ path, ref: v })
+                } else if (Array.isArray(v)) {
+                    for (let i = 0; i < v.length; i++) {
+                        if (typeof v[i] === 'string') {
+                            refs.push({ path: `${path}.${i}`, ref: v[i] })
+                        }
+                    }
+                }
+                // Other shapes are invalid; the schemas plugin warns.
+            } else {
+                walk(v, path)
+            }
+        }
+    }
+}
+
+// Read-modify-write helper for entity source files. Reads the file at
+// `entity.uri`, parses front-matter (if any), merges `patch` into the
+// parsed attributes, re-serializes, writes back. Used by plugins that
+// mutate entities programmatically — the refs plugin's rename cascade
+// (Phase 2) is the first real consumer; future PATCH-style api and
+// auto-fix tooling will use it too.
+//
+// The patch is applied LITERALLY. Caller is responsible for using the
+// canonical key form they want on disk:
+//
+//   await writeEntity(entity, { $author: '/authors/dick-marinov' })
+//   await writeEntity(entity, { title: 'New title', draft: null })
+//
+// Per ADR-0007, reference keys live with the `$` prefix on disk. A patch
+// that writes a ref field must use the `$`-prefixed key. The helper does
+// not infer `author` → `$author` from existing meta — that would mean
+// "your patch's behavior depends on hidden state," which is exactly the
+// kind of magic that turns into bugs months later.
+//
+// `null` values in the patch remove that key from the frontmatter:
+//
+//   await writeEntity(entity, { draft: null })
+//
+// Body content (everything after the closing `---`) is preserved verbatim.
+// Other meta fields are preserved.
+//
+// If the source file doesn't exist (ENOENT), the helper writes a fresh
+// file using the patch as the entire frontmatter. Any other read error
+// propagates so callers see the real problem.
+//
+// Returns the absolute path that was written. The watcher will see the
+// change just like any external edit — the entity re-enters the lifecycle
+// naturally on the next cycle.
+export async function writeEntity(entity, patch = {}) {
+    if (!entity?.uri) {
+        throw new Error('writeEntity: entity.uri is required')
+    }
+
+    let currentMeta = {}
+    let body = ''
+    try {
+        const content = await readFile(entity.uri, 'utf8')
+        if (fm.test(content)) {
+            const parsed = fm(content)
+            currentMeta = parsed.attributes ?? {}
+            body = parsed.body ?? ''
+        } else {
+            body = content
+        }
+    } catch (err) {
+        if (err.code !== 'ENOENT') throw err
+        // Fresh file — start from an empty meta + body.
+    }
+
+    const newMeta = { ...currentMeta }
+    for (const [k, v] of Object.entries(patch)) {
+        if (v === null) delete newMeta[k]
+        else newMeta[k] = v
+    }
+
+    let newContent
+    if (Object.keys(newMeta).length > 0) {
+        // yaml.stringify always emits a trailing newline.
+        const yamlStr = yaml.stringify(newMeta)
+        newContent = `---\n${yamlStr}---\n${body}`
+    } else {
+        // No meta left — write just the body. Avoids `---\n---\n<body>`
+        // shells that some tooling treats as "broken frontmatter."
+        newContent = body
+    }
+
+    await mkdir(path.dirname(entity.uri), { recursive: true })
+    await writeFile(entity.uri, newContent, 'utf8')
+
+    return entity.uri
+}
+
+// Expansion error — thrown by `expandEntity` when an `expand` request
+// violates a structural cap (maxDepth, maxPaths, maxResolved). The
+// `status` field is the HTTP code the api plugin returns. Per ADR-0007
+// B6, missing targets and cycles do NOT throw; the ref string is left
+// in place at the deepest position where resolution stopped.
+export class ExpandError extends Error {
+    constructor(message) {
+        super(message)
+        this.name = 'ExpandError'
+        this.status = 422
+    }
+}
+
+// Inline-expand reference fields in `entity.meta` per ADR-0007 B1-B7.
+// Each entry in `paths` is a dotted path that walks through meta. At
+// `$`-keyed fields the ref string is replaced with the resolved entity
+// (looked up via `options.findRef`); intermediate non-`$` fields are
+// just navigation; `*` iterates arrays. Both canonical (`$author`) and
+// normalized (`author`) path segments are accepted.
+//
+// Caps surface as ExpandError (status 422):
+//   - maxDepth    — single-path length, default 5
+//   - maxPaths    — number of entries in `paths`, default 20
+//   - maxResolved — unique entity resolutions per call, default 100
+//
+// Missing targets and cycles do NOT throw — per ADR-0007 B6 the ref
+// stays as a string at the deepest resolved position. Consumers see
+// "string at expected expansion point" as the signal to re-fetch or
+// surface a warning.
+//
+// Returns a deep clone of `entity` with expansions applied in canonical
+// form (`$`-keys preserved on disk shape). The api layer applies
+// `projectMeta` after to produce the normalized response.
+export async function expandEntity(entity, paths, options = {}) {
+    const {
+        findRef,
+        maxDepth = 5,
+        maxPaths = 20,
+        maxResolved = 100,
+    } = options
+
+    if (!Array.isArray(paths) || paths.length === 0) return entity
+    if (paths.length > maxPaths) {
+        throw new ExpandError(
+            `expand has ${paths.length} paths, exceeds maxPaths (${maxPaths})`,
+        )
+    }
+    if (typeof findRef !== 'function') {
+        throw new Error('expandEntity: options.findRef is required')
+    }
+
+    // Deep clone so the caller's entity (typically the catalog row) is
+    // never mutated. `structuredClone` is in Node since 17.
+    const result = structuredClone(entity)
+    if (!result?.meta || typeof result.meta !== 'object') return result
+
+    const ctx = {
+        findRef,
+        seen: new Set([entity?.id].filter(Boolean)),
+        resolved: 0,
+        max: maxResolved,
+    }
+
+    for (const pathStr of paths) {
+        const parts = pathStr.split('.').filter(Boolean)
+        if (parts.length === 0) continue
+        if (parts.length > maxDepth) {
+            throw new ExpandError(
+                `Path '${pathStr}' has length ${parts.length}, exceeds maxDepth (${maxDepth})`,
+            )
+        }
+        await walkExpandPath(result.meta, parts, ctx)
+    }
+
+    return result
+}
+
+async function walkExpandPath(node, parts, ctx) {
+    if (parts.length === 0) return
+    if (node === null || typeof node !== 'object') return
+
+    const [head, ...tail] = parts
+
+    if (head === '*') {
+        if (Array.isArray(node)) {
+            for (const item of node) {
+                await walkExpandPath(item, tail, ctx)
+            }
+        }
+        return
+    }
+
+    // Accept both canonical (`$author`) and normalized (`author`) path
+    // segments per ADR-0007 B3. If the caller used `$author`, look for
+    // exactly that key; if they used `author`, prefer `$author` (the
+    // canonical-on-disk form) and fall back to `author` only when the
+    // entity stores it un-marked.
+    const dollarKey = head.startsWith('$') ? head : `$${head}`
+    const plainKey  = head.startsWith('$') ? head.slice(1) : head
+
+    let key, value
+    if (Object.prototype.hasOwnProperty.call(node, dollarKey)) {
+        key = dollarKey; value = node[dollarKey]
+    } else if (Object.prototype.hasOwnProperty.call(node, plainKey)) {
+        key = plainKey; value = node[plainKey]
+    } else {
+        return // path doesn't exist on this branch — silently skip
+    }
+
+    const keyIsRef = key === dollarKey
+        || (typeof key === 'string' && key.length > 1 && key.charCodeAt(0) === 36)
+
+    if (keyIsRef) {
+        if (typeof value === 'string') {
+            await expandSingleRef(node, key, value, tail, ctx)
+        } else if (Array.isArray(value)) {
+            await expandArrayRef(node, key, value, tail, ctx)
+        } else if (value && typeof value === 'object') {
+            // Already-expanded entity (from an earlier path in this
+            // request). Recurse into its meta if there's more to do.
+            if (tail.length > 0 && value.meta) {
+                await walkExpandPath(value.meta, tail, ctx)
+            }
+        }
+        return
+    }
+
+    // Plain navigation field — descend if there's tail.
+    if (tail.length > 0) {
+        await walkExpandPath(value, tail, ctx)
+    }
+}
+
+async function expandSingleRef(node, key, ref, tail, ctx) {
+    if (ctx.seen.has(ref)) return                 // cycle — leave as string
+    const resolved = await ctx.findRef(ref)
+    if (!resolved) return                         // missing target — leave as string
+    ctx.resolved++
+    if (ctx.resolved > ctx.max) {
+        throw new ExpandError(
+            `Resolution count ${ctx.resolved} exceeds maxResolved (${ctx.max})`,
+        )
+    }
+    // Clone the resolved entity before placing it in the result tree.
+    // findRef typically returns a reference to the catalog row; without
+    // the clone, subsequent expansions would mutate the catalog.
+    const resolvedCopy = structuredClone(resolved)
+    node[key] = resolvedCopy
+    if (tail.length > 0 && resolvedCopy.meta) {
+        const childCtx = { ...ctx, seen: new Set([...ctx.seen, ref]) }
+        await walkExpandPath(resolvedCopy.meta, tail, childCtx)
+        ctx.resolved = childCtx.resolved
+    }
+}
+
+async function expandArrayRef(node, key, refs, tail, ctx) {
+    const out = []
+    for (const ref of refs) {
+        if (typeof ref !== 'string') { out.push(ref); continue }
+        if (ctx.seen.has(ref))       { out.push(ref); continue }
+        const resolved = await ctx.findRef(ref)
+        if (!resolved) { out.push(ref); continue }
+        ctx.resolved++
+        if (ctx.resolved > ctx.max) {
+            throw new ExpandError(
+                `Resolution count ${ctx.resolved} exceeds maxResolved (${ctx.max})`,
+            )
+        }
+        // Clone — same reasoning as expandSingleRef.
+        const resolvedCopy = structuredClone(resolved)
+        if (tail.length > 0 && resolvedCopy.meta) {
+            const childCtx = { ...ctx, seen: new Set([...ctx.seen, ref]) }
+            await walkExpandPath(resolvedCopy.meta, tail, childCtx)
+            ctx.resolved = childCtx.resolved
+        }
+        out.push(resolvedCopy)
+    }
+    node[key] = out
 }
 
 // Build a compact "[layouts/foo.hbs:12:4]" suffix from whatever the

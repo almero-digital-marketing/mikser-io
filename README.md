@@ -6,6 +6,8 @@
 
 **Mikser is the content layer of your application.** Business logic, user accounts, transactions live in their own services; mikser handles the parts that *are* content — pages, docs, the published catalog, multi-format outputs. [Vue](https://github.com/almero-digital-marketing/mikser-io-sdk-vue), [React](https://github.com/almero-digital-marketing/mikser-io-sdk-react), and [Svelte](https://github.com/almero-digital-marketing/mikser-io-sdk-svelte) SDKs are the seam between them — same surface across all three (`useDocument`, `useDocuments`, multilingual `useHref`, live SSE updates), each in its framework's idiomatic shape.
 
+**An AI-native file-based content engine with live graph queries.** Content lives as plain text files you can read, search, and version-control like code. Mikser knows how those files reference each other — who an article's author is, which images a landing page uses, who else mentions a given product. When you fetch an article, you can pull its author and that author's organization along with it in one round-trip. When the author's bio changes, every page subscribed to a reference touching them updates live, without polling. AI agents talk to mikser through the same calls a frontend developer uses — there's no separate "AI API" to keep in sync. The whole graph is queryable from both sides at once.
+
 Built for Node.js around a strict lifecycle and a composable plugin system. Every document, asset, and template flows through the same pipeline; plugins hook in at any phase. The same engine runs a single markdown blog and a multi-language publishing platform with PDF / email / AI-augmented asset pipelines — same lifecycle, more plugins.
 
 It's MIT-licensed, runs on Node 18+, has zero hosted dependencies, and the entire content tree it manages is a folder of `.md` and `.yml` files you can copy, diff, and version-control. **The portability promise is the architecture, not a feature.**
@@ -93,6 +95,19 @@ mikser --server --mcp           # mounts MCP at /mcp on the same port as --serve
 
 What that feels like in practice: *"draft three hero-section variants and show me previews"* — three layouts written, three previews returned inline, one chat turn. *"Why did the build break?"* — the agent reads the rolling log buffer and answers from the same view your terminal sees. Operator, AI, and any observer dashboard share the same engine because mikser is single-tenant by design.
 
+### Editing is the easy part — verification is where it pays off
+
+When an AI agent edits ten files, the next question is: *did it do what I asked?* When it edits two hundred, you can't read them all yourself — and that's exactly the scale where AI editing starts being interesting. Most content systems leave verification to the human (read the diff, check the preview, hope you caught the issues). Mikser turns the questions a reviewer would ask into things the agent can answer for itself:
+
+- **"Did I update every article that needed it?"** — semantic search finds anything that still matches the old tone or phrasing the agent was supposed to change.
+- **"What else mentions this person, product, or topic?"** — mikser knows how content references content. "Show me every page that mentions Dick" returns the list instantly, no full-tree scan.
+- **"Did anything break?"** — if a reference points at something that no longer exists, mikser surfaces it as a warning. The build either completes cleanly or doesn't.
+- **"Can I see what this looks like before publishing?"** — render any single page or section on demand, no full rebuild, no staging deploy.
+- **"What changed since I last looked?"** — `git diff`. The catalog is plain files, so the audit trail is the same one your engineers already use for code.
+- **"Roll back this batch?"** — `git checkout`. Atomic. No database migration to undo, no version-history-feature to learn.
+
+The shift this enables: AI review stops being *"read every change"* and becomes *"spot-check the agent's confidence."* The agent verifies its own work; the human samples and approves. That's the workflow that lets a content team actually use AI at scale — change the tone across the entire site in a morning, ship it after a coffee.
+
 Full tool reference and twelve worked scenarios in [MCP — talking to mikser from AI](./documentation/mcp.md).
 
 ## Plugins on top of the engine
@@ -123,7 +138,7 @@ The engine is what stays stable — the lifecycle, the catalog, the file-based c
 | Plugin | What it does |
 |---|---|
 | [`mikser-io-vector`](https://github.com/almero-digital-marketing/mikser-io-vector) | OpenAI embeddings + semantic search (sqlite-vec or pgvector) |
-| [`mikser-io-plugin-schemas`](https://github.com/almero-digital-marketing/mikser-io-plugin-schemas) | Zod-backed entity validation + auto-generated TypeScript declarations for the SDK |
+| [`mikser-io-plugin-schemas`](https://github.com/almero-digital-marketing/mikser-io-plugin-schemas) | Zod-backed entity validation + auto-generated TypeScript declarations for the SDK. Auto-detects `$`-keyed references and warns on broken ones — see [ADR-0007](./documentation/decisions/0007-references-declaration-and-expansion.md) |
 | [`mikser-io-archive`](https://github.com/almero-digital-marketing/mikser-io-archive) | Persist matching entities to YAML — audit trail, versioned content history, downstream export |
 | `mapper` | Run config-supplied transforms over matched entities each cycle (in-core, generic transformation layer) |
 | [`mikser-io-live`](https://github.com/almero-digital-marketing/mikser-io-live) | Lightweight dev server with browser auto-refresh — pair with `--watch` for the classic save→reload loop |
@@ -143,7 +158,7 @@ The `api`, `vector`, and `schemas` plugins are paired with client-side SDKs so a
 
 | Package | For the plugin | What you get |
 |---|---|---|
-| [`mikser-io-sdk-api`](https://github.com/almero-digital-marketing/mikser-io-sdk-api) | `api` | `entities(name).list / query / urlFor / pages / update / delete / render / live` — Mongo-style filter operators backed by sift, sort, projection, pagination, SSE-driven live subscriptions |
+| [`mikser-io-sdk-api`](https://github.com/almero-digital-marketing/mikser-io-sdk-api) | `api` | `entities(name).list / query / urlFor / pages / update / delete / render / live` — Mongo-style filter operators backed by sift, sort, projection, pagination, SSE-driven live subscriptions, and `expand: [...]` to inline-resolve `$`-keyed references in one round-trip (multi-hop chains, `*` array iteration) |
 | [`mikser-io-sdk-vector`](https://github.com/almero-digital-marketing/mikser-io-sdk-vector) | `vector` | `vector(storeName).findSimilar(text, { limit })` — semantic search hits with the original mapped object attached |
 
 **Framework integrations** — all three wrap `mikser-io-sdk-api` in framework-idiomatic shapes. Same surface: `useDocument` / `useDocuments` live data, multilingual `useHref` / `useAlternates`, asset resolution via `useAsset`, generic on entity type so `mikser-io-plugin-schemas`-emitted types compose:
@@ -174,6 +189,7 @@ For a working starter — config with a real plugin set, sample `documents/`, ex
 
 - **Lifecycle** — Processing runs through fixed phases: initialize → load → import → process → persist → render → finalize. Plugins hook into any phase.
 - **Entities** — Everything is an entity (document, file, layout, asset). Entities flow through the journal and are tracked in the catalog.
+- **References between entities** — Front-matter keys starting with `$` (e.g. `$author: /authors/dick`) are references. The engine projects them to plain keys (`meta.author`) for templates and SDK consumers; the schemas plugin auto-validates them; the api can `expand` them inline for one-trip graph fetches. The engine also maintains an inverse-reference index at `runtime.refs.*` (graph queries, rename cascade, live-expand subscriptions, MCP tools `mikser_refs_inbound` / `_outbound` / `_broken` / `_rename`). See [ADR-0007](./documentation/decisions/0007-references-declaration-and-expansion.md).
 - **Plugins** — Functionality is delivered via plugins. Built-in plugins handle common sources (documents, files, layouts, assets). Custom plugins can be added to any project.
 - **Runtime Singleton** — A plain module-level object holds all global state and coordinates the lifecycle. The ES module cache guarantees every importer gets the same instance.
 - **Watch Mode** — In watch mode, file changes trigger incremental re-processing without restarting.

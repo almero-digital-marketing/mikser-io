@@ -632,3 +632,474 @@ describe('api plugin: rich queries (GET operators + POST /entities/query)', () =
         }
     })
 })
+
+// Verifies the expand parameter (ADR-0007 B1-B7) on /entities (GET +
+// POST) and the per-item projection of $-keys into normalized form.
+describe('api plugin: expand parameter', () => {
+    async function mountWithCatalog(entities) {
+        const { default: express } = await import('express')
+        const app = express()
+        const h = createHarness({
+            options: { app, workingFolder: '/tmp/mikser-expand', outputFolder: '/tmp/mikser-expand/out' },
+            config: { api: { endpoints: { open: {} } } },
+            entities,
+        })
+        apiPlugin(h.core)
+        await h.runHook('loaded')
+        const server = await new Promise((resolve) => {
+            const s = app.listen(0, () => resolve(s))
+        })
+        return { server, port: server.address().port }
+    }
+
+    // Reference targets resolve through three lookup keys per ADR-0007
+    // A2 (hrefs primary, ids tolerated, stripped extensions accepted).
+    // The fixture mixes shapes so each path exercises a different match.
+    const CATALOG = [
+        // Direct-id matches: ref `/authors/dick` finds this entity.
+        { id: '/authors/dick',  type: 'author', meta: { name: 'Dick', $organization: '/orgs/almero' } },
+        { id: '/orgs/almero',   type: 'org',    meta: { name: 'Almero Digital' } },
+        { id: '/images/hero',   type: 'image',  meta: { alt: 'Hero image' } },
+        { id: '/images/feat-a', type: 'image',  meta: { alt: 'Feature A' } },
+        // Stripped-extension match: ref `/blog/launch` finds id `/blog/launch.md`.
+        {
+            id: '/blog/launch.md', type: 'document',
+            meta: {
+                href:     '/blog/launch',
+                title:    'Launch',
+                $author:  '/authors/dick',
+                $hero:    '/images/hero',
+                $related: ['/blog/follow-up', '/blog/missing'],
+            },
+        },
+        { id: '/blog/follow-up.md', type: 'document', meta: { href: '/blog/follow-up', title: 'Follow up' } },
+        // Landing-page entity with sections; tests `*` array iteration.
+        {
+            id: '/landing.md', type: 'document',
+            meta: {
+                href:  '/landing',
+                title: 'Landing',
+                sections: [
+                    { type: 'hero',     $image: '/images/hero' },
+                    { type: 'features', $image: '/images/feat-a' },
+                ],
+            },
+        },
+    ]
+
+    it('expands a single one-hop ref via GET ?expand=author', async () => {
+        const { server, port } = await mountWithCatalog(CATALOG)
+        try {
+            const res = await fetch(`http://127.0.0.1:${port}/api/open/entities?id=/blog/launch.md&expand=author`)
+            assert.equal(res.status, 200)
+            const body = await res.json()
+            const item = body.items[0]
+            // Projection at the API boundary: $author becomes author.
+            assert.equal(item.meta.$author, undefined)
+            assert.equal(typeof item.meta.author, 'object')
+            assert.equal(item.meta.author.meta.name, 'Dick')
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('expands a multi-hop chain (author.organization)', async () => {
+        const { server, port } = await mountWithCatalog(CATALOG)
+        try {
+            const res = await fetch(`http://127.0.0.1:${port}/api/open/entities?id=/blog/launch.md&expand=author.organization`)
+            assert.equal(res.status, 200)
+            const item = (await res.json()).items[0]
+            assert.equal(item.meta.author.meta.organization.meta.name, 'Almero Digital')
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('iterates `*` segments through arrays of objects', async () => {
+        const { server, port } = await mountWithCatalog(CATALOG)
+        try {
+            const res = await fetch(`http://127.0.0.1:${port}/api/open/entities?id=/landing.md&expand=sections.*.image`)
+            assert.equal(res.status, 200)
+            const item = (await res.json()).items[0]
+            assert.equal(item.meta.sections[0].image.meta.alt, 'Hero image')
+            assert.equal(item.meta.sections[1].image.meta.alt, 'Feature A')
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('expands an array-valued ref ($related)', async () => {
+        const { server, port } = await mountWithCatalog(CATALOG)
+        try {
+            const res = await fetch(`http://127.0.0.1:${port}/api/open/entities?id=/blog/launch.md&expand=related`)
+            assert.equal(res.status, 200)
+            const item = (await res.json()).items[0]
+            assert.equal(item.meta.related.length, 2)
+            assert.equal(item.meta.related[0].meta.title, 'Follow up')
+            // The second entry doesn't resolve — stays as a string per
+            // ADR-0007 B6.
+            assert.equal(item.meta.related[1], '/blog/missing')
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('accepts both canonical and normalized path forms', async () => {
+        const { server, port } = await mountWithCatalog(CATALOG)
+        try {
+            const canonical = await fetch(`http://127.0.0.1:${port}/api/open/entities?id=/blog/launch.md&expand=$author`)
+            const normalized = await fetch(`http://127.0.0.1:${port}/api/open/entities?id=/blog/launch.md&expand=author`)
+            assert.equal(canonical.status, 200)
+            assert.equal(normalized.status, 200)
+            const a = (await canonical.json()).items[0]
+            const b = (await normalized.json()).items[0]
+            assert.equal(a.meta.author.meta.name, b.meta.author.meta.name)
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('combines multiple expand paths in one query', async () => {
+        const { server, port } = await mountWithCatalog(CATALOG)
+        try {
+            const res = await fetch(`http://127.0.0.1:${port}/api/open/entities?id=/blog/launch.md&expand=author,hero`)
+            assert.equal(res.status, 200)
+            const item = (await res.json()).items[0]
+            assert.equal(item.meta.author.meta.name, 'Dick')
+            assert.equal(item.meta.hero.meta.alt, 'Hero image')
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('expands via POST /entities/query body', async () => {
+        const { server, port } = await mountWithCatalog(CATALOG)
+        try {
+            const res = await fetch(`http://127.0.0.1:${port}/api/open/entities/query`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({
+                    filter: { id: '/blog/launch.md' },
+                    expand: ['author.organization'],
+                }),
+            })
+            assert.equal(res.status, 200)
+            const item = (await res.json()).items[0]
+            assert.equal(item.meta.author.meta.organization.meta.name, 'Almero Digital')
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('always projects meta to the normalized form, even when expand is absent', async () => {
+        const { server, port } = await mountWithCatalog(CATALOG)
+        try {
+            const res = await fetch(`http://127.0.0.1:${port}/api/open/entities?id=/blog/launch.md`)
+            assert.equal(res.status, 200)
+            const item = (await res.json()).items[0]
+            assert.equal(item.meta.$author,  undefined)            // $ stripped
+            assert.equal(item.meta.author,   '/authors/dick')      // normalized, ref left as string
+            assert.equal(item.meta.$hero,    undefined)
+            assert.equal(item.meta.hero,     '/images/hero')
+            assert.deepEqual(item.meta.related, ['/blog/follow-up', '/blog/missing'])
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('returns 422 when a single expand path exceeds the default maxDepth', async () => {
+        const { server, port } = await mountWithCatalog(CATALOG)
+        try {
+            const res = await fetch(`http://127.0.0.1:${port}/api/open/entities?id=/blog/launch.md&expand=a.b.c.d.e.f`)
+            assert.equal(res.status, 422)
+            const body = await res.json()
+            assert.match(body.error, /maxDepth/)
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('returns 422 when paths list exceeds default maxPaths', async () => {
+        const { server, port } = await mountWithCatalog(CATALOG)
+        try {
+            const paths = Array.from({ length: 21 }, (_, i) => `p${i}`).join(',')
+            const res = await fetch(`http://127.0.0.1:${port}/api/open/entities?id=/blog/launch.md&expand=${paths}`)
+            assert.equal(res.status, 422)
+            const body = await res.json()
+            assert.match(body.error, /maxPaths/)
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('returns 422 via POST when limits are exceeded', async () => {
+        const { server, port } = await mountWithCatalog(CATALOG)
+        try {
+            const res = await fetch(`http://127.0.0.1:${port}/api/open/entities/query`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({
+                    filter: { id: '/blog/launch.md' },
+                    expand: ['a.b.c.d.e.f'],
+                }),
+            })
+            assert.equal(res.status, 422)
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+})
+
+// Verifies ADR-0007 B9: when a GET /entities response with `expand` is
+// cached, the api plugin registers a runtime.refs.subscribeGraph against
+// the same (filter, expand). When that subscription's onAffected fires
+// (because something in the expansion graph mutated), the api plugin
+// evicts the specific cache file.
+describe('api plugin: expand-cache invalidation (ADR-0007 B9)', () => {
+    async function mountWithCache(entities, refsMock) {
+        const { default: express } = await import('express')
+        const { mkdtemp, readdir } = await import('node:fs/promises')
+        const { tmpdir } = await import('node:os')
+        const tmpRoot = await mkdtemp(path.join(tmpdir(), 'mikser-expand-cache-'))
+
+        const app = express()
+        const h = createHarness({
+            options: {
+                app,
+                workingFolder: tmpRoot,
+                outputFolder:  tmpRoot,
+            },
+            config: {
+                api: {
+                    endpoints: {
+                        // public endpoint with cache enabled
+                        public: { operations: ['list'], cache: true },
+                    },
+                },
+            },
+            entities,
+        })
+        // Inject the refs mock into the harness's runtime so the api
+        // plugin's subscribeGraph call uses our recorder.
+        h.core.runtime.refs = refsMock
+
+        apiPlugin(h.core)
+        await h.runHook('loaded')
+        const server = await new Promise((resolve) => {
+            const s = app.listen(0, () => resolve(s))
+        })
+        return { server, port: server.address().port, tmpRoot, readdir }
+    }
+
+    const CATALOG = [
+        { id: '/authors/dick',  type: 'author',   meta: { name: 'Dick', $organization: '/orgs/almero' } },
+        { id: '/orgs/almero',   type: 'org',      meta: { name: 'Almero' } },
+        {
+            id: '/blog/launch.md', type: 'document',
+            meta: {
+                href:    '/blog/launch',
+                title:   'Launch',
+                $author: '/authors/dick',
+            },
+        },
+    ]
+
+    it('registers a graph subscription with the request filter + expand when the cache write happens', async () => {
+        const subscribeArgs = []
+        const refsMock = {
+            subscribeGraph(opts) {
+                subscribeArgs.push(opts)
+                return { dispose: () => {} }
+            },
+        }
+        const { server, port } = await mountWithCache(CATALOG, refsMock)
+        try {
+            const res = await fetch(`http://127.0.0.1:${port}/api/public/entities?id=/blog/launch.md&expand=author.organization`)
+            assert.equal(res.status, 200)
+
+            assert.equal(subscribeArgs.length, 1)
+            const opts = subscribeArgs[0]
+            assert.deepEqual(opts.expand, ['author.organization'])
+            // The filter wraps endpoint scope + the request's parsed
+            // sift filter. /blog/launch.md should match; /orgs/almero
+            // should not (request filtered on id).
+            assert.equal(opts.filter({ id: '/blog/launch.md' }), true)
+            assert.equal(opts.filter({ id: '/orgs/almero'   }), false)
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('does NOT register a subscription when the request has no expand', async () => {
+        const subscribeArgs = []
+        const refsMock = {
+            subscribeGraph(opts) {
+                subscribeArgs.push(opts)
+                return { dispose: () => {} }
+            },
+        }
+        const { server, port } = await mountWithCache(CATALOG, refsMock)
+        try {
+            const res = await fetch(`http://127.0.0.1:${port}/api/public/entities?id=/blog/launch.md`)
+            assert.equal(res.status, 200)
+            assert.equal(subscribeArgs.length, 0)
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('the subscription onAffected callback evicts the cache file', async () => {
+        let storedOnAffected = null
+        let disposed = false
+        const refsMock = {
+            subscribeGraph(opts) {
+                storedOnAffected = opts.onAffected
+                return { dispose: () => { disposed = true } }
+            },
+        }
+        const { server, port, tmpRoot, readdir } = await mountWithCache(CATALOG, refsMock)
+        try {
+            // Query string contains a `/` (in the id filter) — this is
+            // exactly the case the old raw-filename scheme couldn't
+            // cache. The hash-based scheme handles it without special
+            // characters reaching the filesystem.
+            const res = await fetch(`http://127.0.0.1:${port}/api/public/entities?id=/blog/launch.md&expand=author`)
+            assert.equal(res.status, 200)
+
+            // Give the fire-and-forget cache write a tick to land.
+            await new Promise(r => setTimeout(r, 30))
+
+            const cacheDir = path.join(tmpRoot, 'api', 'public', 'entities')
+            const filesBefore = await readdir(cacheDir).catch(() => [])
+            assert.equal(filesBefore.length, 1, `expected exactly one cache file, got: ${JSON.stringify(filesBefore)}`)
+            // Filename should be a 16-char hex sha256 prefix + .json,
+            // not the raw query string (which would include `/` and
+            // `=`/`&`/etc).
+            assert.match(filesBefore[0], /^[0-9a-f]{16}\.json$/, `expected hash-shaped filename, got: ${filesBefore[0]}`)
+
+            // Simulate a mutation reaching the subscriber — the graph
+            // dispatch in runtime.refs would normally invoke this. We
+            // call it directly here so the test stays focused on the
+            // api plugin's eviction wiring.
+            assert.equal(typeof storedOnAffected, 'function')
+            await storedOnAffected({
+                root: { id: '/blog/launch.md', meta: { href: '/blog/launch' } },
+                mutated: { id: '/authors/dick', meta: { name: 'Updated' } },
+            })
+
+            // Self-dispose after evict.
+            assert.equal(disposed, true)
+
+            // Cache file removed.
+            const filesAfter = await readdir(cacheDir).catch(() => [])
+            assert.equal(filesAfter.length, 0, `expected cache cleared, still had: ${JSON.stringify(filesAfter)}`)
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('caches the no-query GET as `index.json` for a quick default-snapshot lookup', async () => {
+        const refsMock = {
+            subscribeGraph() { return { dispose: () => {} } },
+        }
+        const { server, port, tmpRoot, readdir } = await mountWithCache(CATALOG, refsMock)
+        try {
+            const res = await fetch(`http://127.0.0.1:${port}/api/public/entities`)
+            assert.equal(res.status, 200)
+            await new Promise(r => setTimeout(r, 30))
+
+            const cacheDir = path.join(tmpRoot, 'api', 'public', 'entities')
+            const files = await readdir(cacheDir)
+            assert.deepEqual(files, ['index.json'])
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('strips the `cache` param before hashing so client and server agree on the filename', async () => {
+        // This is the nginx-fast-path contract (ADR-0007 caching section):
+        // the SDK appends `&cache=<hash>` so nginx can do
+        // `try_files .../$arg_cache.json @proxy`. The server must
+        // ignore that param when computing its own hash, otherwise
+        // they could never converge on the same filename.
+        const refsMock = {
+            subscribeGraph() { return { dispose: () => {} } },
+        }
+        const { server, port, tmpRoot, readdir } = await mountWithCache(CATALOG, refsMock)
+        try {
+            // Same actual query; one includes a `cache` hint, one doesn't.
+            const a = await fetch(`http://127.0.0.1:${port}/api/public/entities?expand=author`)
+            const b = await fetch(`http://127.0.0.1:${port}/api/public/entities?expand=author&cache=deadbeef12345678`)
+            assert.equal(a.status, 200)
+            assert.equal(b.status, 200)
+            await new Promise(r => setTimeout(r, 30))
+
+            const cacheDir = path.join(tmpRoot, 'api', 'public', 'entities')
+            const files = await readdir(cacheDir)
+            // Exactly one cache file — the two requests share a hash
+            // because the `cache` param was stripped before hashing.
+            assert.equal(files.length, 1, `expected one cache file, got: ${JSON.stringify(files)}`)
+            assert.match(files[0], /^[0-9a-f]{16}\.json$/)
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('strips multiple `cache` params (defensive against duplicates in the URL)', async () => {
+        const refsMock = {
+            subscribeGraph() { return { dispose: () => {} } },
+        }
+        const { server, port, tmpRoot, readdir } = await mountWithCache(CATALOG, refsMock)
+        try {
+            const res = await fetch(`http://127.0.0.1:${port}/api/public/entities?expand=author&cache=a&cache=b`)
+            assert.equal(res.status, 200)
+            await new Promise(r => setTimeout(r, 30))
+
+            const cacheDir = path.join(tmpRoot, 'api', 'public', 'entities')
+            const files = await readdir(cacheDir)
+            assert.equal(files.length, 1)
+            // Same filename as the clean `?expand=author` request would
+            // produce. Verified indirectly by the previous test.
+            assert.match(files[0], /^[0-9a-f]{16}\.json$/)
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('does NOT route the `cache` param into the sift filter (it stays a pure routing hint)', async () => {
+        // Regression test: the api plugin previously treated any
+        // unrecognised query param as a sift filter. With the
+        // SDK auto-appending `cache=<hash>`, this meant every cached
+        // request was sift-filtered by `entity.cache === '<hash>'`
+        // — which matches nothing on a typical catalog, so cache files
+        // ended up containing `items: []`. parseQueryString now skips
+        // the `cache` key explicitly. This test asserts a
+        // cache-bearing request still returns the entities the query
+        // would match without it.
+        const refsMock = {
+            subscribeGraph() { return { dispose: () => {} } },
+        }
+        const { server, port } = await mountWithCache(CATALOG, refsMock)
+        try {
+            // Baseline: same filter, no cache hint — should return
+            // /authors/dick (no other catalog entity is type 'author').
+            const baseline = await fetch(`http://127.0.0.1:${port}/api/public/entities?type=author`)
+            const baselineBody = await baseline.json()
+            assert.ok(
+                baselineBody.items.some(i => i.id === '/authors/dick'),
+                `baseline should include /authors/dick, got: ${JSON.stringify(baselineBody.items.map(i => i.id))}`,
+            )
+
+            // With the routing hint added — identical items.
+            const withHint = await fetch(`http://127.0.0.1:${port}/api/public/entities?type=author&cache=deadbeef12345678`)
+            const withHintBody = await withHint.json()
+            assert.equal(withHintBody.items.length, baselineBody.items.length)
+            assert.deepEqual(
+                withHintBody.items.map(i => i.id).sort(),
+                baselineBody.items.map(i => i.id).sort(),
+            )
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+})
