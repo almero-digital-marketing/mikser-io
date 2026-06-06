@@ -1,10 +1,11 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, access } from 'node:fs/promises'
+import { mkdtemp, rm, access, mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import layoutsPlugin from '../../../src/plugins/layouts.js'
+import frontMatterPlugin from '../../../src/plugins/front-matter.js'
 import { createHarness } from '../plugin-harness.js'
 
 async function withTempWorking(fn) {
@@ -166,6 +167,82 @@ describe('layouts plugin', () => {
 
             const warned = h.logs.some(l => l.level === 'warn' && l.args.join(' ').includes('Render requested'))
             assert.equal(warned, false, 'normal layout-less files must not trigger the render warning')
+        })
+    })
+
+    // Layouts go through the frontmatter pipeline like documents do.
+    // The layouts plugin reads the file at sync time and populates
+    // entity.content; the frontmatter plugin then walks the journal at
+    // onProcess and lifts YAML into entity.meta. The two plugins
+    // compose via the journal contract alone — no cross-imports.
+    it('onImport reads layout content from disk so frontmatter can populate entity.meta', async () => {
+        await withTempWorking(async (workingFolder) => {
+            const layoutsFolder = path.join(workingFolder, 'layouts')
+            await mkdir(layoutsFolder, { recursive: true })
+            await writeFile(path.join(layoutsFolder, 'article.hbs'),
+                '---\nmatch: "@/articles/*"\nmcpUi:\n  mode: preview\n  description: "Article preview"\n  actions: ["approve","reject"]\n---\n<article>{{title}}</article>\n')
+
+            const h = createHarness({ options: { workingFolder, outputFolder: path.join(workingFolder, 'out') } })
+            layoutsPlugin(h.core)
+            frontMatterPlugin(h.core)
+            await h.runHook('loaded')
+            await h.runHook('import')
+
+            const created = h.journal.find(e => e.operation === 'create' && e.entity?.id === '/layouts/article.hbs')
+            assert.ok(created, 'expected a journal CREATE for the layout')
+            assert.ok(created.entity.content?.includes('match: "@/articles/*"'),
+                'layout entity.content should carry the raw file bytes before frontmatter runs')
+
+            // Frontmatter plugin runs onProcess against the same journal,
+            // strips the YAML, and lifts the metadata into entity.meta.
+            await h.runHook('process')
+
+            assert.equal(created.entity.meta?.match, '@/articles/*')
+            assert.equal(created.entity.meta?.mcpUi?.mode, 'preview')
+            assert.equal(created.entity.meta?.mcpUi?.description, 'Article preview')
+            assert.deepEqual(created.entity.meta?.mcpUi?.actions, ['approve', 'reject'])
+            // entity.content is now the stripped body — no YAML, no leading ---.
+            assert.equal(created.entity.content.trim(), '<article>{{title}}</article>')
+        })
+    })
+
+    it('onSync CREATE reads layout content from disk so frontmatter can run on updates', async () => {
+        await withTempWorking(async (workingFolder) => {
+            const layoutsFolder = path.join(workingFolder, 'layouts')
+            await mkdir(layoutsFolder, { recursive: true })
+            await writeFile(path.join(layoutsFolder, 'card.hbs'),
+                '---\nmode: edit\n---\n<form>{{title}}</form>\n')
+
+            const h = createHarness({ options: { workingFolder, outputFolder: path.join(workingFolder, 'out') } })
+            layoutsPlugin(h.core)
+            frontMatterPlugin(h.core)
+            await h.runHook('loaded')
+            await h.runSync('layouts', { action: 'create', context: { relativePath: 'card.hbs' } })
+            await h.runHook('process')
+
+            const created = h.journal.find(e => e.operation === 'create' && e.entity?.id === '/layouts/card.hbs')
+            assert.ok(created)
+            assert.equal(created.entity.meta?.mode, 'edit')
+            assert.equal(created.entity.content.trim(), '<form>{{title}}</form>')
+        })
+    })
+
+    it('onSync CREATE returns empty content (and stays silent at debug) when the file is missing', async () => {
+        // Sync events can synthetically arrive without a corresponding
+        // file (test harness usage; rare race in production). The plugin
+        // logs at debug and proceeds with empty content rather than
+        // throwing — downstream renderers surface the real issue.
+        await withTempWorking(async (workingFolder) => {
+            const h = createHarness({ options: { workingFolder, outputFolder: path.join(workingFolder, 'out') } })
+            layoutsPlugin(h.core)
+            await h.runHook('loaded')
+            await h.runSync('layouts', { action: 'create', context: { relativePath: 'ghost.hbs' } })
+
+            const created = h.journal.find(e => e.operation === 'create')
+            assert.ok(created)
+            assert.equal(created.entity.content, '')
+            assert.ok(h.logs.some(l => l.level === 'debug' && l.args.join(' ').includes('unreadable')),
+                'expected a debug log noting the missing layout file')
         })
     })
 

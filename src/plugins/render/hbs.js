@@ -1,7 +1,6 @@
 import handlebars from 'handlebars'
 import helpers from '@budibase/handlebars-helpers'
 import dayjs from 'dayjs'
-import { readFile } from 'fs/promises'
 
 export function load({ config, runtime, context }) {
     handlebars.registerHelper(helpers(config?.helpers || [
@@ -18,8 +17,10 @@ export function load({ config, runtime, context }) {
     ]))
     for (let partial in context.layouts) {
         if (context.layouts[partial].template == 'hbs' && partial.indexOf('partials') == 0) {
-            const partialLayout = readFile(context.layouts[partial].uri, 'utf8')
-            handlebars.registerPartial(partial, partialLayout)
+            // Layout bodies live on the entity (populated by the layouts
+            // plugin at sync time, then stripped by front-matter at
+            // onProcess). One source of truth, no re-read from disk.
+            handlebars.registerPartial(partial, context.layouts[partial].content ?? '')
         }
     }
     handlebars.registerHelper('date', (date, format) => {
@@ -44,7 +45,7 @@ export function load({ config, runtime, context }) {
 }
 
 export async function render({ entity, runtime }) {
-    const source = await readFile(entity.layout.uri, 'utf8')
+    const source = entity.layout.content ?? ''
     const sandbox = {}
     for (let helper in runtime) {
         if (typeof (runtime[helper]) == 'function') {

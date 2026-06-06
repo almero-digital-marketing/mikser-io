@@ -27,12 +27,14 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { useRenderer } from '../api.js'
-import { mimeForEntity } from '../utils.js'
+import { mimeForEntity, matchEntity } from '../utils.js'
 
 export default ({
     runtime,
     onLoaded,
     useLogger,
+    findEntity,
+    findEntities,
 }) => {
     // Factory-scope cache. One per engine instance. Module-scope would
     // share across multiple engines in the same Node process, which is
@@ -205,6 +207,123 @@ export default ({
 
         const logger = useLogger()
         logger.debug('MCP tool registered: mikser_preview_render (preview plugin)')
+    })
+
+    // mikser_preview_ui — render an entity through a layout that declares
+    // `mcpUi` frontmatter and return the HTML inline so the host can
+    // surface it as a UI block in the agent conversation. Sibling of
+    // mikser_preview_render: same render machinery, different delivery.
+    //
+    // Dispatch — match entity → layout — is driven entirely by data on
+    // the layout entity itself:
+    //   layout.meta.match         which entity pattern this UI serves
+    //   layout.meta.mcpUi.mode    'preview' | 'edit' | 'approval' | ...
+    //   layout.meta.mcpUi.actions postMessage actions the UI emits back
+    //   layout.meta.mcpUi.sandbox sandbox flags the host should apply
+    //
+    // The plugin owns its own index (just a catalog filter at handler
+    // time — small N, no need to materialize a registry). No other plugin
+    // needs to know about mcpUi metadata; the catalog IS the shared
+    // interface.
+    onLoaded(() => {
+        if (!runtime.options.mcp) return
+        const mcp = runtime.options.mcp
+        const { render: previewRender } = useRenderer(runtime, {
+            defaultTimeout: runtime.config.preview?.renderTimeout ?? 30_000,
+        })
+
+        mcp.simpleTool(
+            'mikser_preview_ui',
+            'Render an entity to inline HTML using a layout that declares `mcpUi` frontmatter. Selects the layout by matching `entityId` against `layout.meta.match` and filtering on `mode`. Returns the rendered HTML plus action metadata (postMessage names the UI emits) so the host can surface it as a UI block in the conversation. Common modes: "preview" (read-only), "edit" (form-based), "approval" (approve/reject). Layouts without `mcpUi` frontmatter are not eligible.',
+            {
+                entityId: z.string().describe('Entity to render, e.g. "/articles/2026-launch".'),
+                mode: z.string().optional().describe('Which UI mode to render. Defaults to "preview". Available modes are whatever your layouts declare as `mcpUi.mode`.'),
+            },
+            async ({ entityId, mode = 'preview' }) => {
+                const logger = useLogger()
+                const fail = (msg) => ({
+                    isError: true,
+                    content: [{ type: 'text', text: msg }],
+                })
+
+                try {
+                    // Find candidate layouts for this mode. The catalog
+                    // already has frontmatter-parsed meta — front-matter
+                    // plugin ran at onProcess. No re-parse needed.
+                    const all = await findEntities()
+                    const candidates = all.filter(l =>
+                        l.collection === 'layouts'
+                        && l.meta?.mcpUi
+                        && (l.meta.mcpUi.mode ?? 'preview') === mode
+                    )
+                    if (candidates.length === 0) {
+                        return fail(`No layouts found with mcpUi.mode="${mode}". Author a layout with YAML frontmatter at the top: \`---\\nmatch: "@/articles/*"\\nmcpUi:\\n  mode: ${mode}\\n  description: "..."\\n  actions: [...]\\n---\``)
+                    }
+
+                    const entity = await findEntity({ id: entityId })
+                    if (!entity) return fail(`Entity not found: ${entityId}`)
+
+                    const matched = candidates.find(l =>
+                        l.meta?.match && matchEntity(entity, l.meta.match))
+                    if (!matched) {
+                        const patterns = candidates
+                            .map(l => `  ${l.id}: match=${JSON.stringify(l.meta?.match ?? null)}`)
+                            .join('\n')
+                        return fail(`No mcpUi layout matched ${entityId} in mode=${mode}.\nCandidates for this mode:\n${patterns}`)
+                    }
+
+                    // Force the chosen layout — bypass autoLayouts /
+                    // layouts.match resolution that onProcessed would do.
+                    const renderEntity = { ...entity, layout: matched }
+                    const { output } = await previewRender(renderEntity, {
+                        save: false,
+                        catalog: false,
+                    })
+                    const result = output?.result
+                    if (result == null) {
+                        return fail(`Render produced no output for ${entityId} via ${matched.id}. Check that the layout's template engine has a matching renderer plugin loaded.`)
+                    }
+
+                    const html = typeof result === 'string'
+                        ? result
+                        : Buffer.isBuffer(result)
+                            ? result.toString('utf8')
+                            : String(result)
+
+                    const mcpUiMeta = matched.meta?.mcpUi ?? {}
+                    logger.debug('MCP mikser_preview_ui rendered %s via %s (mode=%s, %d chars)',
+                        entityId, matched.id, mode, html.length)
+
+                    return {
+                        content: [
+                            // HTML inline. Hosts that understand the
+                            // Apps extension can lift this into a
+                            // sandboxed iframe; hosts that don't will
+                            // surface it as text/preformatted.
+                            { type: 'text', text: html, mimeType: 'text/html' },
+                        ],
+                        // Side-channel metadata so hosts that wire up
+                        // postMessage back-channels know which actions
+                        // the UI emits and which sandbox flags to apply.
+                        _meta: {
+                            mcpUi: {
+                                layoutId:    matched.id,
+                                mode,
+                                description: mcpUiMeta.description ?? null,
+                                actions:     mcpUiMeta.actions     ?? [],
+                                sandbox:     mcpUiMeta.sandbox     ?? ['allow-scripts'],
+                            },
+                        },
+                    }
+                } catch (err) {
+                    logger.error('MCP mikser_preview_ui error: %s', err.message)
+                    return fail(err.message)
+                }
+            },
+        )
+
+        const logger = useLogger()
+        logger.debug('MCP tool registered: mikser_preview_ui (preview plugin)')
     })
 
     return { name: 'preview' }

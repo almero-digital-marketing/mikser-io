@@ -200,13 +200,62 @@ Tool ownership follows the plugin that owns the concept. Core ships one tool (th
 | ----------------------- | ------------------------------------------------------------------------------------- |
 | `mikser_layouts_inspect` | Returns a layout's template source, the variables it references, its expected postprocessor, and sample entities currently using it. Use before drafting a preview to learn what data shape the layout expects. |
 
-**`preview` plugin** (transient render + clickable URL):
+**`preview` plugin** (transient render + clickable URL, and inline UI blocks):
 
 | Tool              | What it does                                                                          |
 | ----------------- | ------------------------------------------------------------------------------------- |
 | `mikser_preview_render`  | Render an entity AND surface the output at a clickable `http://localhost:<port>/preview/<id>.<ext>` URL. Previews live in memory (not on disk, never under `outputFolder`), auto-expire (default 10 min), and LRU-evict past a 100 MB cap. Requires `--server`. |
+| `mikser_preview_ui`      | Render an entity to **inline HTML** using a layout that declares `mcpUi` frontmatter, and return it as a UI block the host can surface inside the conversation. Selects the layout by matching `entityId` against `layout.meta.match` and filtering on `mode` (`preview` / `edit` / `approval` / your own). Returns the rendered HTML plus action metadata (postMessage names the UI emits, sandbox flags) so the host can wire up an interactive iframe. See [Layout frontmatter](#layout-frontmatter-and-mcp-ui) below. |
 
 Other plugins are expected to follow the same shape — `vector` will add `find_similar`, `schemas` will add `list_schemas` / `get_schema_shape`, and so on.
+
+## Layout frontmatter and MCP-UI
+
+mikser layouts can carry YAML frontmatter just like documents do. The frontmatter plugin lifts it into `entity.meta`, where any consumer can read it without coordinating with anyone else. `mikser_preview_ui` consumes one specific namespace: `meta.mcpUi`.
+
+```hbs
+---
+match: "@/articles/*"
+mcpUi:
+  mode: preview                # or "edit", "approval", or your own
+  description: "Article preview with approve/reject controls"
+  actions:                     # postMessage names the UI emits
+    - approve
+    - reject
+  sandbox:                     # iframe sandbox flags the host should apply
+    - allow-scripts
+---
+<!DOCTYPE html>
+<html>
+  <body>
+    <article>{{document.meta.title}}</article>
+    <button data-action="approve">Approve</button>
+    <button data-action="reject">Reject</button>
+    <script>
+      document.querySelectorAll('[data-action]').forEach(b =>
+        b.addEventListener('click', () => window.parent.postMessage({
+          type: 'mcp-ui/action',
+          action: b.dataset.action,
+          entityId: {{{json document.id}}},
+        }, '*'))
+      )
+    </script>
+  </body>
+</html>
+```
+
+When the agent calls `mikser_preview_ui({ entityId: '/articles/launch', mode: 'preview' })`:
+
+1. The plugin walks the catalog for layouts where `meta.mcpUi.mode === 'preview'`.
+2. Among those, it picks the one whose `meta.match` pattern matches the entity (using mikser's `matchEntity` — same matcher used by the layouts plugin).
+3. It runs the layout through the renderer chain (`render-hbs`, `render-eta`, `render-liquid`, etc.) and returns the HTML inline plus `_meta.mcpUi` containing the declared actions and sandbox flags.
+
+A few constraints worth knowing when authoring `mcpUi` layouts:
+
+- **The iframe has no `fetch`.** Hosts sandbox UI blocks tightly — assume no network from inside the rendered HTML. Use `postMessage` to send actions back; the host bridges them to the tool result.
+- **Same layout system, different output path.** The MCP-UI layout doesn't have to be the same file as your production layout; declare a focused, sandbox-safe variant under a distinct name. mikser's auto-match won't pick it up for normal rendering as long as the filename doesn't collide.
+- **One source of truth for the body.** All renderers (`render-hbs`, `render-eta`, `render-liquid`) now read layout bodies from `entity.layout.content`. The frontmatter plugin strips the YAML before the renderer ever sees it.
+- **ECT is the exception.** `mikser-io-render-ect` still file-loads layouts through ECT's own resolver, so YAML frontmatter on `.ect` layouts renders as literal text. Pick `hbs` / `eta` / `liquid` for layouts that need `mcpUi` frontmatter.
 
 ## Built-in resources
 

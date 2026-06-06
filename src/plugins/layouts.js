@@ -103,6 +103,21 @@ export default ({
     const collection = 'layouts'
     const type = 'layout'
 
+    // Read a layout file's bytes into entity.content so the frontmatter
+    // plugin can extract YAML metadata at onProcess. Defensive — sync
+    // events can arrive ahead of file state in edge cases (rename races,
+    // synthetic test sync calls). A missing file logs at debug and the
+    // entity goes in with empty content; downstream renderers will
+    // surface the real failure mode with a clearer error.
+    async function readLayoutContent(uri) {
+        try {
+            return await readFile(uri, 'utf8')
+        } catch (err) {
+            useLogger().debug('Layout content unreadable at %s: %s', uri, err.message)
+            return ''
+        }
+    }
+
     function addToSitemap(entity) {
         const logger = useLogger()
         const { sitemap } = runtime.state.layouts
@@ -187,6 +202,7 @@ export default ({
                     collection,
                     type,
                     name: relativePath.replace(path.extname(relativePath), ''),
+                    content: await readLayoutContent(uri),
                     ...getFormatInfo(relativePath)
                 }
                 layouts[layout.name] = layout
@@ -199,6 +215,7 @@ export default ({
                     collection,
                     type,
                     name: relativePath.replace(path.extname(relativePath), ''),
+                    content: await readLayoutContent(uri),
                     ...getFormatInfo(relativePath)
                 }
                 layouts[layout.name] = layout
@@ -250,6 +267,7 @@ export default ({
                 name: relativePath.replace(path.extname(relativePath), ''),
                 collection,
                 type,
+                content: await readLayoutContent(uri),
             }
             Object.assign(layout, await getFormatInfo(relativePath))
             layouts[layout.name] = layout

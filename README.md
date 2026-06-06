@@ -84,6 +84,7 @@ Add `--mcp` to your mikser command and any MCP-speaking client — Claude Deskto
 - read every entity in the catalog
 - write new content files (markdown, layouts, configuration) — writes land on disk and the next cycle picks them up
 - render any layout for preview without touching the output folder
+- **surface rendered UI inline in the conversation** — `mikser_preview_ui` runs an entity through a layout that declares `mcpUi` frontmatter and returns the HTML as a UI block the host can show; an approve/reject button on that block sends the result straight back to the agent
 - watch every build log as it streams past
 - introspect engine state — current lifecycle phase, effective config, recent log buffer
 
@@ -93,7 +94,7 @@ Plugins extend the tool surface the same way they mount HTTP routes; install the
 mikser --server --mcp           # mounts MCP at /mcp on the same port as --server
 ```
 
-What that feels like in practice: *"draft three hero-section variants and show me previews"* — three layouts written, three previews returned inline, one chat turn. *"Why did the build break?"* — the agent reads the rolling log buffer and answers from the same view your terminal sees. Operator, AI, and any observer dashboard share the same engine because mikser is single-tenant by design.
+What that feels like in practice: *"draft three hero-section variants and show me previews"* — three layouts written, three previews returned inline, one chat turn. *"Why did the build break?"* — the agent reads the rolling log buffer and answers from the same view your terminal sees. *"Update this article's tone and show me the preview"* — the agent edits the file and surfaces the rendered article inline; you click Approve or Reject, the agent acts on your choice. Operator, AI, and any observer dashboard share the same engine because mikser is single-tenant by design.
 
 ### Editing is the easy part — verification is where it pays off
 

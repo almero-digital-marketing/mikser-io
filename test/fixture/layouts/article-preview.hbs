@@ -1,0 +1,65 @@
+---
+match: "@/en/posts/*"
+mcpUi:
+  mode: preview
+  description: "Read-only preview of a blog post with approve/reject controls. Use this to surface the rendered article inside the agent conversation so the user can verify a proposed edit before committing."
+  actions:
+    - approve
+    - reject
+  sandbox:
+    - allow-scripts
+---
+<!DOCTYPE html>
+<html lang="{{document.meta.lang}}">
+<head>
+    <meta charset="UTF-8" />
+    <title>Preview · {{document.meta.title}}</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2em auto; padding: 0 1em; color: #1f2937; }
+        article header { border-bottom: 1px solid #e5e7eb; padding-bottom: 1em; margin-bottom: 1em; }
+        article header h1 { margin: 0 0 0.25em; font-size: 1.5em; }
+        article header .meta { color: #6b7280; font-size: 0.875em; }
+        article .body { line-height: 1.6; }
+        .mcp-ui-actions { margin-top: 2em; padding: 1em; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; display: flex; gap: 0.5em; }
+        .mcp-ui-actions button { padding: 0.5em 1.25em; border: 0; border-radius: 4px; font-size: 0.875em; cursor: pointer; font-weight: 500; }
+        .mcp-ui-actions button.approve { background: #10b981; color: white; }
+        .mcp-ui-actions button.reject { background: #ef4444; color: white; }
+        .mcp-ui-actions button:hover { filter: brightness(0.95); }
+    </style>
+</head>
+<body>
+    <article>
+        <header>
+            <h1>{{document.meta.title}}</h1>
+            <div class="meta">
+                {{#if document.meta.date}}<span>{{date document.meta.date 'MMMM D, YYYY'}}</span>{{/if}}
+                {{#if document.meta.author}} · <span>by {{document.meta.author}}</span>{{/if}}
+            </div>
+        </header>
+        <div class="body">{{markdown document.content}}</div>
+    </article>
+
+    <div class="mcp-ui-actions" role="group" aria-label="Preview actions">
+        <button class="approve" data-action="approve">Approve</button>
+        <button class="reject" data-action="reject">Reject</button>
+    </div>
+
+    <script>
+    // Sandboxed iframe → postMessage to the host. The host's MCP-UI
+    // shim forwards the action back to the tool call so the agent
+    // sees a structured result instead of natural-language guesses.
+    (function () {
+        const entityId = {{{json document.id}}}
+        document.querySelectorAll('[data-action]').forEach(button => {
+            button.addEventListener('click', () => {
+                window.parent.postMessage({
+                    type: 'mcp-ui/action',
+                    action: button.dataset.action,
+                    entityId: entityId,
+                }, '*')
+            })
+        })
+    })()
+    </script>
+</body>
+</html>
