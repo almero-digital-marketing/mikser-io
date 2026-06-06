@@ -10,7 +10,7 @@
 
 Built for Node.js around a strict lifecycle and a composable plugin system. Every document, asset, and template flows through the same pipeline; plugins hook in at any phase. The same engine runs a single markdown blog and a multi-language publishing platform with PDF / email / AI-augmented asset pipelines — same lifecycle, more plugins.
 
-It's MIT-licensed, runs on Node 18+, has zero hosted dependencies, and the entire content tree it manages is a folder of `.md` and `.yml` files you can copy, diff, and version-control. **The portability promise is the architecture, not a feature.**
+It's MIT-licensed, runs on Node, has zero hosted dependencies, and the entire content tree it manages is a folder of `.md` and `.yml` files you can copy, diff, and version-control. **The portability promise is the architecture, not a feature.**
 
 > **New to mikser?** Read the [Architecture Overview](./documentation/overview.md) — one document, end-to-end walkthrough of how a file becomes a deployed page across all twenty lifecycle phases. It's the doc most projects need first.
 
@@ -153,7 +153,7 @@ The engine is what stays stable — the lifecycle, the catalog, the file-based c
 
 ## Client SDKs
 
-The `api`, `vector`, and `schemas` plugins are paired with client-side SDKs so a frontend (or another Node app) can talk to a running mikser server without rolling its own `fetch` glue or type contracts. Zero dependencies, runs in browsers / Node 18+ / Deno / Bun / Workers.
+The `api`, `vector`, and `schemas` plugins are paired with client-side SDKs so a frontend (or another Node app) can talk to a running mikser server without rolling its own `fetch` glue or type contracts. Zero dependencies, runs in browsers / Node / Deno / Bun / Workers.
 
 **Transport-level:**
 
@@ -221,7 +221,7 @@ What you get from how this project is built:
 
 The earliest version of mikser was inspired by [DocPad](https://github.com/docpad/docpad) (Benjamin Lupton, with Michael Duane Mooring and Rob Loach). DocPad's "freeway, not a box" philosophy — files on disk, any pre-processor or template engine, plugin-by-convention extension — shaped how mikser started.
 
-Mikser itself has a previous chapter: the [legacy 7.x line](https://github.com/almero-digital-marketing/mikser) (last release 2022) introduced the real-time SSG model the current engine still carries forward. The redesign dropped MongoDB (the catalog lives in-process now, not in a database), modernized to Node 18+ ESM with a structured 20-phase lifecycle, added the live SSE channel that powers the framework SDKs, and replaced cluster-based rendering with an async worker pool. Same intent — content as files, real-time previews, multi-format output at scale — clearer foundations.
+Mikser itself has a previous chapter: the [legacy 7.x line](https://github.com/almero-digital-marketing/mikser) (last release 2022) introduced the real-time SSG model the current engine still carries forward. The redesign dropped MongoDB (the catalog lives in-process now, not in a database), modernized to Node ESM with a structured 20-phase lifecycle, added the live SSE channel that powers the framework SDKs, and replaced cluster-based rendering with an async worker pool. Same intent — content as files, real-time previews, multi-format output at scale — clearer foundations.
 
 ## Documentation Index
 
