@@ -84,7 +84,7 @@ Add `--mcp` to your mikser command and any MCP-speaking client — Claude Deskto
 - read every entity in the catalog
 - write new content files (markdown, layouts, configuration) — writes land on disk and the next cycle picks them up
 - render any layout for preview without touching the output folder
-- **surface rendered UI inline in the conversation** — `mikser_preview_ui` runs an entity through a layout that declares `mcpUi` frontmatter and returns the HTML as a UI block the host can show; an approve/reject button on that block sends the result straight back to the agent
+- **surface interactive UI inline in the conversation** — you author the UI as a normal mikser layout with YAML frontmatter (`mcpUi: { mode, actions }`). The agent reads `mikser://mcp-ui/modes` to discover what UIs your project supports, calls `mikser_preview_ui` to render one against an entity, and the host displays the result as a sandboxed iframe in the chat. Buttons in the UI `postMessage` their click back as the tool result — no separate UI framework, no glue code; layouts are still just layouts
 - watch every build log as it streams past
 - introspect engine state — current lifecycle phase, effective config, recent log buffer
 
@@ -103,7 +103,7 @@ When an AI agent edits ten files, the next question is: *did it do what I asked?
 - **"Did I update every article that needed it?"** — semantic search finds anything that still matches the old tone or phrasing the agent was supposed to change.
 - **"What else mentions this person, product, or topic?"** — mikser knows how content references content. "Show me every page that mentions Dick" returns the list instantly, no full-tree scan.
 - **"Did anything break?"** — if a reference points at something that no longer exists, mikser surfaces it as a warning. The build either completes cleanly or doesn't.
-- **"Can I see what this looks like before publishing?"** — render any single page or section on demand, no full rebuild, no staging deploy.
+- **"Can I see what this looks like before publishing?"** — render any single page or section on demand, no full rebuild, no staging deploy. With an `mcpUi` layout, the agent surfaces the rendered preview *inside the chat* with approve/reject controls; one click sends the result back as the tool response.
 - **"What changed since I last looked?"** — `git diff`. The catalog is plain files, so the audit trail is the same one your engineers already use for code.
 - **"Roll back this batch?"** — `git checkout`. Atomic. No database migration to undo, no version-history-feature to learn.
 
