@@ -259,6 +259,413 @@ A few constraints worth knowing when authoring `mcpUi` layouts:
 - **One source of truth for the body.** All renderers (`render-hbs`, `render-eta`, `render-liquid`) now read layout bodies from `entity.layout.content`. The frontmatter plugin strips the YAML before the renderer ever sees it.
 - **ECT is the exception.** `mikser-io-render-ect` still file-loads layouts through ECT's own resolver, so YAML frontmatter on `.ect` layouts renders as literal text. Pick `hbs` / `eta` / `liquid` for layouts that need `mcpUi` frontmatter.
 
+### Worked examples
+
+MCP-UI is a novel concept and the conventions get easier to internalise once you see them on real layouts. Seven examples below — varied template engines (`hbs`, `eta`, `liquid`), varied interaction patterns (pure render, single button, multi-action approval, form submission, multi-select picker, status switcher, multi-step wizard), varied domains (article, product, SEO, tags, support ticket, onboarding). Copy-and-modify is the intended workflow.
+
+Each agent call looks like `mikser_preview_ui({ entityId: '...', mode: '<mode>' })`. The host renders the returned HTML in a sandboxed iframe. Any `postMessage` from the iframe with `type: 'mcp-ui/action'` is bridged back to the tool result so the agent sees a structured response, not a natural-language guess.
+
+#### 1. Pure preview — no JS, no postMessage
+
+The minimum-viable case. The agent shows the user what an article looks like rendered; the user reads it; no interaction is needed. Use this when you just want a visual confirmation step.
+
+```hbs
+---
+match: "@/articles/*"
+mcpUi:
+  mode: preview
+  description: "Read-only article preview. Use to visually confirm a proposed edit before committing."
+  actions: []
+  sandbox: []
+---
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      body { font: 16px/1.6 system-ui, sans-serif; max-width: 680px; margin: 2em auto; padding: 0 1em; color: #1f2937; }
+      h1 { margin-bottom: 0.25em; }
+      .meta { color: #6b7280; font-size: 0.875em; margin-bottom: 1.5em; }
+    </style>
+  </head>
+  <body>
+    <article>
+      <h1>{{document.meta.title}}</h1>
+      <div class="meta">{{date document.meta.date 'MMMM D, YYYY'}}{{#if document.meta.author}} · by {{document.meta.author}}{{/if}}</div>
+      <div>{{markdown document.content}}</div>
+    </article>
+  </body>
+</html>
+```
+
+The empty `actions: []` and `sandbox: []` signal "this is read-only — no script execution needed." The agent invokes it and shows the result; the user reads it; the conversation continues. No back-channel.
+
+#### 2. Single-action button — publish / unpublish
+
+One button. One action name. Useful for binary state changes: publish a draft, archive a stale post, flag an issue.
+
+```hbs
+---
+match: "@/products/*"
+mcpUi:
+  mode: publish-switch
+  description: "Product publish switcher. Shows the current state and one button to flip it. Result includes the desired new state."
+  actions: [toggle-publish]
+  sandbox: [allow-scripts]
+---
+<!DOCTYPE html>
+<html>
+  <body style="font: 16px system-ui; padding: 2em;">
+    <h2>{{document.meta.title}}</h2>
+    <p>SKU: <code>{{document.meta.sku}}</code></p>
+    <p>Current status:
+      {{#if document.meta.published}}
+        <span style="color: #10b981;">● Published</span>
+      {{else}}
+        <span style="color: #6b7280;">● Draft</span>
+      {{/if}}
+    </p>
+    <button id="toggle" style="padding: 0.6em 1.4em; font-size: 1em; border: 0; border-radius: 4px; background: #2563eb; color: white; cursor: pointer;">
+      {{#if document.meta.published}}Unpublish{{else}}Publish now{{/if}}
+    </button>
+    <script>
+      document.getElementById('toggle').addEventListener('click', () => {
+        window.parent.postMessage({
+          type: 'mcp-ui/action',
+          action: 'toggle-publish',
+          entityId: {{{json document.id}}},
+          payload: { published: {{#if document.meta.published}}false{{else}}true{{/if}} },
+        }, '*')
+      })
+    </script>
+  </body>
+</html>
+```
+
+The payload includes the **desired new state**, computed by the template — so the agent doesn't have to flip the boolean itself. This is the cheapest pattern: one button, one structured result.
+
+#### 3. Multi-action approval — approve / reject / request-changes
+
+Three buttons, three actions. The agent's tool call resolves with whichever action the user clicked. Useful for moderation flows where the agent proposed an edit and wants explicit human consent.
+
+```hbs
+---
+match: "@/blog/*"
+mcpUi:
+  mode: approval
+  description: "Editorial approval for a blog post. Returns one of approve / reject / request-changes. For request-changes, payload includes a free-text note from the reviewer."
+  actions: [approve, reject, request-changes]
+  sandbox: [allow-scripts]
+---
+<!DOCTYPE html>
+<html>
+  <body style="font: 16px system-ui; max-width: 720px; margin: 2em auto; padding: 0 1em;">
+    <article>
+      <h1>{{document.meta.title}}</h1>
+      <div style="color: #6b7280; margin-bottom: 1em;">{{date document.meta.date 'MMM D, YYYY'}}</div>
+      <div>{{markdown document.content}}</div>
+    </article>
+
+    <hr style="margin: 2em 0; border: 0; border-top: 1px solid #e5e7eb;">
+
+    <div style="display: flex; gap: 0.5em; align-items: center;">
+      <button data-action="approve" style="background: #10b981; color: white; padding: 0.5em 1em; border: 0; border-radius: 4px; cursor: pointer;">Approve</button>
+      <button data-action="reject" style="background: #ef4444; color: white; padding: 0.5em 1em; border: 0; border-radius: 4px; cursor: pointer;">Reject</button>
+      <button data-action="request-changes" style="background: #f59e0b; color: white; padding: 0.5em 1em; border: 0; border-radius: 4px; cursor: pointer;">Request changes…</button>
+    </div>
+
+    <details style="margin-top: 1em;">
+      <summary style="cursor: pointer; color: #6b7280;">Note for the author (only sent with "Request changes")</summary>
+      <textarea id="note" rows="3" style="width: 100%; margin-top: 0.5em; padding: 0.5em; font: inherit;"></textarea>
+    </details>
+
+    <script>
+      const entityId = {{{json document.id}}}
+      document.querySelectorAll('[data-action]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const action = btn.dataset.action
+          const payload = action === 'request-changes'
+            ? { note: document.getElementById('note').value }
+            : {}
+          window.parent.postMessage({ type: 'mcp-ui/action', action, entityId, payload }, '*')
+        })
+      })
+    </script>
+  </body>
+</html>
+```
+
+Notice the structured payload only attaches when relevant. The agent's next step depends on the action: approve → publish; reject → log + notify; request-changes → re-edit with the note in context.
+
+#### 4. Form submission — SEO fields (Liquid)
+
+Show several fields with current values; collect edits; send a patch object back. Useful when the agent wants the user to fine-tune specific metadata without re-running an LLM pass.
+
+```liquid
+---
+match: "@/articles/*"
+mcpUi:
+  mode: edit-seo
+  description: "Edit SEO fields (title, description, og:image alt) inline. Result payload is a patch object with only the changed fields."
+  actions: [save, cancel]
+  sandbox: [allow-scripts]
+---
+<!DOCTYPE html>
+<html>
+<body style="font: 16px system-ui; max-width: 600px; margin: 2em auto; padding: 0 1em;">
+  <h2>SEO · {{ document.meta.title }}</h2>
+
+  <form id="seo" style="display: grid; gap: 1em;">
+    <label>
+      <div style="font-weight: 500;">Title (max 60 chars)</div>
+      <input name="seoTitle" value="{{ document.meta.seo.title }}" maxlength="60" style="width: 100%; padding: 0.5em; font: inherit;">
+    </label>
+    <label>
+      <div style="font-weight: 500;">Description (max 160 chars)</div>
+      <textarea name="seoDescription" rows="3" maxlength="160" style="width: 100%; padding: 0.5em; font: inherit;">{{ document.meta.seo.description }}</textarea>
+    </label>
+    <label>
+      <div style="font-weight: 500;">OG image alt</div>
+      <input name="ogImageAlt" value="{{ document.meta.seo.ogImageAlt }}" style="width: 100%; padding: 0.5em; font: inherit;">
+    </label>
+
+    <div style="display: flex; gap: 0.5em; margin-top: 0.5em;">
+      <button type="button" data-action="save"   style="background: #2563eb; color: white; padding: 0.5em 1em; border: 0; border-radius: 4px; cursor: pointer;">Save</button>
+      <button type="button" data-action="cancel" style="background: #e5e7eb; padding: 0.5em 1em; border: 0; border-radius: 4px; cursor: pointer;">Cancel</button>
+    </div>
+  </form>
+
+  <script>
+    const entityId = {{ document.id | json }}
+    const initial = {
+      seoTitle:       {{ document.meta.seo.title | json }},
+      seoDescription: {{ document.meta.seo.description | json }},
+      ogImageAlt:     {{ document.meta.seo.ogImageAlt | json }},
+    }
+    document.querySelectorAll('[data-action]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const action = btn.dataset.action
+        const payload = {}
+        if (action === 'save') {
+          const fd = new FormData(document.getElementById('seo'))
+          for (const [k, v] of fd.entries()) {
+            if (v !== initial[k]) payload[k] = v   // diff: only send changed fields
+          }
+        }
+        window.parent.postMessage({ type: 'mcp-ui/action', action, entityId, payload }, '*')
+      })
+    })
+  </script>
+</body>
+</html>
+```
+
+Note the diff-on-submit: the layout sends only the fields the user actually changed. The agent's next step is `mikser_api_update_entity({ id: entityId, patch: payload.seo })` — surgical writes, no clobbering.
+
+#### 5. Multi-select picker — tags (Eta)
+
+Show available choices, let the user multi-select, send the final selection back. Eta syntax here for variety; same idea works in any engine.
+
+```eta
+---
+match: "@/blog/*"
+mcpUi:
+  mode: tag-picker
+  description: "Multi-select tag picker. Payload is the final array of tag slugs (not a diff)."
+  actions: [save, cancel]
+  sandbox: [allow-scripts]
+---
+<!DOCTYPE html>
+<html>
+<body style="font: 16px system-ui; padding: 2em; max-width: 500px;">
+  <h3>Tags for: <%= it.document.meta.title %></h3>
+
+  <div id="tags" style="display: flex; flex-wrap: wrap; gap: 0.4em; margin: 1em 0;">
+    <% for (const tag of it.runtime.allTags || []) { %>
+      <% const selected = (it.document.meta.tags || []).includes(tag) %>
+      <button type="button" data-tag="<%= tag %>" class="<%= selected ? 'selected' : '' %>"
+        style="padding: 0.4em 0.8em; border-radius: 999px; border: 1px solid #d1d5db; background: <%= selected ? '#2563eb' : 'white' %>; color: <%= selected ? 'white' : '#1f2937' %>; cursor: pointer;">
+        <%= tag %>
+      </button>
+    <% } %>
+  </div>
+
+  <div style="display: flex; gap: 0.5em;">
+    <button data-action="save"   style="background: #10b981; color: white; padding: 0.5em 1em; border: 0; border-radius: 4px; cursor: pointer;">Save</button>
+    <button data-action="cancel" style="background: #e5e7eb; padding: 0.5em 1em; border: 0; border-radius: 4px; cursor: pointer;">Cancel</button>
+  </div>
+
+  <script>
+    const entityId = "<%= it.document.id %>"
+    document.querySelectorAll('[data-tag]').forEach(btn => {
+      btn.addEventListener('click', () => btn.classList.toggle('selected'))
+    })
+    document.querySelectorAll('[data-action]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const action = btn.dataset.action
+        const tags = Array.from(document.querySelectorAll('[data-tag].selected')).map(b => b.dataset.tag)
+        window.parent.postMessage({ type: 'mcp-ui/action', action, entityId, payload: { tags } }, '*')
+      })
+    })
+  </script>
+</body>
+</html>
+```
+
+`it.runtime.allTags` is exposed from a sidecar `tag-picker.eta.js` that populates the candidate list before render. The selection is sent as a flat array — the agent decides whether to compute a diff or just overwrite.
+
+#### 6. Status switcher — support ticket triage
+
+A row of mutually exclusive status options with the current one highlighted. One click → one action. Returns the chosen status as the payload.
+
+```hbs
+---
+match: "@/support/tickets/*"
+mcpUi:
+  mode: triage
+  description: "Set a support ticket's status. Returns one action `set-status` with the chosen value in payload.status."
+  actions: [set-status]
+  sandbox: [allow-scripts]
+---
+<!DOCTYPE html>
+<html>
+<body style="font: 16px system-ui; padding: 2em; max-width: 600px;">
+  <h2>Ticket #{{document.meta.ticketId}}</h2>
+  <p style="color: #6b7280;">{{document.meta.subject}}</p>
+  <blockquote style="border-left: 3px solid #e5e7eb; padding-left: 1em; margin: 1em 0; color: #4b5563;">
+    {{document.meta.firstMessage}}
+  </blockquote>
+
+  <div style="display: flex; gap: 0.5em; margin-top: 1.5em;">
+    {{#each (array "open" "in-progress" "waiting-on-customer" "resolved" "won't-fix")}}
+      <button data-status="{{this}}" style="padding: 0.5em 1em; border: 0; border-radius: 4px; cursor: pointer; background: {{#eq this ../document.meta.status}}#2563eb{{else}}#e5e7eb{{/eq}}; color: {{#eq this ../document.meta.status}}white{{else}}#1f2937{{/eq}};">
+        {{this}}
+      </button>
+    {{/each}}
+  </div>
+
+  <script>
+    const entityId = {{{json document.id}}}
+    document.querySelectorAll('[data-status]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        window.parent.postMessage({
+          type: 'mcp-ui/action',
+          action: 'set-status',
+          entityId,
+          payload: { status: btn.dataset.status },
+        }, '*')
+      })
+    })
+  </script>
+</body>
+</html>
+```
+
+Single action with a parameterised payload — the user picks the value, the agent's next step is uniform regardless of which status was chosen.
+
+#### 7. Multi-step wizard — onboarding flow
+
+The iframe holds its own state across multiple steps; only the final submission sends a postMessage. Good when the interaction is genuinely multi-step (multiple form pages, confirm-then-go) and bouncing through the agent between steps would be expensive.
+
+```hbs
+---
+match: "@/onboarding/*"
+mcpUi:
+  mode: setup
+  description: "Three-step onboarding wizard. The iframe handles steps internally; the agent only sees the final `complete` action with the merged answers, or `cancel` if abandoned."
+  actions: [complete, cancel]
+  sandbox: [allow-scripts]
+---
+<!DOCTYPE html>
+<html>
+<body style="font: 16px system-ui; padding: 2em; max-width: 520px;">
+  <div id="progress" style="display: flex; gap: 0.25em; margin-bottom: 2em;">
+    <div data-step="1" style="flex: 1; height: 4px; background: #2563eb;"></div>
+    <div data-step="2" style="flex: 1; height: 4px; background: #e5e7eb;"></div>
+    <div data-step="3" style="flex: 1; height: 4px; background: #e5e7eb;"></div>
+  </div>
+
+  <div data-step="1" class="step">
+    <h2>What's your team name?</h2>
+    <input name="teamName" style="width: 100%; padding: 0.5em; font: inherit;">
+  </div>
+  <div data-step="2" class="step" hidden>
+    <h2>How many people?</h2>
+    <input name="teamSize" type="number" min="1" max="10000" style="width: 100%; padding: 0.5em; font: inherit;">
+  </div>
+  <div data-step="3" class="step" hidden>
+    <h2>Primary content type?</h2>
+    <select name="contentType" style="width: 100%; padding: 0.5em; font: inherit;">
+      <option>blog</option>
+      <option>documentation</option>
+      <option>marketing-site</option>
+      <option>knowledge-base</option>
+    </select>
+  </div>
+
+  <div style="display: flex; gap: 0.5em; margin-top: 2em;">
+    <button id="back" style="background: #e5e7eb; padding: 0.5em 1em; border: 0; border-radius: 4px; cursor: pointer;" hidden>Back</button>
+    <button id="next" style="background: #2563eb; color: white; padding: 0.5em 1em; border: 0; border-radius: 4px; cursor: pointer;">Next</button>
+    <button id="cancel" style="margin-left: auto; background: transparent; color: #6b7280; padding: 0.5em 1em; border: 0; cursor: pointer;">Cancel</button>
+  </div>
+
+  <script>
+    const entityId = {{{json document.id}}}
+    const state = { step: 1, answers: {} }
+    const totalSteps = 3
+
+    function render() {
+      document.querySelectorAll('[data-step].step').forEach(el => {
+        el.hidden = Number(el.dataset.step) !== state.step
+      })
+      document.querySelectorAll('#progress [data-step]').forEach(el => {
+        el.style.background = Number(el.dataset.step) <= state.step ? '#2563eb' : '#e5e7eb'
+      })
+      document.getElementById('back').hidden = state.step === 1
+      document.getElementById('next').textContent = state.step === totalSteps ? 'Done' : 'Next'
+    }
+    function captureCurrent() {
+      const input = document.querySelector(`[data-step="${state.step}"].step input, [data-step="${state.step}"].step select`)
+      if (input) state.answers[input.name] = input.value
+    }
+
+    document.getElementById('next').addEventListener('click', () => {
+      captureCurrent()
+      if (state.step < totalSteps) { state.step++; render() }
+      else {
+        window.parent.postMessage({
+          type: 'mcp-ui/action', action: 'complete', entityId, payload: state.answers,
+        }, '*')
+      }
+    })
+    document.getElementById('back').addEventListener('click', () => {
+      captureCurrent(); state.step--; render()
+    })
+    document.getElementById('cancel').addEventListener('click', () => {
+      window.parent.postMessage({ type: 'mcp-ui/action', action: 'cancel', entityId, payload: {} }, '*')
+    })
+    render()
+  </script>
+</body>
+</html>
+```
+
+State lives inside the iframe; the agent only sees the final merged answers (or `cancel`). One tool call covers the whole wizard. This pattern is worth it when the back-and-forth would otherwise burn 3–4 agent turns.
+
+### Design principles
+
+The seven examples above lean on the same conventions. Worth naming them so they're easy to extend.
+
+- **`postMessage({ type: 'mcp-ui/action', action, entityId, payload })` is the contract.** All four fields. `action` is one of the names you declared in `mcpUi.actions`. `entityId` is included so the host can sanity-check the message belongs to the in-flight tool call. `payload` is whatever structured data the user produced — keep it small and JSON-serialisable.
+- **Embed entity data with `{{{json document.id}}}` (or the equivalent in your engine).** Triple-stash in Handlebars / `| json` in Liquid / `<%= it.x %>` after JSON.stringify in Eta. This prevents injection if a field contains quotes — never interpolate raw string fields into a `'string-literal'` in script tags.
+- **Pick the smallest sandbox that works.** Pure render: `sandbox: []` (no scripts at all). Click-only interaction: `sandbox: [allow-scripts]`. Form submission with POST elsewhere (rare): you'll need more, and you're probably over-scoping the layout. Don't ship `allow-same-origin` casually — it lifts most of the cross-origin protection.
+- **Send only what changed.** Multi-field forms (#4) should diff against the initial values and post only the deltas. Single-state toggles (#2, #6) send the target state, not the current state. Wizards (#7) send the merged final answers. Smaller payloads are cheaper for the agent to reason about.
+- **Style inline, ship self-contained.** No external CSS, no web fonts, no analytics — the iframe has no `fetch` and the host may strip referenced URLs. System fonts (`font-family: system-ui`) and inline `<style>` are fine; everything that needs to render must be in the returned HTML.
+- **Use the layout body to compute what the agent shouldn't.** Example #2's payload pre-computes the *new* publish state. Example #4 pre-computes the diff. Pushing logic to render-time means the agent receives ready-to-act-on data rather than raw inputs it has to interpret.
+- **Don't smuggle long content through the payload.** If the user types a 2000-word note, post it back as a reference id and `mikser_api_read_entity` it later — not as a single huge `payload.note` string. Tool results live in the agent's context window.
+
+These conventions aren't enforced by the engine — they're just what makes layouts compose with agents cleanly. Hosts that implement the Apps extension fully will eventually add more affordances (rich text fields, file uploads, in-iframe MCP tool calls). For today, plain HTML + `postMessage` covers the vast majority of useful interactions.
+
 ## Built-in resources
 
 Five introspection resources ship with core — read-only views into the running engine. They use the `mikser://` scheme and return JSON.
