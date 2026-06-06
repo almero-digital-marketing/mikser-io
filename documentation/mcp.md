@@ -244,7 +244,9 @@ mcpUi:
 </html>
 ```
 
-When the agent calls `mikser_preview_ui({ entityId: '/articles/launch', mode: 'preview' })`:
+**Discovery.** Before calling `mikser_preview_ui`, the agent should read `mikser://mcp-ui/modes` to see which modes are actually available in this project and which entity patterns each one covers. The resource is derived live from layout frontmatter, so adding a new `mcpUi`-decorated layout makes the new mode immediately discoverable — no tool re-registration, no restart.
+
+**Dispatch.** When the agent calls `mikser_preview_ui({ entityId: '/articles/launch', mode: 'preview' })`:
 
 1. The plugin walks the catalog for layouts where `meta.mcpUi.mode === 'preview'`.
 2. Among those, it picks the one whose `meta.match` pattern matches the entity (using mikser's `matchEntity` — same matcher used by the layouts plugin).
@@ -270,6 +272,12 @@ Five introspection resources ship with core — read-only views into the running
 | `mikser://logs/recent`    | Rolling 500-line buffer of log lines. Each carries `seq`, `level`, and `data.msg`.              |
 
 Use the log buffer to debug failures that scrolled past the live `notifications/message` stream — e.g. an AI joining mid-cycle can read what happened before its session opened.
+
+Plugins can register their own resources under `mikser://`. The `preview` plugin ships one:
+
+| Resource                  | What it shows                                                                                  |
+| ------------------------- | ---------------------------------------------------------------------------------------------- |
+| `mikser://mcp-ui/modes`   | Live list of `mcpUi` modes and their candidate layouts (one entry per layout: id, match pattern, description, actions, sandbox flags). Derived from layout frontmatter at read time — newly added layouts show up without restarts. Read this before calling `mikser_preview_ui` to discover what the project supports instead of guessing mode names. |
 
 ## Twelve scenarios
 

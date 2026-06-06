@@ -232,9 +232,57 @@ export default ({
             defaultTimeout: runtime.config.preview?.renderTimeout ?? 30_000,
         })
 
+        // Discovery resource. Read this BEFORE calling mikser_preview_ui
+        // to learn which modes exist in the current project and which
+        // entity patterns each one covers — saves a round of guess-and-
+        // retry on mode names. Derived live from the catalog, so newly
+        // added layouts show up without restarts or tool re-registration.
+        mcp.registerResource(
+            'mikser-mcp-ui-modes',
+            'mikser://mcp-ui/modes',
+            {
+                title: 'MCP-UI modes available in this project',
+                description: 'Live list of mcpUi modes and their candidate layouts, derived from layout frontmatter. Read this to discover what mikser_preview_ui can do before calling it.',
+                mimeType: 'application/json',
+            },
+            async (uri) => {
+                const all = await findEntities()
+                const layouts = all.filter(l =>
+                    l.collection === 'layouts' && l.meta?.mcpUi)
+                const modes = {}
+                for (const layout of layouts) {
+                    const m = layout.meta.mcpUi
+                    const mode = m.mode ?? 'preview'
+                    if (!modes[mode]) modes[mode] = []
+                    modes[mode].push({
+                        layoutId:    layout.id,
+                        match:       layout.meta.match ?? null,
+                        description: m.description ?? null,
+                        actions:     m.actions     ?? [],
+                        sandbox:     m.sandbox     ?? ['allow-scripts'],
+                    })
+                }
+                return {
+                    contents: [{
+                        uri: uri.href,
+                        mimeType: 'application/json',
+                        text: JSON.stringify({
+                            modes,
+                            totalLayouts: layouts.length,
+                            notes: [
+                                "Modes are derived from layout.meta.mcpUi.mode (defaults to 'preview' when omitted).",
+                                'Each candidate has a `match` pattern. mikser_preview_ui matches your entityId against these patterns when you call it with that mode.',
+                                'Layouts without `mcpUi` frontmatter are not listed here and not eligible for mikser_preview_ui.',
+                            ],
+                        }, null, 2),
+                    }],
+                }
+            },
+        )
+
         mcp.simpleTool(
             'mikser_preview_ui',
-            'Render an entity to inline HTML using a layout that declares `mcpUi` frontmatter. Selects the layout by matching `entityId` against `layout.meta.match` and filtering on `mode`. Returns the rendered HTML plus action metadata (postMessage names the UI emits) so the host can surface it as a UI block in the conversation. Common modes: "preview" (read-only), "edit" (form-based), "approval" (approve/reject). Layouts without `mcpUi` frontmatter are not eligible.',
+            'Render an entity to inline HTML using a layout that declares `mcpUi` frontmatter. Selects the layout by matching `entityId` against `layout.meta.match` and filtering on `mode`. Returns the rendered HTML plus action metadata (postMessage names the UI emits) so the host can surface it as a UI block in the conversation. **Read `mikser://mcp-ui/modes` first** to discover which modes and entity patterns this project supports — the resource is derived live from layout frontmatter. Layouts without `mcpUi` frontmatter are not eligible.',
             {
                 entityId: z.string().describe('Entity to render, e.g. "/articles/2026-launch".'),
                 mode: z.string().optional().describe('Which UI mode to render. Defaults to "preview". Available modes are whatever your layouts declare as `mcpUi.mode`.'),
@@ -323,7 +371,7 @@ export default ({
         )
 
         const logger = useLogger()
-        logger.debug('MCP tool registered: mikser_preview_ui (preview plugin)')
+        logger.debug('MCP tool registered: mikser_preview_ui + mikser://mcp-ui/modes resource (preview plugin)')
     })
 
     return { name: 'preview' }

@@ -4,19 +4,22 @@ import assert from 'node:assert/strict'
 import previewPlugin from '../../../src/plugins/preview.js'
 import { createHarness } from '../plugin-harness.js'
 
-// A minimal MCP shim — captures simpleTool registrations so tests can
-// invoke the handlers directly without booting the real MCP server.
+// A minimal MCP shim — captures simpleTool / registerResource calls so
+// tests can invoke the handlers directly without booting the real MCP.
 function fakeMcp() {
     const tools = new Map()
+    const resources = new Map()
     return {
         registered: tools,
+        resources,
         simpleTool(name, description, inputSchema, handler) {
             tools.set(name, { description, inputSchema, handler })
         },
-        // Pass-throughs for the substrate's other surfaces — preview
-        // plugin only uses simpleTool, so these are no-ops.
+        registerResource(name, uri, metadata, handler) {
+            resources.set(uri, { name, metadata, handler })
+        },
+        // Pass-throughs for surfaces preview plugin doesn't use.
         registerTool() {},
-        registerResource() {},
         registerPrompt() {},
     }
 }
@@ -155,6 +158,129 @@ describe('preview plugin: mikser_preview_ui dispatch', () => {
 
         assert.equal(result.isError, true)
         assert.match(result.content[0].text, /No layouts found with mcpUi\.mode="approval"/)
+    })
+
+    it('registers the mikser://mcp-ui/modes discovery resource alongside the tool', async () => {
+        const { h, mcp } = withMcp()
+        await h.runHook('loaded')
+        assert.ok(mcp.resources.has('mikser://mcp-ui/modes'),
+            'preview plugin should register the mcp-ui modes resource')
+    })
+
+    it('mikser://mcp-ui/modes returns an empty modes map when no layouts declare mcpUi', async () => {
+        const plainLayout = {
+            id: '/layouts/article.hbs',
+            collection: 'layouts',
+            type: 'layout',
+            name: 'article',
+            meta: { match: '@/articles/*' },  // no mcpUi key
+        }
+        const { h, mcp } = withMcp({}, [plainLayout])
+        await h.runHook('loaded')
+
+        const resource = mcp.resources.get('mikser://mcp-ui/modes')
+        const result = await resource.handler(new URL('mikser://mcp-ui/modes'))
+        const payload = JSON.parse(result.contents[0].text)
+
+        assert.deepEqual(payload.modes, {})
+        assert.equal(payload.totalLayouts, 0)
+    })
+
+    it('mikser://mcp-ui/modes groups layouts by mode with match patterns and actions', async () => {
+        const previewArticle = {
+            id: '/layouts/article-preview.hbs',
+            collection: 'layouts',
+            type: 'layout',
+            name: 'article-preview',
+            meta: {
+                match: '@/articles/*',
+                mcpUi: {
+                    mode: 'preview',
+                    description: 'Article preview',
+                    actions: ['approve', 'reject'],
+                },
+            },
+        }
+        const previewProduct = {
+            id: '/layouts/product-preview.hbs',
+            collection: 'layouts',
+            type: 'layout',
+            name: 'product-preview',
+            meta: {
+                match: '@/products/*',
+                mcpUi: { mode: 'preview', actions: ['approve'] },
+            },
+        }
+        const editArticle = {
+            id: '/layouts/article-edit.hbs',
+            collection: 'layouts',
+            type: 'layout',
+            name: 'article-edit',
+            meta: {
+                match: '@/articles/*',
+                mcpUi: { mode: 'edit', actions: ['save', 'cancel'] },
+            },
+        }
+        // A layout with mcpUi but no explicit mode — defaults to 'preview'.
+        const defaultModeLayout = {
+            id: '/layouts/landing.hbs',
+            collection: 'layouts',
+            type: 'layout',
+            name: 'landing',
+            meta: { match: '@/landing/*', mcpUi: { description: 'Landing' } },
+        }
+
+        const { h, mcp } = withMcp({}, [previewArticle, previewProduct, editArticle, defaultModeLayout])
+        await h.runHook('loaded')
+
+        const resource = mcp.resources.get('mikser://mcp-ui/modes')
+        const result = await resource.handler(new URL('mikser://mcp-ui/modes'))
+        const payload = JSON.parse(result.contents[0].text)
+
+        assert.equal(payload.totalLayouts, 4)
+        assert.equal(payload.modes.preview.length, 3, 'three layouts in preview mode (two explicit + one default)')
+        assert.equal(payload.modes.edit.length, 1)
+
+        // Spot-check the shape of one candidate.
+        const articleEntry = payload.modes.preview.find(c => c.layoutId === '/layouts/article-preview.hbs')
+        assert.ok(articleEntry)
+        assert.equal(articleEntry.match, '@/articles/*')
+        assert.equal(articleEntry.description, 'Article preview')
+        assert.deepEqual(articleEntry.actions, ['approve', 'reject'])
+        assert.deepEqual(articleEntry.sandbox, ['allow-scripts']) // default sandbox
+
+        // Default-mode layout landed under 'preview'.
+        const landingEntry = payload.modes.preview.find(c => c.layoutId === '/layouts/landing.hbs')
+        assert.ok(landingEntry, 'layout without explicit mcpUi.mode should default to preview')
+    })
+
+    it('mikser://mcp-ui/modes excludes non-layout entities even if they have mcpUi-shaped meta', async () => {
+        // Defensive: the resource filters by collection === 'layouts',
+        // so a stray document.meta.mcpUi can't pollute the discovery list.
+        const layout = {
+            id: '/layouts/article-preview.hbs',
+            collection: 'layouts',
+            type: 'layout',
+            name: 'article-preview',
+            meta: { match: '@/articles/*', mcpUi: { mode: 'preview' } },
+        }
+        const docWithStrayMcpUi = {
+            id: '/articles/launch',
+            collection: 'documents',
+            type: 'document',
+            name: 'articles/launch',
+            meta: { mcpUi: { mode: 'rogue' } },
+        }
+
+        const { h, mcp } = withMcp({}, [layout, docWithStrayMcpUi])
+        await h.runHook('loaded')
+
+        const resource = mcp.resources.get('mikser://mcp-ui/modes')
+        const result = await resource.handler(new URL('mikser://mcp-ui/modes'))
+        const payload = JSON.parse(result.contents[0].text)
+
+        assert.equal(payload.totalLayouts, 1)
+        assert.equal(payload.modes.rogue, undefined, 'document.meta.mcpUi must not surface as a mode')
     })
 
     it('defaults mode to "preview" when not supplied', async () => {
