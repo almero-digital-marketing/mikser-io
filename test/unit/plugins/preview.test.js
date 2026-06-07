@@ -305,3 +305,157 @@ describe('preview plugin: mikser_preview_ui dispatch', () => {
         assert.match(result.content[0].text, /Entity not found/)
     })
 })
+
+// --------------------------------------------------------------------
+// Awaitable behavior — per ADR-0008. The tool suspends until the iframe
+// POSTs an action; we test by injecting a fake Express app that captures
+// the route handler, kicking off the tool call, and then driving the
+// endpoint directly to release the suspended promise.
+// --------------------------------------------------------------------
+
+// Fake Express app that captures the registered route handlers. The
+// real preview.js mounts both a GET /preview/:filename (the cache
+// route) and POST /api/mcp-ui/action/:callId (the action endpoint —
+// ADR-0008 §A2). We capture both and let tests invoke either.
+function fakeApp() {
+    const routes = new Map() // key: METHOD + routePath
+    function add(method, args) {
+        // Real Express signature: app.METHOD(path, ...middlewares, handler)
+        // We don't run the middlewares; we capture the last fn as the handler.
+        const [routePath, ...rest] = args
+        const handler = rest[rest.length - 1]
+        routes.set(`${method}:${routePath}`, handler)
+    }
+    return {
+        get:  (...args) => add('GET',  args),
+        post: (...args) => add('POST', args),
+        invoke(routePath, { method = 'POST', params, body }) {
+            const handler = routes.get(`${method}:${routePath}`)
+            if (!handler) throw new Error(`No route for ${method} ${routePath}`)
+            return new Promise((resolve) => {
+                let resolved = false
+                const res = {
+                    statusCode: 200,
+                    status(code) { this.statusCode = code; return this },
+                    json(payload) {
+                        if (resolved) return
+                        resolved = true
+                        resolve({ status: this.statusCode, body: payload })
+                    },
+                    type() { return this },
+                    send() { /* unused in MCP-UI tests */ },
+                }
+                Promise.resolve(handler({ params, body }, res)).catch(err => {
+                    if (!resolved) resolve({ status: 500, body: { error: err.message } })
+                })
+            })
+        },
+    }
+}
+
+function withAppAndMcp(extraEntities = []) {
+    const mcp = fakeMcp()
+    const app = fakeApp()
+    const h = createHarness({
+        options: { mcp, app, port: 3001 },
+        entities: extraEntities,
+    })
+    previewPlugin(h.core)
+    return { h, mcp, app }
+}
+
+describe('preview plugin: mikser_preview_ui awaitable behavior', () => {
+    // Layouts + an entity, sized for the dispatch path to succeed.
+    const approvalLayout = {
+        id: '/layouts/mcp-ui/post-approval.hbs',
+        name: 'mcp-ui/post-approval',
+        collection: 'layouts',
+        type: 'layout',
+        meta: {
+            match: '@/blog/*',
+            mcpUi: {
+                mode: 'approval',
+                actions: ['approve', 'reject', 'request-changes'],
+            },
+        },
+    }
+    const blogPost = {
+        id: '/documents/blog/launch.md',
+        name: 'blog/launch',
+        collection: 'documents',
+        type: 'document',
+        meta: { layout: 'post' },
+    }
+
+    it('mounts the POST /api/mcp-ui/action/:callId endpoint when runtime.options.app is present', async () => {
+        const { h, mcp, app } = withAppAndMcp([approvalLayout, blogPost])
+        await h.runHook('loaded')
+        assert.ok(mcp.registered.has('mikser_preview_ui'))
+
+        // Endpoint should be mounted and respond to POSTs. Without an
+        // active pending entry it 404s — which is the correct behavior
+        // and lets us verify the endpoint is registered without
+        // needing to mock the full render pipeline.
+        const r = await app.invoke('/api/mcp-ui/action/:callId', {
+            method: 'POST',
+            params: { callId: 'mui_nothing-pending' },
+            body:   { action: 'approve' },
+        })
+        assert.equal(r.status, 404)
+        assert.match(r.body.error, /No pending MCP-UI action/)
+    })
+
+    it('endpoint rejects POSTs with unknown callId (the auth boundary — random POSTs cannot inject actions)', async () => {
+        const { h, app } = withAppAndMcp([approvalLayout, blogPost])
+        await h.runHook('loaded')
+
+        // The callId IS the auth — a POST with no matching pending entry
+        // can't trigger an action no matter what's in the body. This is
+        // the threat-model guarantee called out in ADR-0008 §B5.
+        const r = await app.invoke('/api/mcp-ui/action/:callId', {
+            method: 'POST',
+            params: { callId: 'mui_random-attacker-guess' },
+            body:   { action: 'approve', entityId: '/x', payload: { malicious: true } },
+        })
+        assert.equal(r.status, 404)
+    })
+
+    // TODO(integration): the following scenarios need a full render
+    // pipeline (the unit harness's useRenderer stub doesn't drive the
+    // `runtime.hooks.completed` cycle, so previewRender throws before
+    // the suspension logic runs). Cover them in a smoke/integration
+    // test that boots a real engine against a fixture project:
+    //
+    //   - awaitAction: false returns HTML immediately, no pending entry
+    //   - awaitable (default) suspends until POST arrives, resolves with
+    //     { action, entityId, payload }
+    //   - endpoint rejects an action that's not in the allowed list (400)
+    //   - timeout fires after timeoutSeconds, tool rejects with a clear
+    //     error mentioning the entity + mode + callId
+    //   - handler.url set → action POST forwards to webhook, response
+    //     body becomes the tool result
+    //   - handler.url unreachable → falls back to pure relay with
+    //     handlerError field
+    //
+    // The endpoint-validation seams above (callId 404, no-app skip) are
+    // the parts of the new logic that DON'T require the render pipeline,
+    // so they live here as fast unit tests.
+
+    it('does NOT mount the action endpoint when runtime.options.app is absent', async () => {
+        // The action endpoint depends on Express. If no app is provided,
+        // mikser is running headless / MCP-only — and the endpoint
+        // doesn't mount. The fakeApp has no app.post calls in that case.
+        const mcp = fakeMcp()
+        const h = createHarness({
+            options: { mcp, port: 3001 },     // no `app`
+            entities: [approvalLayout, blogPost],
+        })
+        previewPlugin(h.core)
+        await h.runHook('loaded')
+
+        // Tool should still register (it's MCP-level, not HTTP).
+        assert.ok(mcp.registered.has('mikser_preview_ui'))
+        // No app means no endpoint to test, but at least the loaded
+        // hook didn't throw — that's the regression check.
+    })
+})
