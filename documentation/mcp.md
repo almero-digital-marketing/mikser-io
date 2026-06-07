@@ -205,7 +205,7 @@ Tool ownership follows the plugin that owns the concept. Core ships one tool (th
 | Tool              | What it does                                                                          |
 | ----------------- | ------------------------------------------------------------------------------------- |
 | `mikser_preview_render`  | Render an entity AND surface the output at a clickable `http://localhost:<port>/preview/<id>.<ext>` URL. Previews live in memory (not on disk, never under `outputFolder`), auto-expire (default 10 min), and LRU-evict past a 100 MB cap. Requires `--server`. |
-| `mikser_preview_ui`      | Render an entity to **inline HTML** using a layout that declares `mcpUi` frontmatter, and return it as a UI block the host can surface inside the conversation. Selects the layout by matching `entityId` against `layout.meta.match` and filtering on `mode` (`preview` / `edit` / `approval` / your own). Returns the rendered HTML plus action metadata (postMessage names the UI emits, sandbox flags) so the host can wire up an interactive iframe. See [Layout frontmatter](#layout-frontmatter-and-mcp-ui) below. |
+| `mikser_preview_ui`      | Render an entity to **inline HTML** using a layout that declares `mcpUi` frontmatter, and return it as a UI block the host can surface inside the conversation. Selects the layout by matching `entityId` against `layout.meta.match` and filtering on `mode` (`preview` / `edit` / `approval` / your own). The call is **awaitable** by default — the tool suspends until the user clicks something in the iframe (delivered via `POST /api/mcp-ui/action/:callId` or bridged from `window.parent.postMessage`), then resolves with `{action, entityId, payload}` as the tool result. Layouts may declare `mcpUi.handler.url` to forward the action to an external webhook and use its response as the result. See [Layout frontmatter](#layout-frontmatter-and-mcp-ui) and [ADR-0008](./decisions/0008-mcp-ui-action-delivery.md). |
 
 Other plugins are expected to follow the same shape — `vector` will add `find_similar`, `schemas` will add `list_schemas` / `get_schema_shape`, and so on.
 
@@ -219,11 +219,14 @@ match: "@/articles/*"
 mcpUi:
   mode: preview                # or "edit", "approval", or your own
   description: "Article preview with approve/reject controls"
-  actions:                     # postMessage names the UI emits
+  actions:                     # action names the UI is allowed to emit
     - approve
     - reject
   sandbox:                     # iframe sandbox flags the host should apply
     - allow-scripts
+  # handler:                   # optional — see "Optional webhook handler" below
+  #   url: https://review.example.com/mikser/action
+  #   secret: env:REVIEW_SIGNING_SECRET
 ---
 <!DOCTYPE html>
 <html>
@@ -232,12 +235,29 @@ mcpUi:
     <button data-action="approve">Approve</button>
     <button data-action="reject">Reject</button>
     <script>
+      // Two delivery paths — see ADR-0008. postMessage is the host's
+      // bridge for MCP-UI Apps hosts. fetch is the canonical path that
+      // resolves the suspended `mikser_preview_ui` tool call directly
+      // (mikser injects callId + actionUrl into entity.meta._mcpUi).
+      const entityId  = {{{json document.id}}}
+      const callId    = {{{json document.meta._mcpUi.callId}}}
+      const actionUrl = {{{json document.meta._mcpUi.actionUrl}}}
+
+      async function sendAction (action, payload = {}) {
+        try {
+          window.parent.postMessage(
+            { type: 'mcp-ui/action', action, entityId, callId, payload }, '*',
+          )
+        } catch { /* best-effort */ }
+        return fetch(actionUrl, {
+          method:  'POST',
+          headers: { 'content-type': 'application/json' },
+          body:    JSON.stringify({ action, entityId, payload }),
+        })
+      }
+
       document.querySelectorAll('[data-action]').forEach(b =>
-        b.addEventListener('click', () => window.parent.postMessage({
-          type: 'mcp-ui/action',
-          action: b.dataset.action,
-          entityId: {{{json document.id}}},
-        }, '*'))
+        b.addEventListener('click', () => sendAction(b.dataset.action)),
       )
     </script>
   </body>
@@ -250,11 +270,15 @@ mcpUi:
 
 1. The plugin walks the catalog for layouts where `meta.mcpUi.mode === 'preview'`.
 2. Among those, it picks the one whose `meta.match` pattern matches the entity (using mikser's `matchEntity` — same matcher used by the layouts plugin).
-3. It runs the layout through the renderer chain (`render-hbs`, `render-eta`, `render-liquid`, etc.) and returns the HTML inline plus `_meta.mcpUi` containing the declared actions and sandbox flags.
+3. It mints a single-use `callId`, registers a pending entry, and injects `_mcpUi.{callId, actionUrl}` into the render context.
+4. It runs the layout through the renderer chain (`render-hbs`, `render-eta`, `render-liquid`, etc.) and returns the HTML inline plus `_meta.mcpUi` containing the declared actions and sandbox flags.
+5. The tool **suspends** until either (a) `POST /api/mcp-ui/action/:callId` arrives — that resolves the call with `{action, entityId, payload}` (or the handler's response, if `mcpUi.handler.url` is set), or (b) `timeoutSeconds` elapses. Pass `awaitAction: false` to opt out and get the HTML back synchronously.
+
+**Optional webhook handler.** A layout that declares `mcpUi.handler.url` makes mikser forward each action POST to that external URL (HMAC-signed if `handler.secret` is set, JSON body with `callId`, `entityId`, `action`, `payload`, `layoutId`, `mode`, `timestamp`). Whatever the handler returns as JSON becomes the tool result. If the handler fails or times out, mikser falls back to pure-relay with a `handlerError` field so the user's click is never silently lost. Mikser stays a content engine; the handler is where application semantics live. See [ADR-0008](./decisions/0008-mcp-ui-action-delivery.md).
 
 A few constraints worth knowing when authoring `mcpUi` layouts:
 
-- **The iframe has no `fetch`.** Hosts sandbox UI blocks tightly — assume no network from inside the rendered HTML. Use `postMessage` to send actions back; the host bridges them to the tool result.
+- **The iframe is same-origin with mikser, so `fetch` to `_mcpUi.actionUrl` works.** This is the canonical delivery path. `postMessage` is still useful as a host-bridge signal for MCP-UI Apps hosts that wire it through to the tool result, but a layout that only posts a message will work in *some* hosts and silently hang in others. Doing both is cheap and makes the layout portable.
 - **Same layout system, different output path.** The MCP-UI layout doesn't have to be the same file as your production layout; declare a focused, sandbox-safe variant under a distinct name. mikser's auto-match won't pick it up for normal rendering as long as the filename doesn't collide.
 - **One source of truth for the body.** All renderers (`render-hbs`, `render-eta`, `render-liquid`) now read layout bodies from `entity.layout.content`. The frontmatter plugin strips the YAML before the renderer ever sees it.
 - **ECT is the exception.** `mikser-io-render-ect` still file-loads layouts through ECT's own resolver, so YAML frontmatter on `.ect` layouts renders as literal text. Pick `hbs` / `eta` / `liquid` for layouts that need `mcpUi` frontmatter.
@@ -263,11 +287,11 @@ A few constraints worth knowing when authoring `mcpUi` layouts:
 
 MCP-UI is a novel concept and the conventions get easier to internalise once you see them on real layouts. Seven examples below — varied template engines (`hbs`, `eta`, `liquid`), varied interaction patterns (pure render, single button, multi-action approval, form submission, multi-select picker, status switcher, multi-step wizard), varied domains (article, product, SEO, tags, support ticket, onboarding). Copy-and-modify is the intended workflow.
 
-Each agent call looks like `mikser_preview_ui({ entityId: '...', mode: '<mode>' })`. The host renders the returned HTML in a sandboxed iframe. Any `postMessage` from the iframe with `type: 'mcp-ui/action'` is bridged back to the tool result so the agent sees a structured response, not a natural-language guess.
+Each agent call looks like `mikser_preview_ui({ entityId: '...', mode: '<mode>' })`. The host renders the returned HTML in a sandboxed iframe; the tool call **suspends** until the user clicks something. Examples 2–7 use the same dual-path `sendAction()` helper shown in the canonical sample above — a `fetch` to `_mcpUi.actionUrl` (canonical, resolves the suspended tool call regardless of host) plus a best-effort `window.parent.postMessage` (for hosts that bridge it). Either path delivers `{action, entityId, payload}` back to the agent as the structured tool result.
 
-#### 1. Pure preview — no JS, no postMessage
+#### 1. Pure preview — no JS, no action delivery
 
-The minimum-viable case. The agent shows the user what an article looks like rendered; the user reads it; no interaction is needed. Use this when you just want a visual confirmation step.
+The minimum-viable case. The agent shows the user what an article looks like rendered; the user reads it; no interaction is needed. Use this when you just want a visual confirmation step — call `mikser_preview_ui({ ..., awaitAction: false })` so the tool returns the HTML synchronously without registering a pending action.
 
 ```hbs
 ---
@@ -329,14 +353,16 @@ mcpUi:
       {{#if document.meta.published}}Unpublish{{else}}Publish now{{/if}}
     </button>
     <script>
-      document.getElementById('toggle').addEventListener('click', () => {
-        window.parent.postMessage({
-          type: 'mcp-ui/action',
-          action: 'toggle-publish',
-          entityId: {{{json document.id}}},
-          payload: { published: {{#if document.meta.published}}false{{else}}true{{/if}} },
-        }, '*')
-      })
+      const entityId  = {{{json document.id}}}
+      const callId    = {{{json document.meta._mcpUi.callId}}}
+      const actionUrl = {{{json document.meta._mcpUi.actionUrl}}}
+      async function sendAction (action, payload = {}) {
+        try { window.parent.postMessage({ type: 'mcp-ui/action', action, entityId, callId, payload }, '*') } catch {}
+        return fetch(actionUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, entityId, payload }) })
+      }
+      document.getElementById('toggle').addEventListener('click', () =>
+        sendAction('toggle-publish', { published: {{#if document.meta.published}}false{{else}}true{{/if}} })
+      )
     </script>
   </body>
 </html>
@@ -380,14 +406,20 @@ mcpUi:
     </details>
 
     <script>
-      const entityId = {{{json document.id}}}
+      const entityId  = {{{json document.id}}}
+      const callId    = {{{json document.meta._mcpUi.callId}}}
+      const actionUrl = {{{json document.meta._mcpUi.actionUrl}}}
+      async function sendAction (action, payload = {}) {
+        try { window.parent.postMessage({ type: 'mcp-ui/action', action, entityId, callId, payload }, '*') } catch {}
+        return fetch(actionUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, entityId, payload }) })
+      }
       document.querySelectorAll('[data-action]').forEach(btn => {
         btn.addEventListener('click', () => {
           const action = btn.dataset.action
           const payload = action === 'request-changes'
             ? { note: document.getElementById('note').value }
             : {}
-          window.parent.postMessage({ type: 'mcp-ui/action', action, entityId, payload }, '*')
+          sendAction(action, payload)
         })
       })
     </script>
@@ -436,7 +468,13 @@ mcpUi:
   </form>
 
   <script>
-    const entityId = {{ document.id | json }}
+    const entityId  = {{ document.id | json }}
+    const callId    = {{ document.meta._mcpUi.callId | json }}
+    const actionUrl = {{ document.meta._mcpUi.actionUrl | json }}
+    async function sendAction (action, payload = {}) {
+      try { window.parent.postMessage({ type: 'mcp-ui/action', action, entityId, callId, payload }, '*') } catch {}
+      return fetch(actionUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, entityId, payload }) })
+    }
     const initial = {
       seoTitle:       {{ document.meta.seo.title | json }},
       seoDescription: {{ document.meta.seo.description | json }},
@@ -452,7 +490,7 @@ mcpUi:
             if (v !== initial[k]) payload[k] = v   // diff: only send changed fields
           }
         }
-        window.parent.postMessage({ type: 'mcp-ui/action', action, entityId, payload }, '*')
+        sendAction(action, payload)
       })
     })
   </script>
@@ -496,7 +534,13 @@ mcpUi:
   </div>
 
   <script>
-    const entityId = "<%= it.document.id %>"
+    const entityId  = <%= JSON.stringify(it.document.id) %>
+    const callId    = <%= JSON.stringify(it.document.meta._mcpUi.callId) %>
+    const actionUrl = <%= JSON.stringify(it.document.meta._mcpUi.actionUrl) %>
+    async function sendAction (action, payload = {}) {
+      try { window.parent.postMessage({ type: 'mcp-ui/action', action, entityId, callId, payload }, '*') } catch {}
+      return fetch(actionUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, entityId, payload }) })
+    }
     document.querySelectorAll('[data-tag]').forEach(btn => {
       btn.addEventListener('click', () => btn.classList.toggle('selected'))
     })
@@ -504,7 +548,7 @@ mcpUi:
       btn.addEventListener('click', () => {
         const action = btn.dataset.action
         const tags = Array.from(document.querySelectorAll('[data-tag].selected')).map(b => b.dataset.tag)
-        window.parent.postMessage({ type: 'mcp-ui/action', action, entityId, payload: { tags } }, '*')
+        sendAction(action, { tags })
       })
     })
   </script>
@@ -545,16 +589,15 @@ mcpUi:
   </div>
 
   <script>
-    const entityId = {{{json document.id}}}
+    const entityId  = {{{json document.id}}}
+    const callId    = {{{json document.meta._mcpUi.callId}}}
+    const actionUrl = {{{json document.meta._mcpUi.actionUrl}}}
+    async function sendAction (action, payload = {}) {
+      try { window.parent.postMessage({ type: 'mcp-ui/action', action, entityId, callId, payload }, '*') } catch {}
+      return fetch(actionUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, entityId, payload }) })
+    }
     document.querySelectorAll('[data-status]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        window.parent.postMessage({
-          type: 'mcp-ui/action',
-          action: 'set-status',
-          entityId,
-          payload: { status: btn.dataset.status },
-        }, '*')
-      })
+      btn.addEventListener('click', () => sendAction('set-status', { status: btn.dataset.status }))
     })
   </script>
 </body>
@@ -565,7 +608,7 @@ Single action with a parameterised payload — the user picks the value, the age
 
 #### 7. Multi-step wizard — onboarding flow
 
-The iframe holds its own state across multiple steps; only the final submission sends a postMessage. Good when the interaction is genuinely multi-step (multiple form pages, confirm-then-go) and bouncing through the agent between steps would be expensive.
+The iframe holds its own state across multiple steps; only the final submission calls `sendAction`. Good when the interaction is genuinely multi-step (multiple form pages, confirm-then-go) and bouncing through the agent between steps would be expensive.
 
 ```hbs
 ---
@@ -610,7 +653,14 @@ mcpUi:
   </div>
 
   <script>
-    const entityId = {{{json document.id}}}
+    const entityId  = {{{json document.id}}}
+    const callId    = {{{json document.meta._mcpUi.callId}}}
+    const actionUrl = {{{json document.meta._mcpUi.actionUrl}}}
+    async function sendAction (action, payload = {}) {
+      try { window.parent.postMessage({ type: 'mcp-ui/action', action, entityId, callId, payload }, '*') } catch {}
+      return fetch(actionUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, entityId, payload }) })
+    }
+
     const state = { step: 1, answers: {} }
     const totalSteps = 3
 
@@ -632,18 +682,12 @@ mcpUi:
     document.getElementById('next').addEventListener('click', () => {
       captureCurrent()
       if (state.step < totalSteps) { state.step++; render() }
-      else {
-        window.parent.postMessage({
-          type: 'mcp-ui/action', action: 'complete', entityId, payload: state.answers,
-        }, '*')
-      }
+      else { sendAction('complete', state.answers) }
     })
     document.getElementById('back').addEventListener('click', () => {
       captureCurrent(); state.step--; render()
     })
-    document.getElementById('cancel').addEventListener('click', () => {
-      window.parent.postMessage({ type: 'mcp-ui/action', action: 'cancel', entityId, payload: {} }, '*')
-    })
+    document.getElementById('cancel').addEventListener('click', () => sendAction('cancel'))
     render()
   </script>
 </body>
@@ -656,15 +700,16 @@ State lives inside the iframe; the agent only sees the final merged answers (or 
 
 The seven examples above lean on the same conventions. Worth naming them so they're easy to extend.
 
-- **`postMessage({ type: 'mcp-ui/action', action, entityId, payload })` is the contract.** All four fields. `action` is one of the names you declared in `mcpUi.actions`. `entityId` is included so the host can sanity-check the message belongs to the in-flight tool call. `payload` is whatever structured data the user produced — keep it small and JSON-serialisable.
-- **Embed entity data with `{{{json document.id}}}` (or the equivalent in your engine).** Triple-stash in Handlebars / `| json` in Liquid / `<%= it.x %>` after JSON.stringify in Eta. This prevents injection if a field contains quotes — never interpolate raw string fields into a `'string-literal'` in script tags.
-- **Pick the smallest sandbox that works.** Pure render: `sandbox: []` (no scripts at all). Click-only interaction: `sandbox: [allow-scripts]`. Form submission with POST elsewhere (rare): you'll need more, and you're probably over-scoping the layout. Don't ship `allow-same-origin` casually — it lifts most of the cross-origin protection.
+- **`{ action, entityId, payload }` is the contract** — delivered via `POST` to `_mcpUi.actionUrl` (canonical) and mirrored via `window.parent.postMessage({ type: 'mcp-ui/action', action, entityId, callId, payload }, '*')` (host bridge). Sending only `postMessage` works on Apps hosts that bridge it; sending only `fetch` works everywhere because mikser is same-origin. Sending both is the cheap default. `action` must be one of the names declared in `mcpUi.actions` — mikser rejects anything else with 400.
+- **Embed entity data with `{{{json document.id}}}` (or the equivalent in your engine).** Triple-stash in Handlebars / `| json` in Liquid / `<%= JSON.stringify(it.x) %>` in Eta. This prevents injection if a field contains quotes — never interpolate raw string fields into a `'string-literal'` in script tags. `document.meta._mcpUi.callId` and `_mcpUi.actionUrl` are injected by mikser at render-time and follow the same rule.
+- **Pick the smallest sandbox that works.** Pure render: `sandbox: []` (no scripts at all). Click-only interaction: `sandbox: [allow-scripts]`. Same-origin `fetch` to mikser works at `allow-scripts` because the iframe is served by mikser itself; you do *not* need `allow-same-origin`. Don't ship `allow-same-origin` casually — it lifts most of the cross-origin protection.
 - **Send only what changed.** Multi-field forms (#4) should diff against the initial values and post only the deltas. Single-state toggles (#2, #6) send the target state, not the current state. Wizards (#7) send the merged final answers. Smaller payloads are cheaper for the agent to reason about.
-- **Style inline, ship self-contained.** No external CSS, no web fonts, no analytics — the iframe has no `fetch` and the host may strip referenced URLs. System fonts (`font-family: system-ui`) and inline `<style>` are fine; everything that needs to render must be in the returned HTML.
+- **Style inline, ship self-contained.** No external CSS, no web fonts, no analytics — the iframe sandbox blocks cross-origin requests and the host may strip referenced URLs. System fonts (`font-family: system-ui`) and inline `<style>` are fine; the only `fetch` that should leave the iframe is the `sendAction` POST back to mikser's `_mcpUi.actionUrl`.
 - **Use the layout body to compute what the agent shouldn't.** Example #2's payload pre-computes the *new* publish state. Example #4 pre-computes the diff. Pushing logic to render-time means the agent receives ready-to-act-on data rather than raw inputs it has to interpret.
 - **Don't smuggle long content through the payload.** If the user types a 2000-word note, post it back as a reference id and `mikser_api_read_entity` it later — not as a single huge `payload.note` string. Tool results live in the agent's context window.
+- **For external workflows, declare `mcpUi.handler.url` instead of teaching the agent the schema.** When a layout's action should hit your application server (Slack notification, JIRA transition, a queue, anything stateful), set `handler.url` in the frontmatter. mikser POSTs the action to that URL (HMAC-signed if `handler.secret` is set) and uses the response as the tool result. The agent stays generic; the application semantics stay in your service.
 
-These conventions aren't enforced by the engine — they're just what makes layouts compose with agents cleanly. Hosts that implement the Apps extension fully will eventually add more affordances (rich text fields, file uploads, in-iframe MCP tool calls). For today, plain HTML + `postMessage` covers the vast majority of useful interactions.
+These conventions aren't enforced by the engine — they're just what makes layouts compose with agents cleanly. Hosts that implement the Apps extension fully will eventually add more affordances (rich text fields, file uploads, in-iframe MCP tool calls). For today, the dual-path delivery (`fetch` + `postMessage`) plus optional webhook handler covers the vast majority of useful interactions — and mikser stays a content engine throughout.
 
 ## Built-in resources
 

@@ -84,7 +84,7 @@ Add `--mcp` to your mikser command and any MCP-speaking client — Claude Deskto
 - read every entity in the catalog
 - write new content files (markdown, layouts, configuration) — writes land on disk and the next cycle picks them up
 - render any layout for preview without touching the output folder
-- **surface interactive UI inline in the conversation** — you author the UI as a normal mikser layout with YAML frontmatter (`mcpUi: { mode, actions }`). The agent reads `mikser://mcp-ui/modes` to discover what UIs your project supports, calls `mikser_preview_ui` to render one against an entity, and the host displays the result as a sandboxed iframe in the chat. Buttons in the UI `postMessage` their click back as the tool result — no separate UI framework, no glue code; layouts are still just layouts
+- **surface interactive UI inline in the conversation** — you author the UI as a normal mikser layout with YAML frontmatter (`mcpUi: { mode, actions }`). The agent reads `mikser://mcp-ui/modes` to discover what UIs your project supports, calls `mikser_preview_ui` to render one against an entity, and the host displays the result as a sandboxed iframe in the chat. `mikser_preview_ui` is **awaitable** — the tool suspends until the iframe POSTs an action (or `postMessage` on Apps hosts that bridge it), then resolves with `{action, entityId, payload}` as the structured tool result. For app-specific semantics, declare `mcpUi.handler.url` and mikser forwards the action to your webhook. No separate UI framework, no glue code; layouts are still just layouts
 - watch every build log as it streams past
 - introspect engine state — current lifecycle phase, effective config, recent log buffer
 
