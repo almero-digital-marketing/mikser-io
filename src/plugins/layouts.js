@@ -4,7 +4,6 @@ import { existsSync } from 'node:fs'
 import { globby } from 'globby'
 import _ from 'lodash'
 import { z } from 'zod'
-import fm from 'front-matter'
 
 // Liquid / Handlebars / Eta keywords we don't want surfaced as
 // "variables this layout references." Anything that looks like a path
@@ -104,37 +103,18 @@ export default ({
     const collection = 'layouts'
     const type = 'layout'
 
-    // Read a layout file and strip its YAML frontmatter at the source.
-    // Returns { content, meta } where content is the body the renderer
-    // will see and meta is the parsed YAML (empty object if absent).
-    //
-    // We strip here so both the in-memory layouts state map AND the
-    // catalog entity hold identical, frontmatter-free body. The
-    // front-matter plugin still runs at onProcess but its work on
-    // layouts becomes a no-op — the YAML's already gone. Without this,
-    // runtime.state.layouts.layouts[name].content kept the raw file
-    // (including YAML), and when onProcessed attached
-    // entity.layout = layouts[name] the renderer received YAML it then
-    // emitted verbatim into the rendered output. Bug surfaced via the
-    // MCP-UI worked examples; fix is at the boundary where layouts
-    // enter mikser, not at the renderer.
-    //
-    // Defensive — sync events can arrive ahead of file state in edge
-    // cases (rename races, synthetic test sync calls). A missing file
-    // logs at debug and the entity goes in with empty content;
-    // downstream renderers will surface the real failure mode with a
-    // clearer error.
+    // Read a layout file's bytes into entity.content so the frontmatter
+    // plugin can extract YAML metadata at onProcess. Defensive — sync
+    // events can arrive ahead of file state in edge cases (rename races,
+    // synthetic test sync calls). A missing file logs at debug and the
+    // entity goes in with empty content; downstream renderers will
+    // surface the real failure mode with a clearer error.
     async function readLayoutContent(uri) {
         try {
-            const raw = await readFile(uri, 'utf8')
-            if (fm.test(raw)) {
-                const parsed = fm(raw)
-                return { content: parsed.body, meta: parsed.attributes || {} }
-            }
-            return { content: raw, meta: {} }
+            return await readFile(uri, 'utf8')
         } catch (err) {
             useLogger().debug('Layout content unreadable at %s: %s', uri, err.message)
-            return { content: '', meta: {} }
+            return ''
         }
     }
 
@@ -215,38 +195,32 @@ export default ({
         const uri = path.join(runtime.options.layoutsFolder, relativePath)
         const { layouts } = runtime.state.layouts
         switch (action) {
-            case ACTION.CREATE: {
-                const parsed = await readLayoutContent(uri)
+            case ACTION.CREATE:
                 var layout = {
                     id,
                     uri,
                     collection,
                     type,
                     name: relativePath.replace(path.extname(relativePath), ''),
-                    content: parsed.content,
-                    meta: parsed.meta,
+                    content: await readLayoutContent(uri),
                     ...getFormatInfo(relativePath)
                 }
                 layouts[layout.name] = layout
                 await createEntity(layout)
                 break
-            }
-            case ACTION.UPDATE: {
-                const parsed = await readLayoutContent(uri)
+            case ACTION.UPDATE:
                 var layout = {
                     id,
                     uri,
                     collection,
                     type,
                     name: relativePath.replace(path.extname(relativePath), ''),
-                    content: parsed.content,
-                    meta: parsed.meta,
+                    content: await readLayoutContent(uri),
                     ...getFormatInfo(relativePath)
                 }
                 layouts[layout.name] = layout
                 await updateEntity(layout)
                 break
-            }
             case ACTION.DELETE:
                 var layout = {
                     id,
@@ -287,15 +261,13 @@ export default ({
         const paths = await globby('**/*', { cwd: runtime.options.layoutsFolder, ignore: ['**/*.js'] })
         for (let relativePath of paths) {
             const uri = path.join(runtime.options.layoutsFolder, relativePath)
-            const parsed = await readLayoutContent(uri)
             const layout = {
                 id: path.join('/layouts', relativePath),
                 uri,
                 name: relativePath.replace(path.extname(relativePath), ''),
                 collection,
                 type,
-                content: parsed.content,
-                meta: parsed.meta,
+                content: await readLayoutContent(uri),
             }
             Object.assign(layout, await getFormatInfo(relativePath))
             layouts[layout.name] = layout
@@ -307,6 +279,25 @@ export default ({
         const logger = useLogger()
         const { layouts } = runtime.state.layouts
 
+        // Resolve a layout name to the catalog entity (post-front-matter
+        // strip) rather than the state-map entry (raw file bytes). The
+        // state map is just an index — it's populated at sync time with
+        // whatever readLayoutContent returned, before front-matter has
+        // had a chance to lift YAML attributes into meta and strip them
+        // from content. Attaching the raw state-map entry as
+        // entity.layout makes the renderer emit YAML verbatim into the
+        // rendered output (visible bug surfaced via MCP-UI previews).
+        //
+        // Catalog is the single source of truth for content; state map
+        // is just the name → id lookup. Falls back to the state entry
+        // only when the catalog hasn't caught up (sync races, synthetic
+        // test setups where front-matter hasn't been wired).
+        async function resolveLayout(name) {
+            const stateEntry = layouts[name]
+            if (!stateEntry) return undefined
+            return (await findEntity({ id: stateEntry.id })) || stateEntry
+        }
+
         for await (let { entity, operation } of useJournal('Layouts processing', [OPERATION.CREATE, OPERATION.UPDATE, OPERATION.DELETE], signal)) {
             if (entity.collection == collection) continue
             switch (operation) {
@@ -317,7 +308,7 @@ export default ({
                         for (let pattern in runtime.config.layouts?.match || []) {
                             if (matchEntity(entity, pattern)) {
                                 const layoutName = runtime.config.layouts?.match[pattern]
-                                entity.layout = layouts[layoutName]
+                                entity.layout = await resolveLayout(layoutName)
                                 break
                             }
                         }
@@ -338,14 +329,14 @@ export default ({
 
                             const autoLayout = candidates.find(name => layouts[name])
                             if (autoLayout) {
-                                entity.layout = layouts[autoLayout]
+                                entity.layout = await resolveLayout(autoLayout)
                                 logger.debug('Auto layout matched %s -> %s for %s', entity.name, autoLayout, entity.id)
                             } else {
                                 logger.trace('Auto layout no match for %s tried: %s', entity.id, candidates.join(', '))
                             }
                         }
                     } else {
-                        entity.layout = layouts[entity.meta.layout]
+                        entity.layout = await resolveLayout(entity.meta.layout)
                     }
                     if (entity.meta?.layout && !entity.layout) {
                         logger.warn('Layout not found for %s: %s', entity.collection, entity.id)

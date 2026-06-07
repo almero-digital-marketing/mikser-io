@@ -175,16 +175,7 @@ describe('layouts plugin', () => {
     // entity.content; the frontmatter plugin then walks the journal at
     // onProcess and lifts YAML into entity.meta. The two plugins
     // compose via the journal contract alone — no cross-imports.
-    it('onImport strips frontmatter at read time and surfaces meta on the entity', async () => {
-        // Layouts plugin parses YAML frontmatter inside readLayoutContent
-        // so both runtime.state.layouts.layouts[name] AND the catalog entity
-        // hold a clean, frontmatter-free body. Without this, layouts[name]
-        // kept raw content with YAML, onProcessed re-attached it as
-        // entity.layout, and the renderer emitted YAML verbatim into the
-        // rendered output (surfaced via the MCP-UI worked examples).
-        // The front-matter plugin's onProcess pass is now a no-op for
-        // layouts — the YAML's already gone — but the test still runs it
-        // to verify the no-op doesn't double-strip or corrupt anything.
+    it('onImport reads layout content from disk so frontmatter can populate entity.meta', async () => {
         await withTempWorking(async (workingFolder) => {
             const layoutsFolder = path.join(workingFolder, 'layouts')
             await mkdir(layoutsFolder, { recursive: true })
@@ -199,21 +190,68 @@ describe('layouts plugin', () => {
 
             const created = h.journal.find(e => e.operation === 'create' && e.entity?.id === '/layouts/article.hbs')
             assert.ok(created, 'expected a journal CREATE for the layout')
+            assert.ok(created.entity.content?.includes('match: "@/articles/*"'),
+                'layout entity.content should carry the raw file bytes before frontmatter runs')
 
-            // Frontmatter is stripped at READ time — by the time the entity
-            // enters the journal it already carries clean body + parsed meta.
-            assert.ok(!created.entity.content?.includes('match: "@/articles/*"'),
-                'layout entity.content should NOT carry the raw YAML — the layouts plugin strips it at read time')
+            // Frontmatter plugin runs onProcess against the same journal,
+            // strips the YAML, and lifts the metadata into entity.meta.
+            await h.runHook('process')
+
             assert.equal(created.entity.meta?.match, '@/articles/*')
             assert.equal(created.entity.meta?.mcpUi?.mode, 'preview')
             assert.equal(created.entity.meta?.mcpUi?.description, 'Article preview')
             assert.deepEqual(created.entity.meta?.mcpUi?.actions, ['approve', 'reject'])
+            // entity.content is now the stripped body — no YAML, no leading ---.
             assert.equal(created.entity.content.trim(), '<article>{{title}}</article>')
+        })
+    })
 
-            // Front-matter plugin pass — should be a no-op on layouts now.
+    it('onProcessed attaches entity.layout from the catalog (post-frontmatter strip), not the raw state map', async () => {
+        // The layouts plugin's in-memory state map (runtime.state.layouts.layouts)
+        // is populated at sync time with the RAW file body — YAML and all.
+        // The front-matter plugin's onProcess pass updates the CATALOG
+        // entity's content (via updateEntry), not the state map. If
+        // onProcessed naively attached entity.layout = layouts[name],
+        // the renderer would receive the raw file via entity.layout.content
+        // and emit YAML verbatim. The fix: resolve the layout from the
+        // catalog by id, falling back to the state map only when the
+        // catalog hasn't caught up. This test pins that contract.
+        await withTempWorking(async (workingFolder) => {
+            const layoutsFolder = path.join(workingFolder, 'layouts')
+            await mkdir(layoutsFolder, { recursive: true })
+            await writeFile(path.join(layoutsFolder, 'article.hbs'),
+                '---\nmatch: "@/articles/*"\nmcpUi:\n  mode: preview\n---\n<article>{{title}}</article>\n')
+
+            const h = createHarness({ options: { workingFolder, outputFolder: path.join(workingFolder, 'out') } })
+            layoutsPlugin(h.core)
+            frontMatterPlugin(h.core)
+            await h.runHook('loaded')
+            await h.runHook('import')
+
+            // Add a document that explicitly names the layout — exercises
+            // the `entity.meta.layout = '...'` branch in onProcessed.
+            const doc = {
+                id: '/documents/article.md',
+                collection: 'documents',
+                type: 'document',
+                name: 'article',
+                meta: { layout: 'article' },
+                content: 'body',
+            }
+            h.journal.push({ id: 99, entity: doc, operation: 'create', context: {}, options: {}, output: null })
+
+            // process strips frontmatter on the catalog layout entity.
             await h.runHook('process')
-            assert.equal(created.entity.content.trim(), '<article>{{title}}</article>',
-                'frontmatter plugin should be a no-op since the YAML was already stripped')
+            // processed walks the document journal and attaches the layout.
+            await h.runHook('processed')
+
+            // entity.layout MUST come from the catalog (clean) — not from
+            // the raw state map. If the raw state map leaked in, content
+            // would still start with `---\nmatch:...`.
+            assert.ok(doc.layout, 'expected onProcessed to attach a layout to the document')
+            assert.ok(!doc.layout.content?.includes('match: "@/articles/*"'),
+                'attached layout content must be post-frontmatter-strip (catalog), not the raw state-map entry')
+            assert.equal(doc.layout.content.trim(), '<article>{{title}}</article>')
         })
     })
 
