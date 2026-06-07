@@ -103,6 +103,175 @@ export async function forwardToHandler(handler, body) {
     return { ok: true, handlerResponse: text }
 }
 
+// The MCP-UI shell HTML. Served as a single `ui://mikser/preview-ui-shell`
+// resource that mikser_preview_ui's _meta.ui.resourceUri points at, per
+// the MCP Apps spec (2026-01-26). Spec-conformant hosts fetch this once
+// per call, load it in a sandboxed iframe, then push the tool's
+// structuredContent via `ui/notifications/tool-result`.
+//
+// What the shell does:
+//   - ui/initialize handshake with the host (timeouts at 2s)
+//   - Listens for ui/notifications/tool-result → injects structuredContent.html
+//     into #mikser-ui-root, re-executes any <script> tags the layout brought
+//   - Exposes window.sendAction(action, payload) — the API layouts use to
+//     deliver clicks back as `tools/call` against mikser_ui_action
+//   - Logs every protocol event to an in-iframe debug panel so authors can
+//     see exactly where the spec round-trip fails on hosts that don't bridge
+//
+// Why a shell at all: per spec, tool UIs are RESOURCES. The host fetches
+// the resource (static) and receives the dynamic per-call data via the
+// tool-result notification. Layouts can stay server-side-templated against
+// the entity (mikser's strength) — they just produce *body content*, not
+// full HTML documents. The shell handles the protocol; layouts handle the
+// content. See ADR-0008.
+const PREVIEW_UI_SHELL_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>mikser · MCP-UI</title>
+<style>
+  body { margin: 0; font-family: system-ui, -apple-system, sans-serif; color: #1f2937; background: #ffffff; }
+  #mikser-ui-root { padding: 0; }
+  #mikser-debug {
+    display: none;
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    max-height: 30vh;
+    overflow: auto;
+    padding: 0.5em 1em;
+    border-top: 1px solid #d1d5db;
+    background: #f9fafb;
+    font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #4b5563;
+    z-index: 9999;
+  }
+  #mikser-debug.shown { display: block; }
+  #mikser-debug strong { display: block; margin-bottom: 0.3em; color: #374151; font: 600 11px ui-sans-serif, system-ui; text-transform: uppercase; letter-spacing: 0.04em; }
+  #mikser-debug ol { margin: 0; padding: 0; list-style: none; }
+  #mikser-debug li { padding: 1px 0; }
+  #mikser-debug li.ok { color: #047857; }
+  #mikser-debug li.fail { color: #b91c1c; }
+  #mikser-debug .t { color: #9ca3af; margin-right: 0.4em; }
+</style>
+</head>
+<body>
+  <div id="mikser-ui-root"></div>
+  <div id="mikser-debug">
+    <strong>mikser · MCP Apps protocol</strong>
+    <ol id="mikser-debug-log"></ol>
+  </div>
+<script>
+(function () {
+  var nextId = 1, hostOrigin = '*';
+  var pending = new Map();
+  var debugLog = document.getElementById('mikser-debug-log');
+  var debugPanel = document.getElementById('mikser-debug');
+  var t0 = Date.now();
+  var ctx = { entityId: null, layoutId: null };
+
+  function log(msg, cls) {
+    debugPanel.classList.add('shown');
+    var li = document.createElement('li');
+    if (cls) li.className = cls;
+    var dt = ((Date.now() - t0) / 1000).toFixed(2);
+    li.innerHTML = '<span class="t">+' + dt + 's</span>' + msg;
+    debugLog.appendChild(li);
+  }
+
+  function rpc(method, params, timeoutMs) {
+    return new Promise(function (resolve, reject) {
+      var id = nextId++;
+      pending.set(id, { resolve: resolve, reject: reject });
+      log('→ ' + method + ' (id=' + id + ')');
+      window.parent.postMessage({ jsonrpc: '2.0', method: method, params: params, id: id }, hostOrigin);
+      if (timeoutMs) {
+        setTimeout(function () {
+          if (!pending.has(id)) return;
+          pending.delete(id);
+          log('✗ ' + method + ' — no reply after ' + timeoutMs + 'ms', 'fail');
+          reject(new Error(method + ' timeout (' + timeoutMs + 'ms — host did not reply)'));
+        }, timeoutMs);
+      }
+    });
+  }
+
+  function injectContent(structured) {
+    if (!structured) { log('tool-result had no structuredContent', 'fail'); return; }
+    ctx.entityId = structured.entityId || null;
+    ctx.layoutId = structured.layoutId || null;
+    var root = document.getElementById('mikser-ui-root');
+    root.innerHTML = structured.html || '';
+    // innerHTML doesn't execute embedded <script> tags — re-create them.
+    Array.prototype.forEach.call(root.querySelectorAll('script'), function (oldScript) {
+      var newScript = document.createElement('script');
+      Array.prototype.forEach.call(oldScript.attributes, function (a) {
+        newScript.setAttribute(a.name, a.value);
+      });
+      newScript.textContent = oldScript.textContent;
+      oldScript.parentNode.replaceChild(newScript, oldScript);
+    });
+    log('✓ content injected (' + (structured.html || '').length + ' bytes, entityId=' + JSON.stringify(ctx.entityId) + ')', 'ok');
+  }
+
+  window.addEventListener('message', function (e) {
+    var data = e.data;
+    if (data && typeof data.id !== 'undefined' && pending.has(data.id)) {
+      var entry = pending.get(data.id);
+      pending.delete(data.id);
+      if (data.error) entry.reject(data.error);
+      else entry.resolve(data.result);
+      return;
+    }
+    if (data && data.method === 'ui/notifications/tool-result') {
+      log('← ui/notifications/tool-result');
+      injectContent(data.params && data.params.structuredContent);
+      return;
+    }
+  });
+
+  // Public API. Layouts call this from button click handlers to deliver
+  // an action back to mikser. Returns a Promise that resolves with
+  // mikser_ui_action's tool result (pure relay or handler-forwarded).
+  window.sendAction = function (action, payload) {
+    payload = payload || {};
+    log('sendAction: ' + action);
+    return rpc('tools/call', {
+      name: 'mikser_ui_action',
+      arguments: {
+        entityId: ctx.entityId,
+        layoutId: ctx.layoutId,
+        action: action,
+        payload: payload,
+      },
+    }, 5000).then(function (r) {
+      log('✓ mikser_ui_action returned', 'ok');
+      return r;
+    }).catch(function (err) {
+      log('✗ mikser_ui_action failed: ' + err.message, 'fail');
+      throw err;
+    });
+  };
+
+  // Handshake — sent immediately on load. If the host doesn't reply,
+  // content will still inject when tool-result arrives, but clicks
+  // won't deliver (no AppBridge translating tools/call frames).
+  log('shell loaded');
+  rpc('ui/initialize', {
+    appCapabilities: { availableDisplayModes: ['inline'] },
+  }, 2000).then(function (init) {
+    var hostName = (init && init.hostInfo && init.hostInfo.name) || 'unknown';
+    log('✓ ui/initialize replied — host=' + hostName, 'ok');
+    if (init && init.hostInfo && init.hostInfo.origin) {
+      hostOrigin = init.hostInfo.origin;
+    }
+  }).catch(function () {
+    log('Diagnosis: host did NOT respond to ui/initialize. The MCP Apps AppBridge is not implemented (or disabled) on this host. Click actions will not reach mikser. See ADR-0008.', 'fail');
+  });
+})();
+</script>
+</body>
+</html>`
+
 export default ({
     runtime,
     onLoaded,
@@ -354,12 +523,54 @@ export default ({
             },
         )
 
-        mcp.simpleTool(
-            'mikser_preview_ui',
-            'Render an entity to inline HTML using a layout that declares `mcpUi` frontmatter. Selects the layout by matching `entityId` against `layout.meta.match` and filtering on `mode`. Returns the rendered HTML plus action metadata (postMessage names the UI emits) so the host can surface it as a UI block in the conversation. **Read `mikser://mcp-ui/modes` first** to discover which modes and entity patterns this project supports — the resource is derived live from layout frontmatter. Layouts without `mcpUi` frontmatter are not eligible.',
+        // ui://mikser/preview-ui-shell — the MCP-UI shell resource.
+        // mikser_preview_ui's _meta.ui.resourceUri points here. Hosts
+        // that implement MCP Apps fetch this once via resources/read,
+        // load it in a sandboxed iframe, then deliver the per-call
+        // structuredContent via ui/notifications/tool-result. The shell
+        // is static and version-independent across tool calls.
+        //
+        // mimeType MUST be 'text/html;profile=mcp-app' per the spec —
+        // basic-host and other conformant hosts reject anything else.
+        mcp.registerResource(
+            'mikser-preview-ui-shell',
+            'ui://mikser/preview-ui-shell',
             {
-                entityId: z.string().describe('Entity to render, e.g. "/articles/2026-launch".'),
-                mode: z.string().optional().describe('Which UI mode to render. Defaults to "preview". Available modes are whatever your layouts declare as `mcpUi.mode`.'),
+                title: 'MCP-UI shell for mikser_preview_ui',
+                description: 'The static iframe shell that mikser_preview_ui renders into. Handles the MCP Apps protocol (ui/initialize, tool-result injection, tools/call relay) so layouts can be content-only HTML.',
+                mimeType: 'text/html;profile=mcp-app',
+            },
+            async (uri) => ({
+                contents: [{
+                    uri: uri.href,
+                    mimeType: 'text/html;profile=mcp-app',
+                    text: PREVIEW_UI_SHELL_HTML,
+                }],
+            }),
+        )
+
+        // mikser_preview_ui — uses registerTool (not simpleTool) so we
+        // can set _meta.ui.resourceUri pointing at the shell. Per the
+        // MCP Apps spec, this signals to hosts: "this tool renders UI
+        // — fetch the resource at ui:// for the iframe template, and
+        // pass the tool's structuredContent to the iframe via
+        // ui/notifications/tool-result." Hosts without MCP Apps
+        // support fall back to displaying content[0].text.
+        mcp.registerTool(
+            'mikser_preview_ui',
+            {
+                description: 'Render an entity through a layout that declares `mcpUi` frontmatter and return it as a UI block. Selects the layout by matching `entityId` against `layout.meta.match` and filtering on `mode`. **Read `mikser://mcp-ui/modes` first** to discover which modes and entity patterns this project supports. Layouts without `mcpUi` frontmatter are not eligible. Spec-conformant hosts render the result inside an iframe loaded from `ui://mikser/preview-ui-shell`; non-UI hosts display the rendered HTML as text.',
+                inputSchema: {
+                    entityId: z.string().describe('Entity to render, e.g. "/articles/2026-launch".'),
+                    mode: z.string().optional().describe('Which UI mode to render. Defaults to "preview". Available modes are whatever your layouts declare as `mcpUi.mode`.'),
+                },
+                _meta: {
+                    ui: {
+                        // Spec-required: tells MCP Apps hosts to render
+                        // this tool's result inside the shell iframe.
+                        resourceUri: 'ui://mikser/preview-ui-shell',
+                    },
+                },
             },
             async ({ entityId, mode = 'preview' }) => {
                 const logger = useLogger()
@@ -427,37 +638,46 @@ export default ({
                     logger.debug('MCP mikser_preview_ui rendered %s via %s (mode=%s, %d chars)',
                         entityId, matched.id, mode, html.length)
 
+                    // Structured payload the iframe receives via
+                    // ui/notifications/tool-result. The shell reads
+                    // structuredContent.html and injects it into its
+                    // #mikser-ui-root div; entityId + layoutId are what
+                    // window.sendAction() forwards back to mikser_ui_action.
+                    const structured = {
+                        entityId,
+                        layoutId:    matched.id,
+                        mode,
+                        html,
+                        mcpUi: {
+                            layoutId:    matched.id,
+                            mode,
+                            description: mcpUiMeta.description ?? null,
+                            actions:     mcpUiMeta.actions     ?? [],
+                            sandbox:     mcpUiMeta.sandbox     ?? ['allow-scripts'],
+                            actionTool:  'mikser_ui_action',
+                        },
+                    }
                     return {
+                        // content[0] is the fallback for hosts that don't
+                        // implement MCP Apps. They'll display this as
+                        // text — the layout's body HTML — so the user
+                        // at least sees the rendered content even if
+                        // the iframe doesn't load.
                         content: [
-                            // HTML inline. Hosts that understand the
-                            // Apps extension can lift this into a
-                            // sandboxed iframe; hosts that don't will
-                            // surface it as text/preformatted.
                             { type: 'text', text: html, mimeType: 'text/html' },
                         ],
-                        // Side-channel metadata so hosts know what to
-                        // do with the rendered UI. Per the MCP Apps
-                        // spec (2026-01-26), the iframe speaks JSON-RPC
-                        // back to the host via postMessage; clicks
-                        // resolve as tools/call against `actionTool`
-                        // (registered with visibility=['app'] below).
-                        _meta: {
-                            mcpUi: {
-                                layoutId:    matched.id,
-                                mode,
-                                description: mcpUiMeta.description ?? null,
-                                actions:     mcpUiMeta.actions     ?? [],
-                                sandbox:     mcpUiMeta.sandbox     ?? ['allow-scripts'],
-                                // The app-callable tool the iframe
-                                // invokes for each user click. Hosts
-                                // that bridge iframe tools/call route
-                                // this through the existing MCP
-                                // transport — the click becomes a
-                                // separate tool turn in the agent's
-                                // conversation.
-                                actionTool:  'mikser_ui_action',
-                            },
-                        },
+                        // structuredContent — the spec-mandated way to
+                        // deliver per-call data to a UI tool's iframe.
+                        // Hosts pass this to the iframe via
+                        // ui/notifications/tool-result after the shell
+                        // (loaded from _meta.ui.resourceUri) completes
+                        // ui/initialize.
+                        structuredContent: structured,
+                        // _meta.mcpUi kept for backward compatibility
+                        // with hosts/tools that read it directly.
+                        // structuredContent.mcpUi is the canonical copy
+                        // going forward.
+                        _meta: { mcpUi: structured.mcpUi },
                     }
                 } catch (err) {
                     logger.error('MCP mikser_preview_ui error: %s', err.message)

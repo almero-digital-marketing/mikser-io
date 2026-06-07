@@ -52,6 +52,40 @@ describe('preview plugin: mikser_preview_ui dispatch', () => {
             'existing mikser_preview_render should still be registered')
     })
 
+    it('declares _meta.ui.resourceUri pointing at the shell (MCP Apps spec)', async () => {
+        // Per ADR-0008: spec-conformant hosts read this off the tool
+        // definition (statically, at tools/list time) to decide which
+        // iframe template to render the tool's result inside. Without
+        // it, hosts display the rendered HTML as plain text instead of
+        // an iframe — the empirical bug that drove the restructure.
+        const { h, mcp } = withMcp()
+        await h.runHook('loaded')
+
+        const tool = mcp.registered.get('mikser_preview_ui')
+        assert.equal(tool._meta?.ui?.resourceUri, 'ui://mikser/preview-ui-shell',
+            'mikser_preview_ui must declare _meta.ui.resourceUri on the tool definition')
+    })
+
+    it('registers the ui://mikser/preview-ui-shell resource with the spec MIME type', async () => {
+        const { h, mcp } = withMcp()
+        await h.runHook('loaded')
+
+        const shell = mcp.resources.get('ui://mikser/preview-ui-shell')
+        assert.ok(shell, 'shell resource should be registered at ui://mikser/preview-ui-shell')
+        assert.equal(shell.metadata.mimeType, 'text/html;profile=mcp-app',
+            'shell resource MUST declare text/html;profile=mcp-app — basic-host and other conformant hosts reject anything else')
+
+        // Resource handler returns the shell HTML so the iframe can load.
+        const fakeUri = { href: 'ui://mikser/preview-ui-shell' }
+        const result = await shell.handler(fakeUri)
+        assert.equal(result.contents[0].mimeType, 'text/html;profile=mcp-app')
+        // Contains the protocol plumbing — the things we care about end-to-end.
+        assert.match(result.contents[0].text, /ui\/initialize/, 'shell must implement ui/initialize handshake')
+        assert.match(result.contents[0].text, /ui\/notifications\/tool-result/, 'shell must handle ui/notifications/tool-result')
+        assert.match(result.contents[0].text, /window\.sendAction/, 'shell must expose window.sendAction for layouts to call')
+        assert.match(result.contents[0].text, /mikser_ui_action/, 'shell must relay clicks to mikser_ui_action')
+    })
+
     it('does NOT register when runtime.options.mcp is absent', async () => {
         const h = createHarness({ options: { port: 3001 } })
         previewPlugin(h.core)

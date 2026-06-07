@@ -212,7 +212,11 @@ Other plugins are expected to follow the same shape — `vector` will add `find_
 
 ## Layout frontmatter and MCP-UI
 
-mikser layouts can carry YAML frontmatter just like documents do. The frontmatter plugin lifts it into `entity.meta`, where any consumer can read it without coordinating with anyone else. `mikser_preview_ui` consumes one specific namespace: `meta.mcpUi`.
+mikser layouts can carry YAML frontmatter just like documents do. The layouts plugin strips the frontmatter at read time and lifts the attributes into `entity.meta`, where any consumer can read them without coordinating with anyone else. `mikser_preview_ui` consumes one specific namespace: `meta.mcpUi`.
+
+mikser ships a **single static shell resource** at `ui://mikser/preview-ui-shell` that implements the MCP Apps protocol (the spec-required `ui/initialize` handshake, the `ui/notifications/tool-result` listener that injects content, the `tools/call` relay for clicks). `mikser_preview_ui` declares `_meta.ui.resourceUri: 'ui://mikser/preview-ui-shell'`, so spec-conformant hosts fetch the shell once via `resources/read`, load it in a sandboxed iframe, then deliver the per-call rendered HTML to the iframe via `ui/notifications/tool-result`.
+
+**That means your layouts are content-only.** No `<!DOCTYPE>`, no `<html>` / `<head>` / `<body>`, no MCP protocol script. The shell handles everything. Your layout produces a fragment that gets injected into the shell's `#mikser-ui-root` div. Click handlers call `sendAction(action, payload)` — exposed as a global by the shell — and the shell relays them to `mikser_ui_action` over `tools/call`.
 
 ```hbs
 ---
@@ -229,63 +233,20 @@ mcpUi:
   #   url: https://review.example.com/mikser/action
   #   secret: env:REVIEW_SIGNING_SECRET
 ---
-<!DOCTYPE html>
-<html>
-  <body>
-    <article>{{document.meta.title}}</article>
-    <button data-action="approve">Approve</button>
-    <button data-action="reject">Reject</button>
-    <script>
-      // MCP Apps protocol: the iframe talks to the host over postMessage
-      // using JSON-RPC. The host bridges `tools/call` into a real MCP
-      // tool call against the server. There is NO direct HTTP from the
-      // iframe to mikser — the iframe is cross-origin from the host
-      // (per spec) and the default Content-Security-Policy blocks all
-      // outbound network. Everything is postMessage.
-      const entityId = {{{json document.id}}}
-      const layoutId = {{{json document.layout.id}}}
-      let nextId = 1, hostOrigin = '*'
-      const pending = new Map()
-      window.addEventListener('message', e => {
-        if (!e.data?.id || !pending.has(e.data.id)) return
-        const { resolve, reject } = pending.get(e.data.id)
-        pending.delete(e.data.id)
-        e.data.error ? reject(e.data.error) : resolve(e.data.result)
-      })
-      function rpc (method, params) {
-        return new Promise((resolve, reject) => {
-          const id = nextId++
-          pending.set(id, { resolve, reject })
-          window.parent.postMessage(
-            { jsonrpc: '2.0', method, params, id }, hostOrigin,
-          )
-        })
-      }
-      // Spec-required handshake. The result carries hostInfo, hostContext
-      // (theme, locale, display mode), capabilities. We tighten the
-      // outbound targetOrigin once we know the host's origin.
-      const init = await rpc('ui/initialize', {
-        appCapabilities: { availableDisplayModes: ['inline'] },
-      })
-      if (init.hostInfo?.origin) hostOrigin = init.hostInfo.origin
-
-      // Per-click — the host forwards this to the MCP server as a real
-      // tools/call. The agent sees `mikser_ui_action` resolve as its own
-      // tool turn in the conversation. Pure-relay or handler-forwarded
-      // is decided server-side; the iframe doesn't care.
-      function sendAction (action, payload = {}) {
-        return rpc('tools/call', {
-          name: 'mikser_ui_action',
-          arguments: { entityId, layoutId, action, payload },
-        })
-      }
-      document.querySelectorAll('[data-action]').forEach(b =>
-        b.addEventListener('click', () => sendAction(b.dataset.action)),
-      )
-    </script>
-  </body>
-</html>
+<article>{{document.meta.title}}</article>
+<button data-action="approve">Approve</button>
+<button data-action="reject">Reject</button>
+<script>
+  // sendAction(action, payload?) is provided by the shell. Call it from
+  // any click handler. It returns a Promise that resolves with
+  // mikser_ui_action's tool result (pure relay or handler-forwarded).
+  document.querySelectorAll('[data-action]').forEach(b =>
+    b.addEventListener('click', () => sendAction(b.dataset.action))
+  )
+</script>
 ```
+
+That's an entire mcpUi layout. Compare with the v8.0.x version of this same example, which had ~50 lines of protocol boilerplate per layout — `ui/initialize` handshake, RPC helper, pending Map, postMessage shape. All of it lives in the shell now, so all layouts get the spec-correct protocol for free, and layout authoring is plain HTML + DOM.
 
 **Discovery.** Before calling `mikser_preview_ui`, the agent should read `mikser://mcp-ui/modes` to see which modes are actually available in this project and which entity patterns each one covers. The resource is derived live from layout frontmatter, so adding a new `mcpUi`-decorated layout makes the new mode immediately discoverable — no tool re-registration, no restart.
 
@@ -293,17 +254,20 @@ mcpUi:
 
 1. The plugin walks the catalog for layouts where `meta.mcpUi.mode === 'preview'`.
 2. Among those, it picks the one whose `meta.match` pattern matches the entity (using mikser's `matchEntity` — same matcher used by the layouts plugin).
-3. It runs the layout through the renderer chain (`render-hbs`, `render-eta`, `render-liquid`, etc.) and **returns immediately** with the HTML inline plus `_meta.mcpUi` carrying the declared actions, sandbox flags, and the name of the action tool (`mikser_ui_action`) the iframe should call.
+3. It runs the layout through the renderer chain (`render-hbs`, `render-eta`, `render-liquid`, etc.) producing a **content fragment** — not a full document — for the entity.
+4. It returns a tool result with: `content[0].text` = the rendered fragment (fallback for non-UI hosts), `structuredContent` = `{ html, entityId, layoutId, mode, mcpUi: {...} }` (what the iframe receives), and `_meta.ui.resourceUri` = `ui://mikser/preview-ui-shell` (on the tool definition, telling the host *which iframe* to render this into).
 
-The tool call resolves the moment the HTML is built. The user's click is **its own tool turn** later — a `tools/call` from the iframe (via the host's AppBridge) against `mikser_ui_action`. The agent sees two tool invocations in the conversation: the render, then the action. This is the [MCP Apps spec](https://github.com/modelcontextprotocol/ext-apps) pull model — no suspended promises, no HTTP callbacks.
+Spec-conformant hosts read the resourceUri off the tool, fetch the shell, load it in a sandboxed iframe, and post `structuredContent` to the iframe via `ui/notifications/tool-result`. The shell injects `structuredContent.html` into its root div. The user clicks; the shell calls `tools/call mikser_ui_action`; the host bridges that to mikser as a real MCP call. The agent sees two tool invocations in the conversation: the render, then the action. This is the [MCP Apps spec](https://github.com/modelcontextprotocol/ext-apps) pull model — no suspended promises, no HTTP callbacks.
 
-**Optional webhook handler.** A layout that declares `mcpUi.handler.url` makes `mikser_ui_action` forward each action POST to that URL (HMAC-signed if `handler.secret` is set, JSON body with `callId`, `entityId`, `layoutId`, `action`, `payload`, `mode`, `timestamp`). The handler's JSON response becomes the tool result the agent sees. Handler failures fall back to pure-relay with a `handlerError` field — clicks are never silently lost. Mikser stays a content engine; application semantics live in the handler. See [ADR-0008](./decisions/0008-mcp-ui-action-delivery.md).
+**Optional webhook handler.** A layout that declares `mcpUi.handler.url` makes `mikser_ui_action` forward each action to that URL (HMAC-signed if `handler.secret` is set, JSON body with `entityId`, `layoutId`, `action`, `payload`, `mode`, `timestamp`). The handler's JSON response becomes the tool result the agent sees. Handler failures fall back to pure-relay with a `handlerError` field — clicks are never silently lost. Mikser stays a content engine; application semantics live in the handler. See [ADR-0008](./decisions/0008-mcp-ui-action-delivery.md).
 
 A few constraints worth knowing when authoring `mcpUi` layouts:
 
-- **The iframe is cross-origin from the host and the default CSP blocks all network.** Per MCP Apps spec, "The Host and the Sandbox MUST have different origins" and the default CSP is `default-src 'none'; connect-src 'none'`. So `fetch` to *any* URL from inside the iframe is blocked — including back to mikser. The only outbound channel is `window.parent.postMessage`. Hosts that follow the spec bridge JSON-RPC tools/call to the MCP server; hosts that don't show the iframe as raw HTML and the action stays inside the iframe.
+- **Layouts are body fragments, not full documents.** The shell wraps `<!DOCTYPE>` / `<html>` / `<head>` / `<body>` around your content. Adding them yourself is harmless but redundant — the host strips them during innerHTML injection. Inline `<style>` is fine (browsers honor it inside a div). Inline `<script>` is fine (the shell re-executes innerHTML-injected scripts so they take effect).
+- **`sendAction(action, payload?)` is the only protocol API you need.** It's exposed on `window` by the shell. Returns a Promise resolving with `mikser_ui_action`'s tool result. The shell handles `ui/initialize`, target origins, timeouts, and the pending-id dance. Layouts that try to reimplement the protocol won't break, but they also don't gain anything.
+- **The iframe is cross-origin from the host and the default CSP blocks all network.** Per MCP Apps spec, "The Host and the Sandbox MUST have different origins" and the default CSP is `default-src 'none'; connect-src 'none'`. So `fetch` to *any* URL from inside the iframe is blocked — including back to mikser. The shell's only outbound channel is `window.parent.postMessage`.
 - **Same layout system, different output path.** The MCP-UI layout doesn't have to be the same file as your production layout; declare a focused, sandbox-safe variant under a distinct name. mikser's auto-match won't pick it up for normal rendering as long as the filename doesn't collide.
-- **One source of truth for the body.** All renderers (`render-hbs`, `render-eta`, `render-liquid`) now read layout bodies from `entity.layout.content`. The frontmatter plugin strips the YAML before the renderer ever sees it.
+- **Frontmatter is stripped at read time.** The layouts plugin parses YAML inside `readLayoutContent`, populates `entity.meta`, and stores a clean body. The renderer never sees the YAML.
 - **ECT is the exception.** `mikser-io-render-ect` still file-loads layouts through ECT's own resolver, so YAML frontmatter on `.ect` layouts renders as literal text. Pick `hbs` / `eta` / `liquid` for layouts that need `mcpUi` frontmatter.
 
 ### Worked examples
@@ -325,24 +289,15 @@ mcpUi:
   actions: []
   sandbox: []
 ---
-<!DOCTYPE html>
-<html>
-  <head>
-    <meta charset="UTF-8" />
-    <style>
-      body { font: 16px/1.6 system-ui, sans-serif; max-width: 680px; margin: 2em auto; padding: 0 1em; color: #1f2937; }
-      h1 { margin-bottom: 0.25em; }
-      .meta { color: #6b7280; font-size: 0.875em; margin-bottom: 1.5em; }
-    </style>
-  </head>
-  <body>
-    <article>
-      <h1>{{document.meta.title}}</h1>
-      <div class="meta">{{date document.meta.date 'MMMM D, YYYY'}}{{#if document.meta.author}} · by {{document.meta.author}}{{/if}}</div>
-      <div>{{markdown document.content}}</div>
-    </article>
-  </body>
-</html>
+<style>
+  article h1 { margin-bottom: 0.25em; }
+  article .meta { color: #6b7280; font-size: 0.875em; margin-bottom: 1.5em; }
+</style>
+<article>
+  <h1>{{document.meta.title}}</h1>
+  <div class="meta">{{date document.meta.date 'MMMM D, YYYY'}}{{#if document.meta.author}} · by {{document.meta.author}}{{/if}}</div>
+  <div>{{markdown document.content}}</div>
+</article>
 ```
 
 The empty `actions: []` and `sandbox: []` signal "this is read-only — no script execution needed." The agent invokes it and shows the result; the user reads it; the conversation continues. No back-channel.
@@ -360,47 +315,27 @@ mcpUi:
   actions: [toggle-publish]
   sandbox: [allow-scripts]
 ---
-<!DOCTYPE html>
-<html>
-  <body style="font: 16px system-ui; padding: 2em;">
-    <h2>{{document.meta.title}}</h2>
-    <p>SKU: <code>{{document.meta.sku}}</code></p>
-    <p>Current status:
-      {{#if document.meta.published}}
-        <span style="color: #10b981;">● Published</span>
-      {{else}}
-        <span style="color: #6b7280;">● Draft</span>
-      {{/if}}
-    </p>
-    <button id="toggle" style="padding: 0.6em 1.4em; font-size: 1em; border: 0; border-radius: 4px; background: #2563eb; color: white; cursor: pointer;">
-      {{#if document.meta.published}}Unpublish{{else}}Publish now{{/if}}
-    </button>
-    <script>
-      const entityId = {{{json document.id}}}
-      const layoutId = {{{json document.layout.id}}}
-      let nextId = 1, hostOrigin = '*'
-      const pending = new Map()
-      window.addEventListener('message', e => {
-        if (!e.data?.id || !pending.has(e.data.id)) return
-        const { resolve, reject } = pending.get(e.data.id); pending.delete(e.data.id)
-        e.data.error ? reject(e.data.error) : resolve(e.data.result)
-      })
-      const rpc = (method, params) => new Promise((resolve, reject) => {
-        const id = nextId++; pending.set(id, { resolve, reject })
-        window.parent.postMessage({ jsonrpc: '2.0', method, params, id }, hostOrigin)
-      })
-      rpc('ui/initialize', { appCapabilities: { availableDisplayModes: ['inline'] } })
-        .then(init => { if (init.hostInfo?.origin) hostOrigin = init.hostInfo.origin })
-      const sendAction = (action, payload = {}) => rpc('tools/call', {
-        name: 'mikser_ui_action', arguments: { entityId, layoutId, action, payload },
-      })
-
-      document.getElementById('toggle').addEventListener('click', () =>
-        sendAction('toggle-publish', { published: {{#if document.meta.published}}false{{else}}true{{/if}} })
-      )
-    </script>
-  </body>
-</html>
+<style>
+  body { font: 16px system-ui; padding: 2em; }
+  #toggle { padding: 0.6em 1.4em; font-size: 1em; border: 0; border-radius: 4px; background: #2563eb; color: white; cursor: pointer; }
+</style>
+<h2>{{document.meta.title}}</h2>
+<p>SKU: <code>{{document.meta.sku}}</code></p>
+<p>Current status:
+  {{#if document.meta.published}}
+    <span style="color: #10b981;">● Published</span>
+  {{else}}
+    <span style="color: #6b7280;">● Draft</span>
+  {{/if}}
+</p>
+<button id="toggle">
+  {{#if document.meta.published}}Unpublish{{else}}Publish now{{/if}}
+</button>
+<script>
+  document.getElementById('toggle').addEventListener('click', () =>
+    sendAction('toggle-publish', { published: {{#if document.meta.published}}false{{else}}true{{/if}} })
+  )
+</script>
 ```
 
 The payload includes the **desired new state**, computed by the template — so the agent doesn't have to flip the boolean itself. This is the cheapest pattern: one button, one structured result.
@@ -418,60 +353,45 @@ mcpUi:
   actions: [approve, reject, request-changes]
   sandbox: [allow-scripts]
 ---
-<!DOCTYPE html>
-<html>
-  <body style="font: 16px system-ui; max-width: 720px; margin: 2em auto; padding: 0 1em;">
-    <article>
-      <h1>{{document.meta.title}}</h1>
-      <div style="color: #6b7280; margin-bottom: 1em;">{{date document.meta.date 'MMM D, YYYY'}}</div>
-      <div>{{markdown document.content}}</div>
-    </article>
+<style>
+  body { font: 16px system-ui; max-width: 720px; margin: 2em auto; padding: 0 1em; }
+  .actions { display: flex; gap: 0.5em; align-items: center; }
+  .actions button { padding: 0.5em 1em; border: 0; border-radius: 4px; color: white; cursor: pointer; }
+  .approve  { background: #10b981; }
+  .reject   { background: #ef4444; }
+  .changes  { background: #f59e0b; }
+  textarea  { width: 100%; margin-top: 0.5em; padding: 0.5em; font: inherit; }
+</style>
+<article>
+  <h1>{{document.meta.title}}</h1>
+  <div style="color: #6b7280; margin-bottom: 1em;">{{date document.meta.date 'MMM D, YYYY'}}</div>
+  <div>{{markdown document.content}}</div>
+</article>
 
-    <hr style="margin: 2em 0; border: 0; border-top: 1px solid #e5e7eb;">
+<hr style="margin: 2em 0; border: 0; border-top: 1px solid #e5e7eb;">
 
-    <div style="display: flex; gap: 0.5em; align-items: center;">
-      <button data-action="approve" style="background: #10b981; color: white; padding: 0.5em 1em; border: 0; border-radius: 4px; cursor: pointer;">Approve</button>
-      <button data-action="reject" style="background: #ef4444; color: white; padding: 0.5em 1em; border: 0; border-radius: 4px; cursor: pointer;">Reject</button>
-      <button data-action="request-changes" style="background: #f59e0b; color: white; padding: 0.5em 1em; border: 0; border-radius: 4px; cursor: pointer;">Request changes…</button>
-    </div>
+<div class="actions">
+  <button class="approve" data-action="approve">Approve</button>
+  <button class="reject"  data-action="reject">Reject</button>
+  <button class="changes" data-action="request-changes">Request changes…</button>
+</div>
 
-    <details style="margin-top: 1em;">
-      <summary style="cursor: pointer; color: #6b7280;">Note for the author (only sent with "Request changes")</summary>
-      <textarea id="note" rows="3" style="width: 100%; margin-top: 0.5em; padding: 0.5em; font: inherit;"></textarea>
-    </details>
+<details style="margin-top: 1em;">
+  <summary style="cursor: pointer; color: #6b7280;">Note for the author (only sent with "Request changes")</summary>
+  <textarea id="note" rows="3"></textarea>
+</details>
 
-    <script>
-      const entityId = {{{json document.id}}}
-      const layoutId = {{{json document.layout.id}}}
-      let nextId = 1, hostOrigin = '*'
-      const pending = new Map()
-      window.addEventListener('message', e => {
-        if (!e.data?.id || !pending.has(e.data.id)) return
-        const { resolve, reject } = pending.get(e.data.id); pending.delete(e.data.id)
-        e.data.error ? reject(e.data.error) : resolve(e.data.result)
-      })
-      const rpc = (method, params) => new Promise((resolve, reject) => {
-        const id = nextId++; pending.set(id, { resolve, reject })
-        window.parent.postMessage({ jsonrpc: '2.0', method, params, id }, hostOrigin)
-      })
-      rpc('ui/initialize', { appCapabilities: { availableDisplayModes: ['inline'] } })
-        .then(init => { if (init.hostInfo?.origin) hostOrigin = init.hostInfo.origin })
-      const sendAction = (action, payload = {}) => rpc('tools/call', {
-        name: 'mikser_ui_action', arguments: { entityId, layoutId, action, payload },
-      })
-
-      document.querySelectorAll('[data-action]').forEach(btn => {
-        btn.addEventListener('click', () => {
-          const action = btn.dataset.action
-          const payload = action === 'request-changes'
-            ? { note: document.getElementById('note').value }
-            : {}
-          sendAction(action, payload)
-        })
-      })
-    </script>
-  </body>
-</html>
+<script>
+  document.querySelectorAll('[data-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const action  = btn.dataset.action
+      const payload = action === 'request-changes'
+        ? { note: document.getElementById('note').value }
+        : {}
+      sendAction(action, payload)
+    })
+  })
+</script>
 ```
 
 Notice the structured payload only attaches when relevant. The agent's next step depends on the action: approve → publish; reject → log + notify; request-changes → re-edit with the note in context.
@@ -489,72 +409,56 @@ mcpUi:
   actions: [save, cancel]
   sandbox: [allow-scripts]
 ---
-<!DOCTYPE html>
-<html>
-<body style="font: 16px system-ui; max-width: 600px; margin: 2em auto; padding: 0 1em;">
-  <h2>SEO · {{ document.meta.title }}</h2>
+<style>
+  body { font: 16px system-ui; max-width: 600px; margin: 2em auto; padding: 0 1em; }
+  form { display: grid; gap: 1em; }
+  label > div { font-weight: 500; }
+  input, textarea { width: 100%; padding: 0.5em; font: inherit; }
+  .actions { display: flex; gap: 0.5em; margin-top: 0.5em; }
+  .actions button { padding: 0.5em 1em; border: 0; border-radius: 4px; cursor: pointer; }
+  .save   { background: #2563eb; color: white; }
+  .cancel { background: #e5e7eb; }
+</style>
+<h2>SEO · {{ document.meta.title }}</h2>
+<form id="seo">
+  <label>
+    <div>Title (max 60 chars)</div>
+    <input name="seoTitle" value="{{ document.meta.seo.title }}" maxlength="60">
+  </label>
+  <label>
+    <div>Description (max 160 chars)</div>
+    <textarea name="seoDescription" rows="3" maxlength="160">{{ document.meta.seo.description }}</textarea>
+  </label>
+  <label>
+    <div>OG image alt</div>
+    <input name="ogImageAlt" value="{{ document.meta.seo.ogImageAlt }}">
+  </label>
+  <div class="actions">
+    <button type="button" class="save"   data-action="save">Save</button>
+    <button type="button" class="cancel" data-action="cancel">Cancel</button>
+  </div>
+</form>
 
-  <form id="seo" style="display: grid; gap: 1em;">
-    <label>
-      <div style="font-weight: 500;">Title (max 60 chars)</div>
-      <input name="seoTitle" value="{{ document.meta.seo.title }}" maxlength="60" style="width: 100%; padding: 0.5em; font: inherit;">
-    </label>
-    <label>
-      <div style="font-weight: 500;">Description (max 160 chars)</div>
-      <textarea name="seoDescription" rows="3" maxlength="160" style="width: 100%; padding: 0.5em; font: inherit;">{{ document.meta.seo.description }}</textarea>
-    </label>
-    <label>
-      <div style="font-weight: 500;">OG image alt</div>
-      <input name="ogImageAlt" value="{{ document.meta.seo.ogImageAlt }}" style="width: 100%; padding: 0.5em; font: inherit;">
-    </label>
-
-    <div style="display: flex; gap: 0.5em; margin-top: 0.5em;">
-      <button type="button" data-action="save"   style="background: #2563eb; color: white; padding: 0.5em 1em; border: 0; border-radius: 4px; cursor: pointer;">Save</button>
-      <button type="button" data-action="cancel" style="background: #e5e7eb; padding: 0.5em 1em; border: 0; border-radius: 4px; cursor: pointer;">Cancel</button>
-    </div>
-  </form>
-
-  <script>
-    const entityId = {{ document.id | json }}
-    const layoutId = {{ document.layout.id | json }}
-    let nextId = 1, hostOrigin = '*'
-    const pending = new Map()
-    window.addEventListener('message', e => {
-      if (!e.data?.id || !pending.has(e.data.id)) return
-      const { resolve, reject } = pending.get(e.data.id); pending.delete(e.data.id)
-      e.data.error ? reject(e.data.error) : resolve(e.data.result)
-    })
-    const rpc = (method, params) => new Promise((resolve, reject) => {
-      const id = nextId++; pending.set(id, { resolve, reject })
-      window.parent.postMessage({ jsonrpc: '2.0', method, params, id }, hostOrigin)
-    })
-    rpc('ui/initialize', { appCapabilities: { availableDisplayModes: ['inline'] } })
-      .then(init => { if (init.hostInfo?.origin) hostOrigin = init.hostInfo.origin })
-    const sendAction = (action, payload = {}) => rpc('tools/call', {
-      name: 'mikser_ui_action', arguments: { entityId, layoutId, action, payload },
-    })
-
-    const initial = {
-      seoTitle:       {{ document.meta.seo.title | json }},
-      seoDescription: {{ document.meta.seo.description | json }},
-      ogImageAlt:     {{ document.meta.seo.ogImageAlt | json }},
-    }
-    document.querySelectorAll('[data-action]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const action = btn.dataset.action
-        const payload = {}
-        if (action === 'save') {
-          const fd = new FormData(document.getElementById('seo'))
-          for (const [k, v] of fd.entries()) {
-            if (v !== initial[k]) payload[k] = v   // diff: only send changed fields
-          }
+<script>
+  const initial = {
+    seoTitle:       {{ document.meta.seo.title | json }},
+    seoDescription: {{ document.meta.seo.description | json }},
+    ogImageAlt:     {{ document.meta.seo.ogImageAlt | json }},
+  }
+  document.querySelectorAll('[data-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const action = btn.dataset.action
+      const payload = {}
+      if (action === 'save') {
+        const fd = new FormData(document.getElementById('seo'))
+        for (const [k, v] of fd.entries()) {
+          if (v !== initial[k]) payload[k] = v   // diff: only send changed fields
         }
-        sendAction(action, payload)
-      })
+      }
+      sendAction(action, payload)
     })
-  </script>
-</body>
-</html>
+  })
+</script>
 ```
 
 Note the diff-on-submit: the layout sends only the fields the user actually changed. The agent's next step is `mikser_api_update_entity({ id: entityId, patch: payload.seo })` — surgical writes, no clobbering.
@@ -572,59 +476,40 @@ mcpUi:
   actions: [save, cancel]
   sandbox: [allow-scripts]
 ---
-<!DOCTYPE html>
-<html>
-<body style="font: 16px system-ui; padding: 2em; max-width: 500px;">
-  <h3>Tags for: <%= it.document.meta.title %></h3>
+<style>
+  body { font: 16px system-ui; padding: 2em; max-width: 500px; }
+  #tags { display: flex; flex-wrap: wrap; gap: 0.4em; margin: 1em 0; }
+  #tags button { padding: 0.4em 0.8em; border-radius: 999px; border: 1px solid #d1d5db; background: white; color: #1f2937; cursor: pointer; }
+  #tags button.selected { background: #2563eb; color: white; }
+  .actions { display: flex; gap: 0.5em; }
+  .actions button { padding: 0.5em 1em; border: 0; border-radius: 4px; cursor: pointer; }
+  .save   { background: #10b981; color: white; }
+  .cancel { background: #e5e7eb; }
+</style>
+<h3>Tags for: <%= it.document.meta.title %></h3>
+<div id="tags">
+  <% for (const tag of it.runtime.allTags || []) { %>
+    <% const selected = (it.document.meta.tags || []).includes(tag) %>
+    <button type="button" data-tag="<%= tag %>" class="<%= selected ? 'selected' : '' %>"><%= tag %></button>
+  <% } %>
+</div>
+<div class="actions">
+  <button class="save"   data-action="save">Save</button>
+  <button class="cancel" data-action="cancel">Cancel</button>
+</div>
 
-  <div id="tags" style="display: flex; flex-wrap: wrap; gap: 0.4em; margin: 1em 0;">
-    <% for (const tag of it.runtime.allTags || []) { %>
-      <% const selected = (it.document.meta.tags || []).includes(tag) %>
-      <button type="button" data-tag="<%= tag %>" class="<%= selected ? 'selected' : '' %>"
-        style="padding: 0.4em 0.8em; border-radius: 999px; border: 1px solid #d1d5db; background: <%= selected ? '#2563eb' : 'white' %>; color: <%= selected ? 'white' : '#1f2937' %>; cursor: pointer;">
-        <%= tag %>
-      </button>
-    <% } %>
-  </div>
-
-  <div style="display: flex; gap: 0.5em;">
-    <button data-action="save"   style="background: #10b981; color: white; padding: 0.5em 1em; border: 0; border-radius: 4px; cursor: pointer;">Save</button>
-    <button data-action="cancel" style="background: #e5e7eb; padding: 0.5em 1em; border: 0; border-radius: 4px; cursor: pointer;">Cancel</button>
-  </div>
-
-  <script>
-    const entityId = <%= JSON.stringify(it.document.id) %>
-    const layoutId = <%= JSON.stringify(it.document.layout.id) %>
-    let nextId = 1, hostOrigin = '*'
-    const pending = new Map()
-    window.addEventListener('message', e => {
-      if (!e.data?.id || !pending.has(e.data.id)) return
-      const { resolve, reject } = pending.get(e.data.id); pending.delete(e.data.id)
-      e.data.error ? reject(e.data.error) : resolve(e.data.result)
+<script>
+  document.querySelectorAll('[data-tag]').forEach(btn => {
+    btn.addEventListener('click', () => btn.classList.toggle('selected'))
+  })
+  document.querySelectorAll('[data-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const action = btn.dataset.action
+      const tags = Array.from(document.querySelectorAll('[data-tag].selected')).map(b => b.dataset.tag)
+      sendAction(action, { tags })
     })
-    const rpc = (method, params) => new Promise((resolve, reject) => {
-      const id = nextId++; pending.set(id, { resolve, reject })
-      window.parent.postMessage({ jsonrpc: '2.0', method, params, id }, hostOrigin)
-    })
-    rpc('ui/initialize', { appCapabilities: { availableDisplayModes: ['inline'] } })
-      .then(init => { if (init.hostInfo?.origin) hostOrigin = init.hostInfo.origin })
-    const sendAction = (action, payload = {}) => rpc('tools/call', {
-      name: 'mikser_ui_action', arguments: { entityId, layoutId, action, payload },
-    })
-
-    document.querySelectorAll('[data-tag]').forEach(btn => {
-      btn.addEventListener('click', () => btn.classList.toggle('selected'))
-    })
-    document.querySelectorAll('[data-action]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const action = btn.dataset.action
-        const tags = Array.from(document.querySelectorAll('[data-tag].selected')).map(b => b.dataset.tag)
-        sendAction(action, { tags })
-      })
-    })
-  </script>
-</body>
-</html>
+  })
+</script>
 ```
 
 `it.runtime.allTags` is exposed from a sidecar `tag-picker.eta.js` that populates the candidate list before render. The selection is sent as a flat array — the agent decides whether to compute a diff or just overwrite.
@@ -642,51 +527,30 @@ mcpUi:
   actions: [set-status]
   sandbox: [allow-scripts]
 ---
-<!DOCTYPE html>
-<html>
-<body style="font: 16px system-ui; padding: 2em; max-width: 600px;">
-  <h2>Ticket #{{document.meta.ticketId}}</h2>
-  <p style="color: #6b7280;">{{document.meta.subject}}</p>
-  <blockquote style="border-left: 3px solid #e5e7eb; padding-left: 1em; margin: 1em 0; color: #4b5563;">
-    {{document.meta.firstMessage}}
-  </blockquote>
+<style>
+  body { font: 16px system-ui; padding: 2em; max-width: 600px; }
+  .statuses { display: flex; gap: 0.5em; margin-top: 1.5em; }
+  .statuses button { padding: 0.5em 1em; border: 0; border-radius: 4px; cursor: pointer; background: #e5e7eb; color: #1f2937; }
+  .statuses button.current { background: #2563eb; color: white; }
+  blockquote { border-left: 3px solid #e5e7eb; padding-left: 1em; margin: 1em 0; color: #4b5563; }
+</style>
+<h2>Ticket #{{document.meta.ticketId}}</h2>
+<p style="color: #6b7280;">{{document.meta.subject}}</p>
+<blockquote>{{document.meta.firstMessage}}</blockquote>
 
-  <div style="display: flex; gap: 0.5em; margin-top: 1.5em;">
-    {{#each (array "open" "in-progress" "waiting-on-customer" "resolved" "won't-fix")}}
-      <button data-status="{{this}}" style="padding: 0.5em 1em; border: 0; border-radius: 4px; cursor: pointer; background: {{#eq this ../document.meta.status}}#2563eb{{else}}#e5e7eb{{/eq}}; color: {{#eq this ../document.meta.status}}white{{else}}#1f2937{{/eq}};">
-        {{this}}
-      </button>
-    {{/each}}
-  </div>
+<div class="statuses">
+  {{#each (array "open" "in-progress" "waiting-on-customer" "resolved" "won't-fix")}}
+    <button data-status="{{this}}" class="{{#eq this ../document.meta.status}}current{{/eq}}">{{this}}</button>
+  {{/each}}
+</div>
 
-  <script>
-    const entityId = {{{json document.id}}}
-    const layoutId = {{{json document.layout.id}}}
-    let nextId = 1, hostOrigin = '*'
-    const pending = new Map()
-    window.addEventListener('message', e => {
-      if (!e.data?.id || !pending.has(e.data.id)) return
-      const { resolve, reject } = pending.get(e.data.id); pending.delete(e.data.id)
-      e.data.error ? reject(e.data.error) : resolve(e.data.result)
-    })
-    const rpc = (method, params) => new Promise((resolve, reject) => {
-      const id = nextId++; pending.set(id, { resolve, reject })
-      window.parent.postMessage({ jsonrpc: '2.0', method, params, id }, hostOrigin)
-    })
-    rpc('ui/initialize', { appCapabilities: { availableDisplayModes: ['inline'] } })
-      .then(init => { if (init.hostInfo?.origin) hostOrigin = init.hostInfo.origin })
-    const sendAction = (action, payload = {}) => rpc('tools/call', {
-      name: 'mikser_ui_action', arguments: { entityId, layoutId, action, payload },
-    })
-
-    document.querySelectorAll('[data-status]').forEach(btn => {
-      btn.addEventListener('click', () =>
-        sendAction('set-status', { status: btn.dataset.status })
-      )
-    })
-  </script>
-</body>
-</html>
+<script>
+  document.querySelectorAll('[data-status]').forEach(btn => {
+    btn.addEventListener('click', () =>
+      sendAction('set-status', { status: btn.dataset.status })
+    )
+  })
+</script>
 ```
 
 Single action with a parameterised payload — the user picks the value, the agent's next step is uniform regardless of which status was chosen.
@@ -704,90 +568,76 @@ mcpUi:
   actions: [complete, cancel]
   sandbox: [allow-scripts]
 ---
-<!DOCTYPE html>
-<html>
-<body style="font: 16px system-ui; padding: 2em; max-width: 520px;">
-  <div id="progress" style="display: flex; gap: 0.25em; margin-bottom: 2em;">
-    <div data-step="1" style="flex: 1; height: 4px; background: #2563eb;"></div>
-    <div data-step="2" style="flex: 1; height: 4px; background: #e5e7eb;"></div>
-    <div data-step="3" style="flex: 1; height: 4px; background: #e5e7eb;"></div>
-  </div>
+<style>
+  body { font: 16px system-ui; padding: 2em; max-width: 520px; }
+  #progress { display: flex; gap: 0.25em; margin-bottom: 2em; }
+  #progress > div { flex: 1; height: 4px; background: #e5e7eb; }
+  input, select { width: 100%; padding: 0.5em; font: inherit; }
+  .nav { display: flex; gap: 0.5em; margin-top: 2em; }
+  .nav button { padding: 0.5em 1em; border: 0; border-radius: 4px; cursor: pointer; }
+  #back   { background: #e5e7eb; }
+  #next   { background: #2563eb; color: white; }
+  #cancel { margin-left: auto; background: transparent; color: #6b7280; }
+</style>
 
-  <div data-step="1" class="step">
-    <h2>What's your team name?</h2>
-    <input name="teamName" style="width: 100%; padding: 0.5em; font: inherit;">
-  </div>
-  <div data-step="2" class="step" hidden>
-    <h2>How many people?</h2>
-    <input name="teamSize" type="number" min="1" max="10000" style="width: 100%; padding: 0.5em; font: inherit;">
-  </div>
-  <div data-step="3" class="step" hidden>
-    <h2>Primary content type?</h2>
-    <select name="contentType" style="width: 100%; padding: 0.5em; font: inherit;">
-      <option>blog</option>
-      <option>documentation</option>
-      <option>marketing-site</option>
-      <option>knowledge-base</option>
-    </select>
-  </div>
+<div id="progress">
+  <div data-step="1"></div>
+  <div data-step="2"></div>
+  <div data-step="3"></div>
+</div>
 
-  <div style="display: flex; gap: 0.5em; margin-top: 2em;">
-    <button id="back" style="background: #e5e7eb; padding: 0.5em 1em; border: 0; border-radius: 4px; cursor: pointer;" hidden>Back</button>
-    <button id="next" style="background: #2563eb; color: white; padding: 0.5em 1em; border: 0; border-radius: 4px; cursor: pointer;">Next</button>
-    <button id="cancel" style="margin-left: auto; background: transparent; color: #6b7280; padding: 0.5em 1em; border: 0; cursor: pointer;">Cancel</button>
-  </div>
+<div data-step="1" class="step">
+  <h2>What's your team name?</h2>
+  <input name="teamName">
+</div>
+<div data-step="2" class="step" hidden>
+  <h2>How many people?</h2>
+  <input name="teamSize" type="number" min="1" max="10000">
+</div>
+<div data-step="3" class="step" hidden>
+  <h2>Primary content type?</h2>
+  <select name="contentType">
+    <option>blog</option>
+    <option>documentation</option>
+    <option>marketing-site</option>
+    <option>knowledge-base</option>
+  </select>
+</div>
 
-  <script>
-    const entityId = {{{json document.id}}}
-    const layoutId = {{{json document.layout.id}}}
-    let nextId = 1, hostOrigin = '*'
-    const pending = new Map()
-    window.addEventListener('message', e => {
-      if (!e.data?.id || !pending.has(e.data.id)) return
-      const { resolve, reject } = pending.get(e.data.id); pending.delete(e.data.id)
-      e.data.error ? reject(e.data.error) : resolve(e.data.result)
+<div class="nav">
+  <button id="back" hidden>Back</button>
+  <button id="next">Next</button>
+  <button id="cancel">Cancel</button>
+</div>
+
+<script>
+  const state = { step: 1, answers: {} }
+  const totalSteps = 3
+  function render() {
+    document.querySelectorAll('[data-step].step').forEach(el => {
+      el.hidden = Number(el.dataset.step) !== state.step
     })
-    const rpc = (method, params) => new Promise((resolve, reject) => {
-      const id = nextId++; pending.set(id, { resolve, reject })
-      window.parent.postMessage({ jsonrpc: '2.0', method, params, id }, hostOrigin)
+    document.querySelectorAll('#progress [data-step]').forEach(el => {
+      el.style.background = Number(el.dataset.step) <= state.step ? '#2563eb' : '#e5e7eb'
     })
-    rpc('ui/initialize', { appCapabilities: { availableDisplayModes: ['inline'] } })
-      .then(init => { if (init.hostInfo?.origin) hostOrigin = init.hostInfo.origin })
-    const sendAction = (action, payload = {}) => rpc('tools/call', {
-      name: 'mikser_ui_action', arguments: { entityId, layoutId, action, payload },
-    })
-
-    const state = { step: 1, answers: {} }
-    const totalSteps = 3
-
-    function render() {
-      document.querySelectorAll('[data-step].step').forEach(el => {
-        el.hidden = Number(el.dataset.step) !== state.step
-      })
-      document.querySelectorAll('#progress [data-step]').forEach(el => {
-        el.style.background = Number(el.dataset.step) <= state.step ? '#2563eb' : '#e5e7eb'
-      })
-      document.getElementById('back').hidden = state.step === 1
-      document.getElementById('next').textContent = state.step === totalSteps ? 'Done' : 'Next'
-    }
-    function captureCurrent() {
-      const input = document.querySelector(`[data-step="${state.step}"].step input, [data-step="${state.step}"].step select`)
-      if (input) state.answers[input.name] = input.value
-    }
-
-    document.getElementById('next').addEventListener('click', () => {
-      captureCurrent()
-      if (state.step < totalSteps) { state.step++; render() }
-      else { sendAction('complete', state.answers) }
-    })
-    document.getElementById('back').addEventListener('click', () => {
-      captureCurrent(); state.step--; render()
-    })
-    document.getElementById('cancel').addEventListener('click', () => sendAction('cancel'))
-    render()
-  </script>
-</body>
-</html>
+    document.getElementById('back').hidden = state.step === 1
+    document.getElementById('next').textContent = state.step === totalSteps ? 'Done' : 'Next'
+  }
+  function captureCurrent() {
+    const input = document.querySelector(`[data-step="${state.step}"].step input, [data-step="${state.step}"].step select`)
+    if (input) state.answers[input.name] = input.value
+  }
+  document.getElementById('next').addEventListener('click', () => {
+    captureCurrent()
+    if (state.step < totalSteps) { state.step++; render() }
+    else { sendAction('complete', state.answers) }
+  })
+  document.getElementById('back').addEventListener('click', () => {
+    captureCurrent(); state.step--; render()
+  })
+  document.getElementById('cancel').addEventListener('click', () => sendAction('cancel'))
+  render()
+</script>
 ```
 
 State lives inside the iframe; the agent only sees the final merged answers (or `cancel`). One `mikser_ui_action` call covers the whole wizard. This pattern is worth it when the back-and-forth would otherwise burn 3–4 agent turns.
@@ -796,17 +646,17 @@ State lives inside the iframe; the agent only sees the final merged answers (or 
 
 The seven examples above lean on the same conventions. Worth naming them so they're easy to extend.
 
-- **`tools/call` against `mikser_ui_action` is the contract** — delivered over `window.parent.postMessage` as a JSON-RPC frame, with `arguments: { entityId, layoutId, action, payload }`. The host bridges it into a real MCP tool call on your behalf. `action` MUST be a name declared in your layout's `mcpUi.actions` list — mikser rejects anything else with a structured error and never invokes the optional `handler.url`. `entityId` and `layoutId` come from the render context; the iframe just reads them.
-- **Embed entity data with `{{{json document.id}}}` (or the equivalent in your engine).** Triple-stash in Handlebars / `| json` in Liquid / `<%= JSON.stringify(it.x) %>` in Eta. This prevents injection if a field contains quotes — never interpolate raw string fields into a `'string-literal'` in script tags. The same rule applies to `document.layout.id`.
-- **Pick the smallest sandbox that works.** Pure render: `sandbox: []` (no scripts at all). Click-only interaction: `sandbox: [allow-scripts]`. `postMessage` works at `allow-scripts` because it's not a network operation in the CSP sense; the host receives it as a same-frame message. Don't ship `allow-same-origin` casually — it lifts most of the cross-origin protection the host's double-iframe setup gives you.
-- **Tighten `hostOrigin` after `ui/initialize`.** The handshake's response carries the host's origin in `hostInfo.origin`. Switch your `targetOrigin` from `'*'` to that value before any subsequent `postMessage` — otherwise a hostile parent frame could read your action params. The canonical helper does this in one line; copy that behavior.
+- **`sendAction(action, payload?)` is the contract** — exposed on `window` by the shell at `ui://mikser/preview-ui-shell`. Layouts call it; the shell relays `tools/call` against `mikser_ui_action` to the host; the host bridges it to mikser. Returns a Promise resolving with `mikser_ui_action`'s tool result (pure relay or handler-forwarded). `action` MUST be a name declared in your layout's `mcpUi.actions` list — mikser rejects anything else and never invokes the optional `handler.url`. You don't need to thread `entityId` / `layoutId` yourself; the shell tracks both from `ui/notifications/tool-result`.
+- **Layouts are body fragments, not full documents.** No `<!DOCTYPE>`, no `<html>` / `<head>` / `<body>` — the shell wraps your content. Inline `<style>` and `<script>` are fine and survive `innerHTML` injection (the shell re-executes scripts).
+- **Embed entity data with `{{{json document.id}}}` (or the equivalent in your engine).** Triple-stash in Handlebars / `| json` in Liquid / `<%= JSON.stringify(it.x) %>` in Eta. Prevents injection if a field contains quotes — never interpolate raw string fields into a `'string-literal'` in script tags.
+- **Pick the smallest sandbox that works.** Pure render: `sandbox: []` (no scripts at all). Click-only interaction: `sandbox: [allow-scripts]`. `postMessage` works at `allow-scripts` because it's not a network operation in the CSP sense. Don't ship `allow-same-origin` casually — it lifts most of the cross-origin protection the host's double-iframe setup gives you.
 - **Send only what changed.** Multi-field forms (#4) should diff against the initial values and post only the deltas. Single-state toggles (#2, #6) send the target state, not the current state. Wizards (#7) send the merged final answers. Smaller payloads are cheaper for the agent to reason about.
-- **Style inline, ship self-contained.** No external CSS, no web fonts, no analytics — the default MCP Apps CSP is `default-src 'none'; connect-src 'none'`. The only outbound channel from the iframe is `postMessage` to the host. System fonts (`font-family: system-ui`) and inline `<style>` are fine; everything else has to be embedded.
+- **Style inline, ship self-contained.** No external CSS, no web fonts, no analytics — the default MCP Apps CSP is `default-src 'none'; connect-src 'none'`. The shell's only outbound channel is `postMessage` to the host. System fonts (`font-family: system-ui`) and inline `<style>` are fine; everything else has to be embedded.
 - **Use the layout body to compute what the agent shouldn't.** Example #2's payload pre-computes the *new* publish state. Example #4 pre-computes the diff. Pushing logic to render-time means the agent receives ready-to-act-on data rather than raw inputs it has to interpret.
 - **Don't smuggle long content through the payload.** If the user types a 2000-word note, send back a reference id and call `mikser_api_read_entity` later — not as a single huge `payload.note` string. Tool results live in the agent's context window.
 - **For external workflows, declare `mcpUi.handler.url` instead of teaching the agent the schema.** When a layout's action should hit your application server (Slack notification, JIRA transition, queue), set `handler.url` in the frontmatter. `mikser_ui_action` POSTs the action to that URL (HMAC-signed if `handler.secret` is set) and uses the response as the tool result. The agent stays generic; the application semantics stay in your service. Mikser stays a content engine.
 
-These conventions aren't enforced by the engine — they're just what makes layouts compose with agents cleanly. The contract is the MCP Apps spec; mikser's role is to render the iframe and accept the resulting `tools/call`. Application semantics live either in the agent (pure-relay) or in your `handler.url` webhook — never in mikser.
+These conventions aren't enforced by the engine — they're just what makes layouts compose with agents cleanly. The contract is the MCP Apps spec; mikser's role is to ship the shell (`ui://mikser/preview-ui-shell`), render the layout against the entity, and accept the resulting `tools/call`. Application semantics live either in the agent (pure-relay) or in your `handler.url` webhook — never in mikser.
 
 ## Built-in resources
 

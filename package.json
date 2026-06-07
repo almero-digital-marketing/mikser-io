@@ -1,6 +1,6 @@
 {
 	"name": "mikser-io",
-	"version": "8.0.1",
+	"version": "8.1.0",
 	"description": "<p align=\"center\">   <img src=\"mikser-lockup-stacked.svg\" alt=\"mikser\" width=\"198\" /> </p>",
 	"main": "index.js",
 	"scripts": {
