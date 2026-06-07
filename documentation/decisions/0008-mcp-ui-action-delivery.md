@@ -189,14 +189,19 @@ mcpUi:
     <button data-action="approve">Approve</button>
     <button data-action="reject">Reject</button>
     <script>
-      const callId    = {{{json data.callId}}}
+      // mikser injects callId + actionUrl into entity.options.mcpUi at
+      // render-time — same noun (`options.*`) it already uses for
+      // per-entity engine bookkeeping (correlationId, save, …).
+      const callId    = {{{json document.options.mcpUi.callId}}}
+      const actionUrl = {{{json document.options.mcpUi.actionUrl}}}
       const entityId  = {{{json document.id}}}
       document.querySelectorAll('[data-action]').forEach(b => {
         b.addEventListener('click', () => {
           // postMessage for hosts that bridge it
-          window.parent.postMessage({ type: 'mcp-ui/action', action: b.dataset.action, entityId }, '*')
-          // canonical delivery — same-origin fetch
-          fetch(`/api/mcp-ui/action/${callId}`, {
+          window.parent.postMessage({ type: 'mcp-ui/action', action: b.dataset.action, entityId, callId }, '*')
+          // canonical delivery — same-origin fetch resolves the
+          // suspended `mikser_preview_ui` tool call.
+          fetch(actionUrl, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ action: b.dataset.action, entityId, payload: {} }),

@@ -237,11 +237,13 @@ mcpUi:
     <script>
       // Two delivery paths — see ADR-0008. postMessage is the host's
       // bridge for MCP-UI Apps hosts. fetch is the canonical path that
-      // resolves the suspended `mikser_preview_ui` tool call directly
-      // (mikser injects callId + actionUrl into entity.meta._mcpUi).
+      // resolves the suspended `mikser_preview_ui` tool call directly.
+      // mikser injects callId + actionUrl into entity.options.mcpUi —
+      // same noun (`options.*`) it already uses for engine bookkeeping
+      // like correlationId.
       const entityId  = {{{json document.id}}}
-      const callId    = {{{json document.meta._mcpUi.callId}}}
-      const actionUrl = {{{json document.meta._mcpUi.actionUrl}}}
+      const callId    = {{{json document.options.mcpUi.callId}}}
+      const actionUrl = {{{json document.options.mcpUi.actionUrl}}}
 
       async function sendAction (action, payload = {}) {
         try {
@@ -270,7 +272,7 @@ mcpUi:
 
 1. The plugin walks the catalog for layouts where `meta.mcpUi.mode === 'preview'`.
 2. Among those, it picks the one whose `meta.match` pattern matches the entity (using mikser's `matchEntity` — same matcher used by the layouts plugin).
-3. It mints a single-use `callId`, registers a pending entry, and injects `_mcpUi.{callId, actionUrl}` into the render context.
+3. It mints a single-use `callId`, registers a pending entry, and injects `{callId, actionUrl}` into the render context at `entity.options.mcpUi` (the same namespace mikser already uses for per-entity engine bookkeeping like `correlationId` and `save`).
 4. It runs the layout through the renderer chain (`render-hbs`, `render-eta`, `render-liquid`, etc.) and returns the HTML inline plus `_meta.mcpUi` containing the declared actions and sandbox flags.
 5. The tool **suspends** until either (a) `POST /api/mcp-ui/action/:callId` arrives — that resolves the call with `{action, entityId, payload}` (or the handler's response, if `mcpUi.handler.url` is set), or (b) `timeoutSeconds` elapses. Pass `awaitAction: false` to opt out and get the HTML back synchronously.
 
@@ -278,7 +280,7 @@ mcpUi:
 
 A few constraints worth knowing when authoring `mcpUi` layouts:
 
-- **The iframe is same-origin with mikser, so `fetch` to `_mcpUi.actionUrl` works.** This is the canonical delivery path. `postMessage` is still useful as a host-bridge signal for MCP-UI Apps hosts that wire it through to the tool result, but a layout that only posts a message will work in *some* hosts and silently hang in others. Doing both is cheap and makes the layout portable.
+- **The iframe is same-origin with mikser, so `fetch` to `options.mcpUi.actionUrl` works.** This is the canonical delivery path. `postMessage` is still useful as a host-bridge signal for MCP-UI Apps hosts that wire it through to the tool result, but a layout that only posts a message will work in *some* hosts and silently hang in others. Doing both is cheap and makes the layout portable.
 - **Same layout system, different output path.** The MCP-UI layout doesn't have to be the same file as your production layout; declare a focused, sandbox-safe variant under a distinct name. mikser's auto-match won't pick it up for normal rendering as long as the filename doesn't collide.
 - **One source of truth for the body.** All renderers (`render-hbs`, `render-eta`, `render-liquid`) now read layout bodies from `entity.layout.content`. The frontmatter plugin strips the YAML before the renderer ever sees it.
 - **ECT is the exception.** `mikser-io-render-ect` still file-loads layouts through ECT's own resolver, so YAML frontmatter on `.ect` layouts renders as literal text. Pick `hbs` / `eta` / `liquid` for layouts that need `mcpUi` frontmatter.
@@ -287,7 +289,7 @@ A few constraints worth knowing when authoring `mcpUi` layouts:
 
 MCP-UI is a novel concept and the conventions get easier to internalise once you see them on real layouts. Seven examples below — varied template engines (`hbs`, `eta`, `liquid`), varied interaction patterns (pure render, single button, multi-action approval, form submission, multi-select picker, status switcher, multi-step wizard), varied domains (article, product, SEO, tags, support ticket, onboarding). Copy-and-modify is the intended workflow.
 
-Each agent call looks like `mikser_preview_ui({ entityId: '...', mode: '<mode>' })`. The host renders the returned HTML in a sandboxed iframe; the tool call **suspends** until the user clicks something. Examples 2–7 use the same dual-path `sendAction()` helper shown in the canonical sample above — a `fetch` to `_mcpUi.actionUrl` (canonical, resolves the suspended tool call regardless of host) plus a best-effort `window.parent.postMessage` (for hosts that bridge it). Either path delivers `{action, entityId, payload}` back to the agent as the structured tool result.
+Each agent call looks like `mikser_preview_ui({ entityId: '...', mode: '<mode>' })`. The host renders the returned HTML in a sandboxed iframe; the tool call **suspends** until the user clicks something. Examples 2–7 use the same dual-path `sendAction()` helper shown in the canonical sample above — a `fetch` to `options.mcpUi.actionUrl` (canonical, resolves the suspended tool call regardless of host) plus a best-effort `window.parent.postMessage` (for hosts that bridge it). Either path delivers `{action, entityId, payload}` back to the agent as the structured tool result.
 
 #### 1. Pure preview — no JS, no action delivery
 
@@ -354,8 +356,8 @@ mcpUi:
     </button>
     <script>
       const entityId  = {{{json document.id}}}
-      const callId    = {{{json document.meta._mcpUi.callId}}}
-      const actionUrl = {{{json document.meta._mcpUi.actionUrl}}}
+      const callId    = {{{json document.options.mcpUi.callId}}}
+      const actionUrl = {{{json document.options.mcpUi.actionUrl}}}
       async function sendAction (action, payload = {}) {
         try { window.parent.postMessage({ type: 'mcp-ui/action', action, entityId, callId, payload }, '*') } catch {}
         return fetch(actionUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, entityId, payload }) })
@@ -407,8 +409,8 @@ mcpUi:
 
     <script>
       const entityId  = {{{json document.id}}}
-      const callId    = {{{json document.meta._mcpUi.callId}}}
-      const actionUrl = {{{json document.meta._mcpUi.actionUrl}}}
+      const callId    = {{{json document.options.mcpUi.callId}}}
+      const actionUrl = {{{json document.options.mcpUi.actionUrl}}}
       async function sendAction (action, payload = {}) {
         try { window.parent.postMessage({ type: 'mcp-ui/action', action, entityId, callId, payload }, '*') } catch {}
         return fetch(actionUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, entityId, payload }) })
@@ -469,8 +471,8 @@ mcpUi:
 
   <script>
     const entityId  = {{ document.id | json }}
-    const callId    = {{ document.meta._mcpUi.callId | json }}
-    const actionUrl = {{ document.meta._mcpUi.actionUrl | json }}
+    const callId    = {{ document.options.mcpUi.callId | json }}
+    const actionUrl = {{ document.options.mcpUi.actionUrl | json }}
     async function sendAction (action, payload = {}) {
       try { window.parent.postMessage({ type: 'mcp-ui/action', action, entityId, callId, payload }, '*') } catch {}
       return fetch(actionUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, entityId, payload }) })
@@ -535,8 +537,8 @@ mcpUi:
 
   <script>
     const entityId  = <%= JSON.stringify(it.document.id) %>
-    const callId    = <%= JSON.stringify(it.document.meta._mcpUi.callId) %>
-    const actionUrl = <%= JSON.stringify(it.document.meta._mcpUi.actionUrl) %>
+    const callId    = <%= JSON.stringify(it.document.options.mcpUi.callId) %>
+    const actionUrl = <%= JSON.stringify(it.document.options.mcpUi.actionUrl) %>
     async function sendAction (action, payload = {}) {
       try { window.parent.postMessage({ type: 'mcp-ui/action', action, entityId, callId, payload }, '*') } catch {}
       return fetch(actionUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, entityId, payload }) })
@@ -590,8 +592,8 @@ mcpUi:
 
   <script>
     const entityId  = {{{json document.id}}}
-    const callId    = {{{json document.meta._mcpUi.callId}}}
-    const actionUrl = {{{json document.meta._mcpUi.actionUrl}}}
+    const callId    = {{{json document.options.mcpUi.callId}}}
+    const actionUrl = {{{json document.options.mcpUi.actionUrl}}}
     async function sendAction (action, payload = {}) {
       try { window.parent.postMessage({ type: 'mcp-ui/action', action, entityId, callId, payload }, '*') } catch {}
       return fetch(actionUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, entityId, payload }) })
@@ -654,8 +656,8 @@ mcpUi:
 
   <script>
     const entityId  = {{{json document.id}}}
-    const callId    = {{{json document.meta._mcpUi.callId}}}
-    const actionUrl = {{{json document.meta._mcpUi.actionUrl}}}
+    const callId    = {{{json document.options.mcpUi.callId}}}
+    const actionUrl = {{{json document.options.mcpUi.actionUrl}}}
     async function sendAction (action, payload = {}) {
       try { window.parent.postMessage({ type: 'mcp-ui/action', action, entityId, callId, payload }, '*') } catch {}
       return fetch(actionUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, entityId, payload }) })
@@ -700,11 +702,11 @@ State lives inside the iframe; the agent only sees the final merged answers (or 
 
 The seven examples above lean on the same conventions. Worth naming them so they're easy to extend.
 
-- **`{ action, entityId, payload }` is the contract** — delivered via `POST` to `_mcpUi.actionUrl` (canonical) and mirrored via `window.parent.postMessage({ type: 'mcp-ui/action', action, entityId, callId, payload }, '*')` (host bridge). Sending only `postMessage` works on Apps hosts that bridge it; sending only `fetch` works everywhere because mikser is same-origin. Sending both is the cheap default. `action` must be one of the names declared in `mcpUi.actions` — mikser rejects anything else with 400.
-- **Embed entity data with `{{{json document.id}}}` (or the equivalent in your engine).** Triple-stash in Handlebars / `| json` in Liquid / `<%= JSON.stringify(it.x) %>` in Eta. This prevents injection if a field contains quotes — never interpolate raw string fields into a `'string-literal'` in script tags. `document.meta._mcpUi.callId` and `_mcpUi.actionUrl` are injected by mikser at render-time and follow the same rule.
+- **`{ action, entityId, payload }` is the contract** — delivered via `POST` to `options.mcpUi.actionUrl` (canonical) and mirrored via `window.parent.postMessage({ type: 'mcp-ui/action', action, entityId, callId, payload }, '*')` (host bridge). Sending only `postMessage` works on Apps hosts that bridge it; sending only `fetch` works everywhere because mikser is same-origin. Sending both is the cheap default. `action` must be one of the names declared in `mcpUi.actions` — mikser rejects anything else with 400.
+- **Embed entity data with `{{{json document.id}}}` (or the equivalent in your engine).** Triple-stash in Handlebars / `| json` in Liquid / `<%= JSON.stringify(it.x) %>` in Eta. This prevents injection if a field contains quotes — never interpolate raw string fields into a `'string-literal'` in script tags. `document.options.mcpUi.callId` and `document.options.mcpUi.actionUrl` are injected by mikser at render-time and follow the same rule.
 - **Pick the smallest sandbox that works.** Pure render: `sandbox: []` (no scripts at all). Click-only interaction: `sandbox: [allow-scripts]`. Same-origin `fetch` to mikser works at `allow-scripts` because the iframe is served by mikser itself; you do *not* need `allow-same-origin`. Don't ship `allow-same-origin` casually — it lifts most of the cross-origin protection.
 - **Send only what changed.** Multi-field forms (#4) should diff against the initial values and post only the deltas. Single-state toggles (#2, #6) send the target state, not the current state. Wizards (#7) send the merged final answers. Smaller payloads are cheaper for the agent to reason about.
-- **Style inline, ship self-contained.** No external CSS, no web fonts, no analytics — the iframe sandbox blocks cross-origin requests and the host may strip referenced URLs. System fonts (`font-family: system-ui`) and inline `<style>` are fine; the only `fetch` that should leave the iframe is the `sendAction` POST back to mikser's `_mcpUi.actionUrl`.
+- **Style inline, ship self-contained.** No external CSS, no web fonts, no analytics — the iframe sandbox blocks cross-origin requests and the host may strip referenced URLs. System fonts (`font-family: system-ui`) and inline `<style>` are fine; the only `fetch` that should leave the iframe is the `sendAction` POST back to mikser's `options.mcpUi.actionUrl`.
 - **Use the layout body to compute what the agent shouldn't.** Example #2's payload pre-computes the *new* publish state. Example #4 pre-computes the diff. Pushing logic to render-time means the agent receives ready-to-act-on data rather than raw inputs it has to interpret.
 - **Don't smuggle long content through the payload.** If the user types a 2000-word note, post it back as a reference id and `mikser_api_read_entity` it later — not as a single huge `payload.note` string. Tool results live in the agent's context window.
 - **For external workflows, declare `mcpUi.handler.url` instead of teaching the agent the schema.** When a layout's action should hit your application server (Slack notification, JIRA transition, a queue, anything stateful), set `handler.url` in the frontmatter. mikser POSTs the action to that URL (HMAC-signed if `handler.secret` is set) and uses the response as the tool result. The agent stays generic; the application semantics stay in your service.

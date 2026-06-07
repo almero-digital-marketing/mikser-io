@@ -501,11 +501,12 @@ export default ({
                     // the agent's `mcp-ui/post-approval` choice gets
                     // silently replaced by the production `post` layout.
                     //
-                    // _mcpUi is injected so the layout's script can read
-                    // callId and actionUrl via {{document.meta._mcpUi.…}}.
-                    // The underscore-prefix is the engine-injected
-                    // convention — layout authors don't write _mcpUi
-                    // into their files; mikser provides it at render.
+                    // Per-render engine bookkeeping lives under
+                    // entity.options.* — same noun mikser already uses
+                    // for `correlationId`, `save`, etc. Layout authors
+                    // read it from {{document.options.mcpUi.…}}; they
+                    // never set it themselves (the frontmatter's
+                    // `mcpUi:` namespace is for static declaration only).
                     const mcpUiContext = {
                         callId,
                         actionUrl: `/api/mcp-ui/action/${callId}`,
@@ -516,7 +517,10 @@ export default ({
                         meta: {
                             ...(entity.meta || {}),
                             layout: matched.name,
-                            _mcpUi: mcpUiContext,
+                        },
+                        options: {
+                            ...(entity.options || {}),
+                            mcpUi: mcpUiContext,
                         },
                     }
                     const { output } = await previewRender(renderEntity, {
