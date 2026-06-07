@@ -180,7 +180,25 @@ export async function setup(options) {
                 runtime.options.app.use((req, res, next) => {
                     res.header('Access-Control-Allow-Origin', origin)
                     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-                    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+                    // mcp-session-id + mcp-protocol-version are
+                    // Streamable HTTP transport headers. Browser-side
+                    // MCP clients (basic-host, mcp-ui, anything not
+                    // running in Node) send mcp-session-id on every
+                    // request after initialize — and they can only
+                    // *read* the initial session-id from the response
+                    // if it's listed in Expose-Headers. Without both
+                    // lines, browser hosts succeed at initialize and
+                    // then hang because they can't continue the
+                    // protocol. last-event-id is the SSE resume token
+                    // — same family.
+                    res.header(
+                        'Access-Control-Allow-Headers',
+                        'Content-Type, Authorization, mcp-session-id, mcp-protocol-version, last-event-id',
+                    )
+                    res.header(
+                        'Access-Control-Expose-Headers',
+                        'mcp-session-id, mcp-protocol-version',
+                    )
                     if (req.method === 'OPTIONS') return res.sendStatus(204)
                     next()
                 })
