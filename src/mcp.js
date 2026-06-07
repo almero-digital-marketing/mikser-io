@@ -75,9 +75,11 @@ export function createMcpSubstrate() {
 
     function bind(server, filters = {}) {
         const { allowedTools, allowedResources, allowedPrompts } = filters
+        const bound = { tools: 0, resources: 0, prompts: 0 }
         for (const args of registrations.tools) {
             if (!matchesAny(args[0], allowedTools)) continue
             server.registerTool(...args)
+            bound.tools++
         }
         for (const args of registrations.resources) {
             // Resource registrations are (name, uri, config, handler).
@@ -87,11 +89,14 @@ export function createMcpSubstrate() {
             const uri = typeof args[1] === 'string' ? args[1] : args[0]
             if (!matchesAny(uri, allowedResources)) continue
             server.registerResource(...args)
+            bound.resources++
         }
         for (const args of registrations.prompts) {
             if (!matchesAny(args[0], allowedPrompts)) continue
             server.registerPrompt(...args)
+            bound.prompts++
         }
+        return bound
     }
 
     const substrate = {
@@ -101,22 +106,58 @@ export function createMcpSubstrate() {
         // shape, it just records and replays.
         registerTool(...args) {
             registrations.tools.push(args)
+            const name = args[0]
+            let replayed = 0
+            const replayErrors = []
             for (const s of activeServers) {
-                try { s.registerTool(...args) } catch { /* dup, etc. */ }
+                try { s.registerTool(...args); replayed++ }
+                catch (err) { replayErrors.push(err.message) }
+            }
+            const log = runtime.engine?.logger
+            if (log) {
+                log.debug('MCP substrate: registered tool %s (total=%d, live-replayed=%d/%d)',
+                    name, registrations.tools.length, replayed, activeServers.size)
+                for (const msg of replayErrors) {
+                    log.debug('MCP substrate: live-replay of tool %s failed on a session server: %s', name, msg)
+                }
             }
             return substrate
         },
         registerResource(...args) {
             registrations.resources.push(args)
+            const uri = typeof args[1] === 'string' ? args[1] : args[0]
+            let replayed = 0
+            const replayErrors = []
             for (const s of activeServers) {
-                try { s.registerResource(...args) } catch { /* dup */ }
+                try { s.registerResource(...args); replayed++ }
+                catch (err) { replayErrors.push(err.message) }
+            }
+            const log = runtime.engine?.logger
+            if (log) {
+                log.debug('MCP substrate: registered resource %s (total=%d, live-replayed=%d/%d)',
+                    uri, registrations.resources.length, replayed, activeServers.size)
+                for (const msg of replayErrors) {
+                    log.debug('MCP substrate: live-replay of resource %s failed on a session server: %s', uri, msg)
+                }
             }
             return substrate
         },
         registerPrompt(...args) {
             registrations.prompts.push(args)
+            const name = args[0]
+            let replayed = 0
+            const replayErrors = []
             for (const s of activeServers) {
-                try { s.registerPrompt(...args) } catch { /* dup */ }
+                try { s.registerPrompt(...args); replayed++ }
+                catch (err) { replayErrors.push(err.message) }
+            }
+            const log = runtime.engine?.logger
+            if (log) {
+                log.debug('MCP substrate: registered prompt %s (total=%d, live-replayed=%d/%d)',
+                    name, registrations.prompts.length, replayed, activeServers.size)
+                for (const msg of replayErrors) {
+                    log.debug('MCP substrate: live-replay of prompt %s failed on a session server: %s', name, msg)
+                }
             }
             return substrate
         },
@@ -141,11 +182,25 @@ export function createMcpSubstrate() {
                 { name: 'mikser-io', version: packageInfo.version },
                 { capabilities: { tools: {}, resources: {}, logging: {} } },
             )
-            bind(server, { allowedTools, allowedResources, allowedPrompts })
+            const bound = bind(server, { allowedTools, allowedResources, allowedPrompts })
+            runtime.engine?.logger?.debug(
+                'MCP session server created (tools=%d/%d, resources=%d/%d, prompts=%d/%d)',
+                bound.tools, registrations.tools.length,
+                bound.resources, registrations.resources.length,
+                bound.prompts, registrations.prompts.length,
+            )
             return server
         },
-        attach(server) { activeServers.add(server) },
-        detach(server) { activeServers.delete(server) },
+        attach(server) {
+            activeServers.add(server)
+            runtime.engine?.logger?.debug(
+                'MCP session attached — active clients: %d', activeServers.size)
+        },
+        detach(server) {
+            activeServers.delete(server)
+            runtime.engine?.logger?.debug(
+                'MCP session detached — active clients: %d', activeServers.size)
+        },
         activeServerCount() { return activeServers.size },
 
         // Send a logging-message notification to every connected
@@ -373,6 +428,10 @@ export async function mountMcpOnExpress(app, substrate, defaultPath = '/mcp') {
     const endpoints = runtime.config.mcp?.endpoints
     const base = runtime.config.mcp?.base ?? defaultPath
 
+    runtime.engine?.logger?.debug(
+        'MCP mounting on Express (base=%s, endpoints=%d)',
+        base, endpoints ? Object.keys(endpoints).length : 1)
+
     if (endpoints && Object.keys(endpoints).length > 0) {
         for (const [name, ep] of Object.entries(endpoints)) {
             mountEndpoint(app, substrate, `${base}/${name}`, ep, name)
@@ -404,6 +463,8 @@ function mountEndpoint(app, substrate, path, ep, endpointName) {
         const presented = req.headers.authorization
         if (expectedAuth) {
             if (presented && presented !== expectedAuth) {
+                runtime.engine?.logger?.debug(
+                    'MCP auth denied at %s: invalid token (ip=%s)', path, req.ip)
                 res.status(401).json({
                     jsonrpc: '2.0',
                     error: { code: -32001, message: 'Invalid MCP token' },
@@ -416,6 +477,8 @@ function mountEndpoint(app, substrate, path, ep, endpointName) {
         }
         if (!presented || presented !== expectedAuth) {
             if (!ep.allowRemote && !isLoopback(req.ip)) {
+                runtime.engine?.logger?.debug(
+                    'MCP auth denied at %s: non-loopback without token (ip=%s)', path, req.ip)
                 res.status(403).json({
                     jsonrpc: '2.0',
                     error: {
@@ -436,6 +499,8 @@ function mountEndpoint(app, substrate, path, ep, endpointName) {
         }
 
         // New session — server filtered for this endpoint's surface.
+        runtime.engine?.logger?.debug(
+            'MCP new session at %s (ip=%s, method=%s)', path, req.ip, req.method)
         const server = substrate.createServer({
             allowedTools:     ep.tools,
             allowedResources: ep.resources,
@@ -519,6 +584,12 @@ export function wireLoggerToMcp(logger, substrate) {
             } catch { /* swallow — keep stdout pipeline working */ }
         }
     }
+    // No wire-up confirmation here — the wrapper has a load-bearing
+    // 1-broadcast-per-log-call invariant and a "skip missing methods"
+    // invariant. Operators still see the substrate's debug coverage
+    // (registrations, session lifecycle, auth deny) once the engine
+    // logger flows through. The "MCP mounted: …" info line at boot
+    // is the user-visible "ready" signal.
     return logger
 }
 
