@@ -38,14 +38,14 @@ describe('createMcpSubstrate', () => {
         const s1 = createFakeServer()
         const s2 = createFakeServer()
 
-        // _createServer should bind every recorded tool, including the
+        // createServer should bind every recorded tool, including the
         // built-in mikser_ping and the test's `echo`.
-        const real1 = substrate._createServer()
-        const real2 = substrate._createServer()
+        const real1 = substrate.createServer()
+        const real2 = substrate.createServer()
 
         // Real McpServer instances — verify by behavior: tool names visible
         // via the SDK's internal registry. Use a separate quick verify with
-        // fakes by overriding _createServer indirectly through bind.
+        // fakes by overriding createServer indirectly through bind.
         // (We can't peer into McpServer without coupling, so verify the
         // replay path via direct registration on our fakes.)
         for (const args of [['mikser_ping', { description: 'p', inputSchema: {} }, async () => ({})]]) { void args }
@@ -54,9 +54,9 @@ describe('createMcpSubstrate', () => {
         // confirm both end up with the same tool surface.
         substrate.registerTool('late', { description: 'late', inputSchema: {} }, async () => ({}))
         // After registration, both real servers should have received `late`
-        // because they were _attach'd via the mount path. Mimic that here:
-        substrate._attach(s1)
-        substrate._attach(s2)
+        // because they were attach'd via the mount path. Mimic that here:
+        substrate.attach(s1)
+        substrate.attach(s2)
         substrate.registerTool('post-attach', { description: 'pa', inputSchema: {} }, async () => ({}))
 
         const names1 = s1.tools.map(t => t.name)
@@ -66,7 +66,7 @@ describe('createMcpSubstrate', () => {
 
         // Detach: subsequent registrations no longer reach the detached
         // server.
-        substrate._detach(s1)
+        substrate.detach(s1)
         substrate.registerTool('after-detach', { description: 'ad', inputSchema: {} }, async () => ({}))
         assert.deepEqual(s1.tools.map(t => t.name), ['post-attach'])
         assert.deepEqual(s2.tools.map(t => t.name), ['post-attach', 'after-detach'])
@@ -76,14 +76,14 @@ describe('createMcpSubstrate', () => {
         // server and confirming it has 5 tools (ping, echo, late,
         // post-attach, after-detach).
         const s3 = createFakeServer()
-        // Cheat: call bind manually by re-running _createServer's effect
+        // Cheat: call bind manually by re-running createServer's effect
         // through a substrate-internal path — we use a fresh substrate
         // and replay just the recorded tools to keep this test isolated.
         // The simpler verification is to count what s2 has plus what
-        // happened before _attach (echo, late):
+        // happened before attach (echo, late):
         // Total registrations recorded: mikser_ping, echo, late, post-attach, after-detach.
         // s2 was attached after echo+late, so it should have post-attach + after-detach.
-        // Verify by inspecting that _createServer on a real run produces
+        // Verify by inspecting that createServer on a real run produces
         // a server with all 5. Skipped here since McpServer internals
         // aren't part of the substrate contract.
         void s3
@@ -93,8 +93,8 @@ describe('createMcpSubstrate', () => {
         const substrate = createMcpSubstrate()
         const s1 = createFakeServer()
         const s2 = createFakeServer()
-        substrate._attach(s1)
-        substrate._attach(s2)
+        substrate.attach(s1)
+        substrate.attach(s2)
 
         substrate.broadcastLog({ level: 'info', logger: 'mikser', data: { msg: 'hello' } })
         // sendLoggingMessage is async; let microtasks flush.
@@ -112,8 +112,8 @@ describe('createMcpSubstrate', () => {
             async sendLoggingMessage() { throw new Error('boom') },
         }
         const good = createFakeServer()
-        substrate._attach(bad)
-        substrate._attach(good)
+        substrate.attach(bad)
+        substrate.attach(good)
 
         // Must not throw — fan-out swallows per-server errors.
         substrate.broadcastLog({ level: 'info', logger: 'mikser', data: { msg: 'survives' } })
@@ -123,20 +123,20 @@ describe('createMcpSubstrate', () => {
         assert.equal(good.logs[0].data.msg, 'survives')
     })
 
-    it('_activeServerCount tracks attach/detach', () => {
+    it('activeServerCount tracks attach/detach', () => {
         const substrate = createMcpSubstrate()
-        assert.equal(substrate._activeServerCount(), 0)
+        assert.equal(substrate.activeServerCount(), 0)
         const s = createFakeServer()
-        substrate._attach(s)
-        assert.equal(substrate._activeServerCount(), 1)
-        substrate._detach(s)
-        assert.equal(substrate._activeServerCount(), 0)
+        substrate.attach(s)
+        assert.equal(substrate.activeServerCount(), 1)
+        substrate.detach(s)
+        assert.equal(substrate.activeServerCount(), 0)
     })
 
     it('simpleTool sugars registerTool', () => {
         const substrate = createMcpSubstrate()
         const s = createFakeServer()
-        substrate._attach(s)
+        substrate.attach(s)
         substrate.simpleTool('sugar', 'sugary', { x: { type: 'string' } }, async () => ({}))
         assert.equal(s.tools.length, 1)
         assert.equal(s.tools[0].name, 'sugar')
@@ -186,7 +186,7 @@ describe('wireLoggerToMcp', () => {
     it('forwards every level to the substrate broadcast', async () => {
         const substrate = createMcpSubstrate()
         const sink = createFakeServer()
-        substrate._attach(sink)
+        substrate.attach(sink)
 
         const localCalls = []
         const fakeLogger = {
@@ -233,22 +233,22 @@ describe('wireLoggerToMcp', () => {
     })
 })
 
-describe('endpoint filters (_createServer with allowedTools / allowedResources)', () => {
-    // Helper that drives substrate._createServer using fake instead of
+describe('endpoint filters (createServer with allowedTools / allowedResources)', () => {
+    // Helper that drives substrate.createServer using fake instead of
     // a real McpServer. We monkey-patch the registration replay by
-    // attaching the fake first (via _attach), then calling _createServer
-    // — _createServer's bind() walks the recorded registrations and
+    // attaching the fake first (via attach), then calling createServer
+    // — createServer's bind() walks the recorded registrations and
     // calls register* on the new server. We can't substitute the new
-    // server itself (it's created inside _createServer), so instead we
+    // server itself (it's created inside createServer), so instead we
     // assert via registrations recorded on a fake attached BEFORE the
     // tools were registered.
     //
     // Cleaner approach: register tools on the substrate, then use bind
     // semantics by calling registerTool directly on a filtered server.
-    // Since _createServer is the production path, we verify by attaching
+    // Since createServer is the production path, we verify by attaching
     // a fake as a "tap" — every `substrate.registerTool` after attach
     // hits both the new tool's recorded list and the fake. Then we drive
-    // the same args through bind() shape by calling _createServer with
+    // the same args through bind() shape by calling createServer with
     // filters and inspecting the resulting tool count on the returned
     // server.
     //
@@ -264,13 +264,13 @@ describe('endpoint filters (_createServer with allowedTools / allowedResources)'
         substrate.simpleTool('mikser_layouts_inspect',   'desc', {}, async () => ({}))
         substrate.simpleTool('mikser_preview_render',    'desc', {}, async () => ({}))
 
-        // _createServer uses the real McpServer — but tools/list survives
+        // createServer uses the real McpServer — but tools/list survives
         // as a registered Map on the server. We instead intercept by
         // attaching a fake as a registration recorder AFTER all tools
-        // exist. Then _createServer({ allowedTools: ['mikser_api_*'] })
+        // exist. Then createServer({ allowedTools: ['mikser_api_*'] })
         // returns a real McpServer whose registered tool count we can
         // inspect via the SDK's internal map. Reach into _registeredTools.
-        const server = substrate._createServer({ allowedTools: ['mikser_api_*'] })
+        const server = substrate.createServer({ allowedTools: ['mikser_api_*'] })
         // The SDK stores tools at server._registeredTools (object map).
         const toolNames = Object.keys(server._registeredTools)
         assert.deepEqual(toolNames.sort(), ['mikser_api_list_entities', 'mikser_api_render'])
@@ -281,7 +281,7 @@ describe('endpoint filters (_createServer with allowedTools / allowedResources)'
         substrate.simpleTool('mikser_api_render',     'desc', {}, async () => ({}))
         substrate.simpleTool('mikser_layouts_inspect','desc', {}, async () => ({}))
 
-        const server = substrate._createServer({ allowedTools: '*' })
+        const server = substrate.createServer({ allowedTools: '*' })
         const toolNames = Object.keys(server._registeredTools)
         assert.ok(toolNames.includes('mikser_ping'))
         assert.ok(toolNames.includes('mikser_api_render'))
@@ -292,7 +292,7 @@ describe('endpoint filters (_createServer with allowedTools / allowedResources)'
         const substrate = createMcpSubstrate()
         substrate.simpleTool('mikser_api_render', 'desc', {}, async () => ({}))
 
-        const server = substrate._createServer()
+        const server = substrate.createServer()
         const toolNames = Object.keys(server._registeredTools)
         assert.ok(toolNames.includes('mikser_ping'))
         assert.ok(toolNames.includes('mikser_api_render'))
@@ -302,11 +302,11 @@ describe('endpoint filters (_createServer with allowedTools / allowedResources)'
         const substrate = createMcpSubstrate()
         substrate.simpleTool('mikser_api_render', 'desc', {}, async () => ({}))
 
-        const onlyPing = substrate._createServer({ allowedTools: ['mikser_ping'] })
+        const onlyPing = substrate.createServer({ allowedTools: ['mikser_ping'] })
         const onlyPingNames = Object.keys(onlyPing._registeredTools)
         assert.deepEqual(onlyPingNames, ['mikser_ping'])
 
-        const empty = substrate._createServer({ allowedTools: [] })
+        const empty = substrate.createServer({ allowedTools: [] })
         const emptyNames = Object.keys(empty._registeredTools)
         assert.deepEqual(emptyNames, [])
     })
@@ -315,7 +315,7 @@ describe('endpoint filters (_createServer with allowedTools / allowedResources)'
         const substrate = createMcpSubstrate()
         // Built-in resources include mikser://lifecycle, mikser://server,
         // mikser://runtime, mikser://config, mikser://logs/recent.
-        const server = substrate._createServer({
+        const server = substrate.createServer({
             allowedResources: ['mikser://lifecycle', 'mikser://logs/*'],
         })
         const resourceUris = Object.keys(server._registeredResources)

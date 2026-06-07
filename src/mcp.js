@@ -136,7 +136,7 @@ export function createMcpSubstrate() {
         //   allowedResources: ['mikser://lifecycle', 'mikser://logs/*']
         // Omit a filter (or pass '*') to allow everything in that
         // category — that's the backward-compat default.
-        _createServer({ allowedTools, allowedResources, allowedPrompts } = {}) {
+        createServer({ allowedTools, allowedResources, allowedPrompts } = {}) {
             const server = new McpServer(
                 { name: 'mikser-io', version: packageInfo.version },
                 { capabilities: { tools: {}, resources: {}, logging: {} } },
@@ -144,9 +144,9 @@ export function createMcpSubstrate() {
             bind(server, { allowedTools, allowedResources, allowedPrompts })
             return server
         },
-        _attach(server) { activeServers.add(server) },
-        _detach(server) { activeServers.delete(server) },
-        _activeServerCount() { return activeServers.size },
+        attach(server) { activeServers.add(server) },
+        detach(server) { activeServers.delete(server) },
+        activeServerCount() { return activeServers.size },
 
         // Send a logging-message notification to every connected
         // client. The SDK's per-session level filtering applies.
@@ -309,7 +309,7 @@ export function createMcpSubstrate() {
                     phase: runtime.phase ?? null,
                     workingFolder: runtime.options.workingFolder,
                     outputFolder: runtime.options.outputFolder,
-                    activeClients: substrate._activeServerCount(),
+                    activeClients: substrate.activeServerCount(),
                     server: serverInfo(),
                 }, null, 2),
             }],
@@ -436,7 +436,7 @@ function mountEndpoint(app, substrate, path, ep, endpointName) {
         }
 
         // New session — server filtered for this endpoint's surface.
-        const server = substrate._createServer({
+        const server = substrate.createServer({
             allowedTools:     ep.tools,
             allowedResources: ep.resources,
             allowedPrompts:   ep.prompts,
@@ -445,12 +445,12 @@ function mountEndpoint(app, substrate, path, ep, endpointName) {
             sessionIdGenerator: () => randomUUID(),
             onsessioninitialized: (id) => {
                 transports.set(id, transport)
-                substrate._attach(server)
+                substrate.attach(server)
             },
         })
         transport.onclose = () => {
             if (transport.sessionId) transports.delete(transport.sessionId)
-            substrate._detach(server)
+            substrate.detach(server)
         }
         await server.connect(transport)
         return transport.handleRequest(req, res, body)
@@ -554,16 +554,3 @@ function format(template, args) {
 function pinoLevelNumber(name) {
     return { trace: 10, debug: 20, info: 30, warn: 40, error: 50, fatal: 60 }[name] ?? 30
 }
-
-// (whenMcpActive was removed in v7.4.0 — plugins now use the same
-// inline pattern as Express route registration: gate on the runtime
-// option inside whichever lifecycle hook makes sense.
-//
-//   onLoaded(async () => {
-//       if (runtime.options.mcp) {
-//           runtime.options.mcp.simpleTool(...)
-//       }
-//   })
-//
-// Reveals timing, matches the Express pattern, doesn't lock the
-// registration into onLoaded.)
