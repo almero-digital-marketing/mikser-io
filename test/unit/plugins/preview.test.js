@@ -4,8 +4,8 @@ import assert from 'node:assert/strict'
 import previewPlugin from '../../../src/plugins/preview.js'
 import { createHarness } from '../plugin-harness.js'
 
-// A minimal MCP shim — captures simpleTool / registerResource calls so
-// tests can invoke the handlers directly without booting the real MCP.
+// A minimal MCP shim — captures simpleTool / registerTool / registerResource
+// calls so tests can invoke the handlers directly without booting the real MCP.
 function fakeMcp() {
     const tools = new Map()
     const resources = new Map()
@@ -15,11 +15,16 @@ function fakeMcp() {
         simpleTool(name, description, inputSchema, handler) {
             tools.set(name, { description, inputSchema, handler })
         },
+        // registerTool is the lower-level path; tools that need _meta
+        // (like mikser_ui_action's visibility flag for MCP Apps) use it
+        // directly. Capture into the same map so tests don't care which
+        // path the plugin took.
+        registerTool(name, config, handler) {
+            tools.set(name, { ...config, handler })
+        },
         registerResource(name, uri, metadata, handler) {
             resources.set(uri, { name, metadata, handler })
         },
-        // Pass-throughs for surfaces preview plugin doesn't use.
-        registerTool() {},
         registerPrompt() {},
     }
 }
@@ -303,5 +308,221 @@ describe('preview plugin: mikser_preview_ui dispatch', () => {
         const result = await tool.handler({ entityId: '/articles/does-not-exist' })
         assert.equal(result.isError, true)
         assert.match(result.content[0].text, /Entity not found/)
+    })
+})
+
+describe('preview plugin: mikser_ui_action', () => {
+    it('registers mikser_ui_action with _meta.ui.visibility=[app]', async () => {
+        const { h, mcp } = withMcp()
+        await h.runHook('loaded')
+
+        const tool = mcp.registered.get('mikser_ui_action')
+        assert.ok(tool, 'mikser_ui_action should be registered')
+        // MCP Apps spec — visibility=['app'] makes it invisible to the
+        // model and callable from inside iframes opened via the host's
+        // AppBridge. Drift here breaks every Apps-conformant host.
+        assert.deepEqual(tool._meta?.ui?.visibility, ['app'],
+            'mikser_ui_action must declare visibility=[app]')
+    })
+
+    it('pure-relay: returns { entityId, action, payload } when no handler.url', async () => {
+        const layout = {
+            id: '/layouts/article-approval.hbs',
+            collection: 'layouts',
+            type: 'layout',
+            name: 'article-approval',
+            meta: {
+                match: '@/articles/*',
+                mcpUi: { mode: 'approval', actions: ['approve', 'reject'] },
+            },
+        }
+        const { h, mcp } = withMcp({}, [layout])
+        await h.runHook('loaded')
+
+        const tool = mcp.registered.get('mikser_ui_action')
+        const result = await tool.handler({
+            entityId: '/articles/launch',
+            layoutId: '/layouts/article-approval.hbs',
+            action:   'approve',
+            payload:  { reviewer: 'alice' },
+        })
+
+        assert.equal(result.isError, undefined)
+        const data = JSON.parse(result.content[0].text)
+        assert.deepEqual(data, {
+            entityId: '/articles/launch',
+            action:   'approve',
+            payload:  { reviewer: 'alice' },
+        })
+    })
+
+    it('rejects actions not in the layout\'s allowed list', async () => {
+        const layout = {
+            id: '/layouts/article-approval.hbs',
+            collection: 'layouts',
+            type: 'layout',
+            name: 'article-approval',
+            meta: {
+                match: '@/articles/*',
+                mcpUi: { mode: 'approval', actions: ['approve', 'reject'] },
+            },
+        }
+        const { h, mcp } = withMcp({}, [layout])
+        await h.runHook('loaded')
+
+        const tool = mcp.registered.get('mikser_ui_action')
+        const result = await tool.handler({
+            entityId: '/articles/launch',
+            layoutId: '/layouts/article-approval.hbs',
+            action:   'delete-everything',
+            payload:  {},
+        })
+
+        assert.equal(result.isError, true)
+        assert.match(result.content[0].text, /not in allowed list/)
+        // Specifically calls out what WAS allowed so the agent/iframe
+        // author can fix the call site.
+        assert.match(result.content[0].text, /approve, reject/)
+    })
+
+    it('rejects when layoutId points to a non-layout entity', async () => {
+        const article = {
+            id: '/articles/launch',
+            collection: 'documents',
+            type: 'document',
+            name: 'articles/launch',
+            meta: {},
+        }
+        const { h, mcp } = withMcp({}, [article])
+        await h.runHook('loaded')
+
+        const tool = mcp.registered.get('mikser_ui_action')
+        const result = await tool.handler({
+            entityId: '/articles/launch',
+            layoutId: '/articles/launch',     // pointing at a document — wrong
+            action:   'approve',
+            payload:  {},
+        })
+
+        assert.equal(result.isError, true)
+        assert.match(result.content[0].text, /not found or not a layout/)
+    })
+
+    it('rejects when the resolved layout has no mcpUi frontmatter', async () => {
+        const layout = {
+            id: '/layouts/plain.hbs',
+            collection: 'layouts',
+            type: 'layout',
+            name: 'plain',
+            meta: { match: '@/articles/*' },   // no mcpUi
+        }
+        const { h, mcp } = withMcp({}, [layout])
+        await h.runHook('loaded')
+
+        const tool = mcp.registered.get('mikser_ui_action')
+        const result = await tool.handler({
+            entityId: '/articles/launch',
+            layoutId: '/layouts/plain.hbs',
+            action:   'approve',
+            payload:  {},
+        })
+
+        assert.equal(result.isError, true)
+        assert.match(result.content[0].text, /does not declare mcpUi/)
+    })
+
+    it('forwards to handler.url when declared and returns its JSON response as the tool result', async () => {
+        const { createServer } = await import('node:http')
+        const calls = []
+        const srv = createServer((req, res) => {
+            let body = ''
+            req.on('data', c => body += c)
+            req.on('end', () => {
+                calls.push({ url: req.url, body: JSON.parse(body) })
+                res.writeHead(200, { 'content-type': 'application/json' })
+                res.end(JSON.stringify({ ok: true, summary: 'ticket #4821 created' }))
+            })
+        })
+        await new Promise(r => srv.listen(0, r))
+        const port = srv.address().port
+
+        try {
+            const layout = {
+                id: '/layouts/article-approval.hbs',
+                collection: 'layouts',
+                type: 'layout',
+                name: 'article-approval',
+                meta: {
+                    match: '@/articles/*',
+                    mcpUi: {
+                        mode: 'approval',
+                        actions: ['approve', 'reject'],
+                        handler: { url: `http://127.0.0.1:${port}/hook` },
+                    },
+                },
+            }
+            const { h, mcp } = withMcp({}, [layout])
+            await h.runHook('loaded')
+
+            const tool = mcp.registered.get('mikser_ui_action')
+            const result = await tool.handler({
+                entityId: '/articles/launch',
+                layoutId: '/layouts/article-approval.hbs',
+                action:   'approve',
+                payload:  { reviewer: 'alice' },
+            })
+
+            assert.equal(result.isError, undefined)
+            const data = JSON.parse(result.content[0].text)
+            assert.deepEqual(data, { ok: true, summary: 'ticket #4821 created' })
+
+            // Verify the forward carried the canonical fields.
+            assert.equal(calls.length, 1)
+            assert.equal(calls[0].url, '/hook')
+            assert.equal(calls[0].body.action,   'approve')
+            assert.equal(calls[0].body.entityId, '/articles/launch')
+            assert.equal(calls[0].body.layoutId, '/layouts/article-approval.hbs')
+            assert.equal(calls[0].body.mode,     'approval')
+            assert.deepEqual(calls[0].body.payload, { reviewer: 'alice' })
+        } finally {
+            await new Promise(r => srv.close(r))
+        }
+    })
+
+    it('falls back to pure relay with handlerError when handler.url fails', async () => {
+        const layout = {
+            id: '/layouts/article-approval.hbs',
+            collection: 'layouts',
+            type: 'layout',
+            name: 'article-approval',
+            meta: {
+                match: '@/articles/*',
+                mcpUi: {
+                    mode: 'approval',
+                    actions: ['approve'],
+                    // Port 1 is reserved — guaranteed connection refusal.
+                    handler: { url: 'http://127.0.0.1:1/hook', timeout: 500 },
+                },
+            },
+        }
+        const { h, mcp } = withMcp({}, [layout])
+        await h.runHook('loaded')
+
+        const tool = mcp.registered.get('mikser_ui_action')
+        const result = await tool.handler({
+            entityId: '/articles/launch',
+            layoutId: '/layouts/article-approval.hbs',
+            action:   'approve',
+            payload:  {},
+        })
+
+        // Fail-safe: never lose the user's click. Pure-relay payload
+        // PLUS handlerError so the agent knows the backend ack failed.
+        assert.equal(result.isError, undefined)
+        const data = JSON.parse(result.content[0].text)
+        assert.equal(data.entityId, '/articles/launch')
+        assert.equal(data.action,   'approve')
+        assert.ok(data.handlerError, 'expected handlerError field on fallback')
+        assert.match(data.handlerError, /unreachable|timeout|ECONNREFUSED/i)
     })
 })

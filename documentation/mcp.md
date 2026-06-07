@@ -205,7 +205,8 @@ Tool ownership follows the plugin that owns the concept. Core ships one tool (th
 | Tool              | What it does                                                                          |
 | ----------------- | ------------------------------------------------------------------------------------- |
 | `mikser_preview_render`  | Render an entity AND surface the output at a clickable `http://localhost:<port>/preview/<id>.<ext>` URL. Previews live in memory (not on disk, never under `outputFolder`), auto-expire (default 10 min), and LRU-evict past a 100 MB cap. Requires `--server`. |
-| `mikser_preview_ui`      | Render an entity to **inline HTML** using a layout that declares `mcpUi` frontmatter, and return it as a UI block the host can surface inside the conversation. Selects the layout by matching `entityId` against `layout.meta.match` and filtering on `mode` (`preview` / `edit` / `approval` / your own). Returns the rendered HTML plus action metadata (postMessage names the UI emits, sandbox flags) so the host can wire up an interactive iframe. See [Layout frontmatter](#layout-frontmatter-and-mcp-ui) below. |
+| `mikser_preview_ui`      | Render an entity to **inline HTML** using a layout that declares `mcpUi` frontmatter, and return it as a UI block the host surfaces in the conversation. Selects the layout by matching `entityId` against `layout.meta.match` and filtering on `mode` (`preview` / `edit` / `approval` / your own). Returns the rendered HTML plus action metadata (declared actions, sandbox flags, the action tool's name) so the host wires up an interactive iframe. The iframe delivers user clicks via **JSON-RPC over `postMessage`** per the [MCP Apps spec](https://github.com/modelcontextprotocol/ext-apps) — the host bridges them as `tools/call` against `mikser_ui_action`. See [Layout frontmatter](#layout-frontmatter-and-mcp-ui) and [ADR-0008](./decisions/0008-mcp-ui-action-delivery.md). |
+| `mikser_ui_action`       | **App-callable only.** Invisible to the agent (`_meta.ui.visibility=['app']` per MCP Apps spec). Iframes opened via `mikser_preview_ui` invoke this through the host's AppBridge to deliver a click. Validates the `action` against the layout's `mcpUi.actions` list, then either returns `{entityId, action, payload}` as a pure relay (the agent decides what it means) or forwards to the layout's `mcpUi.handler.url` webhook (HMAC-signed if `handler.secret` is set) and uses the handler's JSON response as the tool result. Handler failures fall back to pure-relay with a `handlerError` field — clicks are never lost. |
 
 Other plugins are expected to follow the same shape — `vector` will add `find_similar`, `schemas` will add `list_schemas` / `get_schema_shape`, and so on.
 
@@ -219,11 +220,14 @@ match: "@/articles/*"
 mcpUi:
   mode: preview                # or "edit", "approval", or your own
   description: "Article preview with approve/reject controls"
-  actions:                     # postMessage names the UI emits
+  actions:                     # action names mikser_ui_action will accept
     - approve
     - reject
   sandbox:                     # iframe sandbox flags the host should apply
     - allow-scripts
+  # handler:                   # optional — external webhook for the action
+  #   url: https://review.example.com/mikser/action
+  #   secret: env:REVIEW_SIGNING_SECRET
 ---
 <!DOCTYPE html>
 <html>
@@ -232,12 +236,51 @@ mcpUi:
     <button data-action="approve">Approve</button>
     <button data-action="reject">Reject</button>
     <script>
+      // MCP Apps protocol: the iframe talks to the host over postMessage
+      // using JSON-RPC. The host bridges `tools/call` into a real MCP
+      // tool call against the server. There is NO direct HTTP from the
+      // iframe to mikser — the iframe is cross-origin from the host
+      // (per spec) and the default Content-Security-Policy blocks all
+      // outbound network. Everything is postMessage.
+      const entityId = {{{json document.id}}}
+      const layoutId = {{{json document.layout.id}}}
+      let nextId = 1, hostOrigin = '*'
+      const pending = new Map()
+      window.addEventListener('message', e => {
+        if (!e.data?.id || !pending.has(e.data.id)) return
+        const { resolve, reject } = pending.get(e.data.id)
+        pending.delete(e.data.id)
+        e.data.error ? reject(e.data.error) : resolve(e.data.result)
+      })
+      function rpc (method, params) {
+        return new Promise((resolve, reject) => {
+          const id = nextId++
+          pending.set(id, { resolve, reject })
+          window.parent.postMessage(
+            { jsonrpc: '2.0', method, params, id }, hostOrigin,
+          )
+        })
+      }
+      // Spec-required handshake. The result carries hostInfo, hostContext
+      // (theme, locale, display mode), capabilities. We tighten the
+      // outbound targetOrigin once we know the host's origin.
+      const init = await rpc('ui/initialize', {
+        appCapabilities: { availableDisplayModes: ['inline'] },
+      })
+      if (init.hostInfo?.origin) hostOrigin = init.hostInfo.origin
+
+      // Per-click — the host forwards this to the MCP server as a real
+      // tools/call. The agent sees `mikser_ui_action` resolve as its own
+      // tool turn in the conversation. Pure-relay or handler-forwarded
+      // is decided server-side; the iframe doesn't care.
+      function sendAction (action, payload = {}) {
+        return rpc('tools/call', {
+          name: 'mikser_ui_action',
+          arguments: { entityId, layoutId, action, payload },
+        })
+      }
       document.querySelectorAll('[data-action]').forEach(b =>
-        b.addEventListener('click', () => window.parent.postMessage({
-          type: 'mcp-ui/action',
-          action: b.dataset.action,
-          entityId: {{{json document.id}}},
-        }, '*'))
+        b.addEventListener('click', () => sendAction(b.dataset.action)),
       )
     </script>
   </body>
@@ -250,11 +293,15 @@ mcpUi:
 
 1. The plugin walks the catalog for layouts where `meta.mcpUi.mode === 'preview'`.
 2. Among those, it picks the one whose `meta.match` pattern matches the entity (using mikser's `matchEntity` — same matcher used by the layouts plugin).
-3. It runs the layout through the renderer chain (`render-hbs`, `render-eta`, `render-liquid`, etc.) and returns the HTML inline plus `_meta.mcpUi` containing the declared actions and sandbox flags.
+3. It runs the layout through the renderer chain (`render-hbs`, `render-eta`, `render-liquid`, etc.) and **returns immediately** with the HTML inline plus `_meta.mcpUi` carrying the declared actions, sandbox flags, and the name of the action tool (`mikser_ui_action`) the iframe should call.
+
+The tool call resolves the moment the HTML is built. The user's click is **its own tool turn** later — a `tools/call` from the iframe (via the host's AppBridge) against `mikser_ui_action`. The agent sees two tool invocations in the conversation: the render, then the action. This is the [MCP Apps spec](https://github.com/modelcontextprotocol/ext-apps) pull model — no suspended promises, no HTTP callbacks.
+
+**Optional webhook handler.** A layout that declares `mcpUi.handler.url` makes `mikser_ui_action` forward each action POST to that URL (HMAC-signed if `handler.secret` is set, JSON body with `callId`, `entityId`, `layoutId`, `action`, `payload`, `mode`, `timestamp`). The handler's JSON response becomes the tool result the agent sees. Handler failures fall back to pure-relay with a `handlerError` field — clicks are never silently lost. Mikser stays a content engine; application semantics live in the handler. See [ADR-0008](./decisions/0008-mcp-ui-action-delivery.md).
 
 A few constraints worth knowing when authoring `mcpUi` layouts:
 
-- **The iframe has no `fetch`.** Hosts sandbox UI blocks tightly — assume no network from inside the rendered HTML. Use `postMessage` to send actions back; the host bridges them to the tool result.
+- **The iframe is cross-origin from the host and the default CSP blocks all network.** Per MCP Apps spec, "The Host and the Sandbox MUST have different origins" and the default CSP is `default-src 'none'; connect-src 'none'`. So `fetch` to *any* URL from inside the iframe is blocked — including back to mikser. The only outbound channel is `window.parent.postMessage`. Hosts that follow the spec bridge JSON-RPC tools/call to the MCP server; hosts that don't show the iframe as raw HTML and the action stays inside the iframe.
 - **Same layout system, different output path.** The MCP-UI layout doesn't have to be the same file as your production layout; declare a focused, sandbox-safe variant under a distinct name. mikser's auto-match won't pick it up for normal rendering as long as the filename doesn't collide.
 - **One source of truth for the body.** All renderers (`render-hbs`, `render-eta`, `render-liquid`) now read layout bodies from `entity.layout.content`. The frontmatter plugin strips the YAML before the renderer ever sees it.
 - **ECT is the exception.** `mikser-io-render-ect` still file-loads layouts through ECT's own resolver, so YAML frontmatter on `.ect` layouts renders as literal text. Pick `hbs` / `eta` / `liquid` for layouts that need `mcpUi` frontmatter.
@@ -263,9 +310,9 @@ A few constraints worth knowing when authoring `mcpUi` layouts:
 
 MCP-UI is a novel concept and the conventions get easier to internalise once you see them on real layouts. Seven examples below — varied template engines (`hbs`, `eta`, `liquid`), varied interaction patterns (pure render, single button, multi-action approval, form submission, multi-select picker, status switcher, multi-step wizard), varied domains (article, product, SEO, tags, support ticket, onboarding). Copy-and-modify is the intended workflow.
 
-Each agent call looks like `mikser_preview_ui({ entityId: '...', mode: '<mode>' })`. The host renders the returned HTML in a sandboxed iframe. Any `postMessage` from the iframe with `type: 'mcp-ui/action'` is bridged back to the tool result so the agent sees a structured response, not a natural-language guess.
+Each agent call looks like `mikser_preview_ui({ entityId: '...', mode: '<mode>' })`. The host renders the returned HTML in a sandboxed iframe. The iframe then speaks JSON-RPC over `postMessage` to the host (per the [MCP Apps spec](https://github.com/modelcontextprotocol/ext-apps)) — each click becomes a `tools/call` against `mikser_ui_action`, which the host bridges to mikser over the normal MCP transport. Examples 2–7 use the same `sendAction(action, payload)` helper shown in the canonical sample above; the helper handles the `ui/initialize` handshake and the per-click RPC.
 
-#### 1. Pure preview — no JS, no postMessage
+#### 1. Pure preview — no JS, no action
 
 The minimum-viable case. The agent shows the user what an article looks like rendered; the user reads it; no interaction is needed. Use this when you just want a visual confirmation step.
 
@@ -329,14 +376,28 @@ mcpUi:
       {{#if document.meta.published}}Unpublish{{else}}Publish now{{/if}}
     </button>
     <script>
-      document.getElementById('toggle').addEventListener('click', () => {
-        window.parent.postMessage({
-          type: 'mcp-ui/action',
-          action: 'toggle-publish',
-          entityId: {{{json document.id}}},
-          payload: { published: {{#if document.meta.published}}false{{else}}true{{/if}} },
-        }, '*')
+      const entityId = {{{json document.id}}}
+      const layoutId = {{{json document.layout.id}}}
+      let nextId = 1, hostOrigin = '*'
+      const pending = new Map()
+      window.addEventListener('message', e => {
+        if (!e.data?.id || !pending.has(e.data.id)) return
+        const { resolve, reject } = pending.get(e.data.id); pending.delete(e.data.id)
+        e.data.error ? reject(e.data.error) : resolve(e.data.result)
       })
+      const rpc = (method, params) => new Promise((resolve, reject) => {
+        const id = nextId++; pending.set(id, { resolve, reject })
+        window.parent.postMessage({ jsonrpc: '2.0', method, params, id }, hostOrigin)
+      })
+      rpc('ui/initialize', { appCapabilities: { availableDisplayModes: ['inline'] } })
+        .then(init => { if (init.hostInfo?.origin) hostOrigin = init.hostInfo.origin })
+      const sendAction = (action, payload = {}) => rpc('tools/call', {
+        name: 'mikser_ui_action', arguments: { entityId, layoutId, action, payload },
+      })
+
+      document.getElementById('toggle').addEventListener('click', () =>
+        sendAction('toggle-publish', { published: {{#if document.meta.published}}false{{else}}true{{/if}} })
+      )
     </script>
   </body>
 </html>
@@ -381,13 +442,31 @@ mcpUi:
 
     <script>
       const entityId = {{{json document.id}}}
+      const layoutId = {{{json document.layout.id}}}
+      let nextId = 1, hostOrigin = '*'
+      const pending = new Map()
+      window.addEventListener('message', e => {
+        if (!e.data?.id || !pending.has(e.data.id)) return
+        const { resolve, reject } = pending.get(e.data.id); pending.delete(e.data.id)
+        e.data.error ? reject(e.data.error) : resolve(e.data.result)
+      })
+      const rpc = (method, params) => new Promise((resolve, reject) => {
+        const id = nextId++; pending.set(id, { resolve, reject })
+        window.parent.postMessage({ jsonrpc: '2.0', method, params, id }, hostOrigin)
+      })
+      rpc('ui/initialize', { appCapabilities: { availableDisplayModes: ['inline'] } })
+        .then(init => { if (init.hostInfo?.origin) hostOrigin = init.hostInfo.origin })
+      const sendAction = (action, payload = {}) => rpc('tools/call', {
+        name: 'mikser_ui_action', arguments: { entityId, layoutId, action, payload },
+      })
+
       document.querySelectorAll('[data-action]').forEach(btn => {
         btn.addEventListener('click', () => {
           const action = btn.dataset.action
           const payload = action === 'request-changes'
             ? { note: document.getElementById('note').value }
             : {}
-          window.parent.postMessage({ type: 'mcp-ui/action', action, entityId, payload }, '*')
+          sendAction(action, payload)
         })
       })
     </script>
@@ -437,6 +516,24 @@ mcpUi:
 
   <script>
     const entityId = {{ document.id | json }}
+    const layoutId = {{ document.layout.id | json }}
+    let nextId = 1, hostOrigin = '*'
+    const pending = new Map()
+    window.addEventListener('message', e => {
+      if (!e.data?.id || !pending.has(e.data.id)) return
+      const { resolve, reject } = pending.get(e.data.id); pending.delete(e.data.id)
+      e.data.error ? reject(e.data.error) : resolve(e.data.result)
+    })
+    const rpc = (method, params) => new Promise((resolve, reject) => {
+      const id = nextId++; pending.set(id, { resolve, reject })
+      window.parent.postMessage({ jsonrpc: '2.0', method, params, id }, hostOrigin)
+    })
+    rpc('ui/initialize', { appCapabilities: { availableDisplayModes: ['inline'] } })
+      .then(init => { if (init.hostInfo?.origin) hostOrigin = init.hostInfo.origin })
+    const sendAction = (action, payload = {}) => rpc('tools/call', {
+      name: 'mikser_ui_action', arguments: { entityId, layoutId, action, payload },
+    })
+
     const initial = {
       seoTitle:       {{ document.meta.seo.title | json }},
       seoDescription: {{ document.meta.seo.description | json }},
@@ -452,7 +549,7 @@ mcpUi:
             if (v !== initial[k]) payload[k] = v   // diff: only send changed fields
           }
         }
-        window.parent.postMessage({ type: 'mcp-ui/action', action, entityId, payload }, '*')
+        sendAction(action, payload)
       })
     })
   </script>
@@ -496,7 +593,25 @@ mcpUi:
   </div>
 
   <script>
-    const entityId = "<%= it.document.id %>"
+    const entityId = <%= JSON.stringify(it.document.id) %>
+    const layoutId = <%= JSON.stringify(it.document.layout.id) %>
+    let nextId = 1, hostOrigin = '*'
+    const pending = new Map()
+    window.addEventListener('message', e => {
+      if (!e.data?.id || !pending.has(e.data.id)) return
+      const { resolve, reject } = pending.get(e.data.id); pending.delete(e.data.id)
+      e.data.error ? reject(e.data.error) : resolve(e.data.result)
+    })
+    const rpc = (method, params) => new Promise((resolve, reject) => {
+      const id = nextId++; pending.set(id, { resolve, reject })
+      window.parent.postMessage({ jsonrpc: '2.0', method, params, id }, hostOrigin)
+    })
+    rpc('ui/initialize', { appCapabilities: { availableDisplayModes: ['inline'] } })
+      .then(init => { if (init.hostInfo?.origin) hostOrigin = init.hostInfo.origin })
+    const sendAction = (action, payload = {}) => rpc('tools/call', {
+      name: 'mikser_ui_action', arguments: { entityId, layoutId, action, payload },
+    })
+
     document.querySelectorAll('[data-tag]').forEach(btn => {
       btn.addEventListener('click', () => btn.classList.toggle('selected'))
     })
@@ -504,7 +619,7 @@ mcpUi:
       btn.addEventListener('click', () => {
         const action = btn.dataset.action
         const tags = Array.from(document.querySelectorAll('[data-tag].selected')).map(b => b.dataset.tag)
-        window.parent.postMessage({ type: 'mcp-ui/action', action, entityId, payload: { tags } }, '*')
+        sendAction(action, { tags })
       })
     })
   </script>
@@ -546,15 +661,28 @@ mcpUi:
 
   <script>
     const entityId = {{{json document.id}}}
+    const layoutId = {{{json document.layout.id}}}
+    let nextId = 1, hostOrigin = '*'
+    const pending = new Map()
+    window.addEventListener('message', e => {
+      if (!e.data?.id || !pending.has(e.data.id)) return
+      const { resolve, reject } = pending.get(e.data.id); pending.delete(e.data.id)
+      e.data.error ? reject(e.data.error) : resolve(e.data.result)
+    })
+    const rpc = (method, params) => new Promise((resolve, reject) => {
+      const id = nextId++; pending.set(id, { resolve, reject })
+      window.parent.postMessage({ jsonrpc: '2.0', method, params, id }, hostOrigin)
+    })
+    rpc('ui/initialize', { appCapabilities: { availableDisplayModes: ['inline'] } })
+      .then(init => { if (init.hostInfo?.origin) hostOrigin = init.hostInfo.origin })
+    const sendAction = (action, payload = {}) => rpc('tools/call', {
+      name: 'mikser_ui_action', arguments: { entityId, layoutId, action, payload },
+    })
+
     document.querySelectorAll('[data-status]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        window.parent.postMessage({
-          type: 'mcp-ui/action',
-          action: 'set-status',
-          entityId,
-          payload: { status: btn.dataset.status },
-        }, '*')
-      })
+      btn.addEventListener('click', () =>
+        sendAction('set-status', { status: btn.dataset.status })
+      )
     })
   </script>
 </body>
@@ -565,7 +693,7 @@ Single action with a parameterised payload — the user picks the value, the age
 
 #### 7. Multi-step wizard — onboarding flow
 
-The iframe holds its own state across multiple steps; only the final submission sends a postMessage. Good when the interaction is genuinely multi-step (multiple form pages, confirm-then-go) and bouncing through the agent between steps would be expensive.
+The iframe holds its own state across multiple steps; only the final submission calls `sendAction`. Good when the interaction is genuinely multi-step (multiple form pages, confirm-then-go) and bouncing through the agent between steps would be expensive.
 
 ```hbs
 ---
@@ -611,6 +739,24 @@ mcpUi:
 
   <script>
     const entityId = {{{json document.id}}}
+    const layoutId = {{{json document.layout.id}}}
+    let nextId = 1, hostOrigin = '*'
+    const pending = new Map()
+    window.addEventListener('message', e => {
+      if (!e.data?.id || !pending.has(e.data.id)) return
+      const { resolve, reject } = pending.get(e.data.id); pending.delete(e.data.id)
+      e.data.error ? reject(e.data.error) : resolve(e.data.result)
+    })
+    const rpc = (method, params) => new Promise((resolve, reject) => {
+      const id = nextId++; pending.set(id, { resolve, reject })
+      window.parent.postMessage({ jsonrpc: '2.0', method, params, id }, hostOrigin)
+    })
+    rpc('ui/initialize', { appCapabilities: { availableDisplayModes: ['inline'] } })
+      .then(init => { if (init.hostInfo?.origin) hostOrigin = init.hostInfo.origin })
+    const sendAction = (action, payload = {}) => rpc('tools/call', {
+      name: 'mikser_ui_action', arguments: { entityId, layoutId, action, payload },
+    })
+
     const state = { step: 1, answers: {} }
     const totalSteps = 3
 
@@ -632,39 +778,35 @@ mcpUi:
     document.getElementById('next').addEventListener('click', () => {
       captureCurrent()
       if (state.step < totalSteps) { state.step++; render() }
-      else {
-        window.parent.postMessage({
-          type: 'mcp-ui/action', action: 'complete', entityId, payload: state.answers,
-        }, '*')
-      }
+      else { sendAction('complete', state.answers) }
     })
     document.getElementById('back').addEventListener('click', () => {
       captureCurrent(); state.step--; render()
     })
-    document.getElementById('cancel').addEventListener('click', () => {
-      window.parent.postMessage({ type: 'mcp-ui/action', action: 'cancel', entityId, payload: {} }, '*')
-    })
+    document.getElementById('cancel').addEventListener('click', () => sendAction('cancel'))
     render()
   </script>
 </body>
 </html>
 ```
 
-State lives inside the iframe; the agent only sees the final merged answers (or `cancel`). One tool call covers the whole wizard. This pattern is worth it when the back-and-forth would otherwise burn 3–4 agent turns.
+State lives inside the iframe; the agent only sees the final merged answers (or `cancel`). One `mikser_ui_action` call covers the whole wizard. This pattern is worth it when the back-and-forth would otherwise burn 3–4 agent turns.
 
 ### Design principles
 
 The seven examples above lean on the same conventions. Worth naming them so they're easy to extend.
 
-- **`postMessage({ type: 'mcp-ui/action', action, entityId, payload })` is the contract.** All four fields. `action` is one of the names you declared in `mcpUi.actions`. `entityId` is included so the host can sanity-check the message belongs to the in-flight tool call. `payload` is whatever structured data the user produced — keep it small and JSON-serialisable.
-- **Embed entity data with `{{{json document.id}}}` (or the equivalent in your engine).** Triple-stash in Handlebars / `| json` in Liquid / `<%= it.x %>` after JSON.stringify in Eta. This prevents injection if a field contains quotes — never interpolate raw string fields into a `'string-literal'` in script tags.
-- **Pick the smallest sandbox that works.** Pure render: `sandbox: []` (no scripts at all). Click-only interaction: `sandbox: [allow-scripts]`. Form submission with POST elsewhere (rare): you'll need more, and you're probably over-scoping the layout. Don't ship `allow-same-origin` casually — it lifts most of the cross-origin protection.
+- **`tools/call` against `mikser_ui_action` is the contract** — delivered over `window.parent.postMessage` as a JSON-RPC frame, with `arguments: { entityId, layoutId, action, payload }`. The host bridges it into a real MCP tool call on your behalf. `action` MUST be a name declared in your layout's `mcpUi.actions` list — mikser rejects anything else with a structured error and never invokes the optional `handler.url`. `entityId` and `layoutId` come from the render context; the iframe just reads them.
+- **Embed entity data with `{{{json document.id}}}` (or the equivalent in your engine).** Triple-stash in Handlebars / `| json` in Liquid / `<%= JSON.stringify(it.x) %>` in Eta. This prevents injection if a field contains quotes — never interpolate raw string fields into a `'string-literal'` in script tags. The same rule applies to `document.layout.id`.
+- **Pick the smallest sandbox that works.** Pure render: `sandbox: []` (no scripts at all). Click-only interaction: `sandbox: [allow-scripts]`. `postMessage` works at `allow-scripts` because it's not a network operation in the CSP sense; the host receives it as a same-frame message. Don't ship `allow-same-origin` casually — it lifts most of the cross-origin protection the host's double-iframe setup gives you.
+- **Tighten `hostOrigin` after `ui/initialize`.** The handshake's response carries the host's origin in `hostInfo.origin`. Switch your `targetOrigin` from `'*'` to that value before any subsequent `postMessage` — otherwise a hostile parent frame could read your action params. The canonical helper does this in one line; copy that behavior.
 - **Send only what changed.** Multi-field forms (#4) should diff against the initial values and post only the deltas. Single-state toggles (#2, #6) send the target state, not the current state. Wizards (#7) send the merged final answers. Smaller payloads are cheaper for the agent to reason about.
-- **Style inline, ship self-contained.** No external CSS, no web fonts, no analytics — the iframe has no `fetch` and the host may strip referenced URLs. System fonts (`font-family: system-ui`) and inline `<style>` are fine; everything that needs to render must be in the returned HTML.
+- **Style inline, ship self-contained.** No external CSS, no web fonts, no analytics — the default MCP Apps CSP is `default-src 'none'; connect-src 'none'`. The only outbound channel from the iframe is `postMessage` to the host. System fonts (`font-family: system-ui`) and inline `<style>` are fine; everything else has to be embedded.
 - **Use the layout body to compute what the agent shouldn't.** Example #2's payload pre-computes the *new* publish state. Example #4 pre-computes the diff. Pushing logic to render-time means the agent receives ready-to-act-on data rather than raw inputs it has to interpret.
-- **Don't smuggle long content through the payload.** If the user types a 2000-word note, post it back as a reference id and `mikser_api_read_entity` it later — not as a single huge `payload.note` string. Tool results live in the agent's context window.
+- **Don't smuggle long content through the payload.** If the user types a 2000-word note, send back a reference id and call `mikser_api_read_entity` later — not as a single huge `payload.note` string. Tool results live in the agent's context window.
+- **For external workflows, declare `mcpUi.handler.url` instead of teaching the agent the schema.** When a layout's action should hit your application server (Slack notification, JIRA transition, queue), set `handler.url` in the frontmatter. `mikser_ui_action` POSTs the action to that URL (HMAC-signed if `handler.secret` is set) and uses the response as the tool result. The agent stays generic; the application semantics stay in your service. Mikser stays a content engine.
 
-These conventions aren't enforced by the engine — they're just what makes layouts compose with agents cleanly. Hosts that implement the Apps extension fully will eventually add more affordances (rich text fields, file uploads, in-iframe MCP tool calls). For today, plain HTML + `postMessage` covers the vast majority of useful interactions.
+These conventions aren't enforced by the engine — they're just what makes layouts compose with agents cleanly. The contract is the MCP Apps spec; mikser's role is to render the iframe and accept the resulting `tools/call`. Application semantics live either in the agent (pure-relay) or in your `handler.url` webhook — never in mikser.
 
 ## Built-in resources
 

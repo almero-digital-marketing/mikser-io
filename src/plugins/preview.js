@@ -24,10 +24,84 @@
 // wrapper over this surface.
 
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHmac } from 'node:crypto'
 import { z } from 'zod'
 import { useRenderer } from '../api.js'
 import { mimeForEntity, matchEntity } from '../utils.js'
+
+// Forward an MCP-UI action to an external handler URL. Returns the
+// handler's JSON response, which becomes the tool result. Throws on
+// network error, non-2xx status, timeout, or invalid response shape —
+// callers fall back to pure-relay on throw.
+//
+// HMAC signing: when handler.secret is set, we sign the request body
+// with sha256(secret) and pass it in X-Mikser-Signature. Receivers
+// MUST verify before processing. When secret is unset, no signature
+// is sent (acceptable for dev; not recommended in production — see
+// ADR-0008).
+//
+// Extracted as a standalone function so it can be unit-tested with a
+// mock URL and so mikser_ui_action's main path stays readable.
+export async function forwardToHandler(handler, body) {
+    const { url, secret, timeout = 5000 } = handler
+    if (!url) throw new Error('forwardToHandler: handler.url is required')
+
+    const json = JSON.stringify({
+        ...body,
+        // Timestamp is set inside the forward, not by the caller, so
+        // a stale callback that came in via a slow network still has
+        // a fresh timestamp on the outgoing forward. Receivers that
+        // care can put their own.
+        timestamp: new Date().toISOString(),
+    })
+
+    const headers = {
+        'content-type':         'application/json',
+        'x-mikser-layout-id':   body.layoutId   ?? '',
+        'x-mikser-mode':        body.mode       ?? '',
+        'x-mikser-request-id':  randomUUID(),
+    }
+    if (secret) {
+        const sig = createHmac('sha256', secret).update(json).digest('hex')
+        headers['x-mikser-signature'] = `sha256=${sig}`
+    }
+
+    const ac = new AbortController()
+    const timer = setTimeout(() => ac.abort(), timeout)
+
+    let res
+    try {
+        res = await fetch(url, {
+            method:  'POST',
+            headers,
+            body:    json,
+            signal:  ac.signal,
+        })
+    } catch (err) {
+        clearTimeout(timer)
+        if (err.name === 'AbortError') {
+            throw new Error(`Handler timeout (${timeout}ms) — ${url}`)
+        }
+        throw new Error(`Handler unreachable: ${err.message} — ${url}`)
+    }
+    clearTimeout(timer)
+
+    if (!res.ok) {
+        const text = await res.text().catch(() => '')
+        throw new Error(`Handler ${res.status} ${res.statusText} — ${text.slice(0, 200)}`)
+    }
+
+    const ct = res.headers.get('content-type') ?? ''
+    if (ct.includes('application/json')) {
+        return await res.json()
+    }
+    // Non-JSON response — wrap as a structured result so the agent
+    // sees something meaningful. The handler is technically off-spec
+    // here (ADR-0008 says return JSON), but we don't punish callers
+    // for a casual `res.send('ok')` from the handler side.
+    const text = await res.text()
+    return { ok: true, handlerResponse: text }
+}
 
 export default ({
     runtime,
@@ -361,9 +435,12 @@ export default ({
                             // surface it as text/preformatted.
                             { type: 'text', text: html, mimeType: 'text/html' },
                         ],
-                        // Side-channel metadata so hosts that wire up
-                        // postMessage back-channels know which actions
-                        // the UI emits and which sandbox flags to apply.
+                        // Side-channel metadata so hosts know what to
+                        // do with the rendered UI. Per the MCP Apps
+                        // spec (2026-01-26), the iframe speaks JSON-RPC
+                        // back to the host via postMessage; clicks
+                        // resolve as tools/call against `actionTool`
+                        // (registered with visibility=['app'] below).
                         _meta: {
                             mcpUi: {
                                 layoutId:    matched.id,
@@ -371,6 +448,14 @@ export default ({
                                 description: mcpUiMeta.description ?? null,
                                 actions:     mcpUiMeta.actions     ?? [],
                                 sandbox:     mcpUiMeta.sandbox     ?? ['allow-scripts'],
+                                // The app-callable tool the iframe
+                                // invokes for each user click. Hosts
+                                // that bridge iframe tools/call route
+                                // this through the existing MCP
+                                // transport — the click becomes a
+                                // separate tool turn in the agent's
+                                // conversation.
+                                actionTool:  'mikser_ui_action',
                             },
                         },
                     }
@@ -381,8 +466,112 @@ export default ({
             },
         )
 
+        // mikser_ui_action — app-callable tool that delivers a user
+        // click from inside an mcpUi iframe back to the agent (or to
+        // an external webhook handler).
+        //
+        // Visibility model (MCP Apps spec 2026-01-26):
+        //   _meta.ui.visibility = ['app']
+        //
+        // means this tool is invisible to the agent — it's never
+        // listed in the model's tool surface — but iframes opened by
+        // mikser_preview_ui can invoke it over the host's AppBridge
+        // (tools/call over postMessage). The host bridges the call
+        // into a real MCP tools/call, and the agent sees the result
+        // as a separate tool turn in the conversation.
+        //
+        // Auth boundary: the action MUST appear in the layout's
+        // declared mcpUi.actions list. Unknown actions return an
+        // error result. There is no callId / random URL / signature
+        // on this channel — the iframe's only path to mikser is
+        // through the host's authenticated MCP transport, which is
+        // already trusted.
+        //
+        // Resolution: pure relay (return { entityId, action, payload }
+        // as the tool result) unless the layout declared
+        // mcpUi.handler.url, in which case mikser POSTs the action
+        // to that URL (HMAC-signed if handler.secret is set) and
+        // returns the handler's response. See forwardToHandler above.
+        mcp.registerTool(
+            'mikser_ui_action',
+            {
+                description: 'Deliver a user action emitted from an mcpUi iframe. App-callable only — invisible to the agent, invoked exclusively by iframes opened via mikser_preview_ui. Validates the action against the layout\'s declared mcpUi.actions list, then either returns { entityId, action, payload } as a pure relay or forwards to the layout\'s handler.url webhook if one is declared.',
+                inputSchema: {
+                    entityId: z.string().describe('Entity the action targets (the same id the iframe was rendered for).'),
+                    layoutId: z.string().describe('Layout that rendered the iframe — used to look up the allowed-actions list and optional handler config.'),
+                    action:   z.string().describe('Action name. Must appear in the layout\'s mcpUi.actions list.'),
+                    payload:  z.record(z.any()).optional().describe('Structured payload — form fields, selected status, etc. Schema is layout-defined; mikser passes it through.'),
+                },
+                _meta: {
+                    ui: {
+                        // App-callable only — invisible to the model
+                        // per MCP Apps spec. Hosts MUST NOT include
+                        // it in the agent's tools/list response and
+                        // MUST allow iframes opened via mikser_preview_ui
+                        // to invoke it.
+                        visibility: ['app'],
+                    },
+                },
+            },
+            async ({ entityId, layoutId, action, payload = {} }) => {
+                const logger = useLogger()
+                const fail = (msg) => ({
+                    isError: true,
+                    content: [{ type: 'text', text: msg }],
+                })
+                const ok = (data) => ({
+                    content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
+                })
+
+                try {
+                    const layout = await findEntity({ id: layoutId })
+                    if (!layout || layout.collection !== 'layouts') {
+                        return fail(`Layout not found or not a layout: ${layoutId}`)
+                    }
+                    const mcpUiMeta = layout.meta?.mcpUi
+                    if (!mcpUiMeta) {
+                        return fail(`Layout ${layoutId} does not declare mcpUi frontmatter — not eligible as an action source.`)
+                    }
+                    const allowed = mcpUiMeta.actions ?? []
+                    if (!allowed.includes(action)) {
+                        return fail(`Action "${action}" not in allowed list for ${layoutId}. Declared: [${allowed.join(', ')}]`)
+                    }
+
+                    const result = { entityId, action, payload }
+
+                    if (mcpUiMeta.handler?.url) {
+                        try {
+                            const handlerResult = await forwardToHandler(mcpUiMeta.handler, {
+                                ...result,
+                                layoutId,
+                                mode: mcpUiMeta.mode ?? 'preview',
+                            })
+                            logger.debug('MCP mikser_ui_action forwarded %s/%s → %s OK',
+                                entityId, action, mcpUiMeta.handler.url)
+                            return ok(handlerResult)
+                        } catch (err) {
+                            // Fail-safe: never lose the user's click.
+                            // Surface handler failure to the agent as
+                            // structured metadata alongside the relay
+                            // payload so the agent can decide whether
+                            // to retry or proceed without backend ack.
+                            logger.warn('MCP mikser_ui_action handler failed (%s) — falling back to pure relay: %s',
+                                mcpUiMeta.handler.url, err.message)
+                            return ok({ ...result, handlerError: err.message })
+                        }
+                    }
+
+                    logger.debug('MCP mikser_ui_action %s/%s (pure relay)', entityId, action)
+                    return ok(result)
+                } catch (err) {
+                    logger.error('MCP mikser_ui_action error: %s', err.message)
+                    return fail(err.message)
+                }
+            },
+        )
+
         const logger = useLogger()
-        logger.debug('MCP tool registered: mikser_preview_ui + mikser://mcp-ui/modes resource (preview plugin)')
+        logger.debug('MCP tools registered: mikser_preview_ui + mikser_ui_action + mikser://mcp-ui/modes resource (preview plugin)')
     })
 
     return { name: 'preview' }
