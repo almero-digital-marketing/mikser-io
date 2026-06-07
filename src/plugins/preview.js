@@ -322,7 +322,18 @@ export default ({
 
                     // Force the chosen layout — bypass autoLayouts /
                     // layouts.match resolution that onProcessed would do.
-                    const renderEntity = { ...entity, layout: matched }
+                    // Both `entity.layout` AND `entity.meta.layout` need
+                    // to be set: the layouts plugin's onProcessed
+                    // re-resolves entity.layout from entity.meta.layout
+                    // on every cycle, and previewRender goes through
+                    // the full lifecycle. Without overriding meta.layout
+                    // the agent's `mcp-ui/post-approval` choice gets
+                    // silently replaced by the production `post` layout.
+                    const renderEntity = {
+                        ...entity,
+                        layout: matched,
+                        meta: { ...(entity.meta || {}), layout: matched.name },
+                    }
                     const { output } = await previewRender(renderEntity, {
                         save: false,
                         catalog: false,
