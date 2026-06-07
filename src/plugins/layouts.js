@@ -403,7 +403,12 @@ export default ({
 
             if (data?.pages) {
                 if (!_.endsWith(entity.name, entity.format)) {
-                    for (let page = 0; page < data.pages - 1; page++) {
+                    // Loop bound is `< data.pages` (not `data.pages - 1`).
+                    // With 4 pages and the old bound, iteration only ran
+                    // page=0,1,2 and the 4th page was silently dropped —
+                    // the sitemap claimed "Page X of 4" but the destination
+                    // for page 4 was never produced.
+                    for (let page = 0; page < data.pages; page++) {
                         const pageEntity = _.cloneDeep(entity)
                         pageEntity.pages = data.pages
                         if (page) {
