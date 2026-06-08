@@ -49,7 +49,6 @@ export async function setup(options) {
             .option('-s --server [port]', 'start an Express server on the given port (defaults to 3001)')
             .option('--cors [origin]', 'restrict server CORS to a specific origin (default *)')
             .option('--no-cors', 'disable server CORS headers')
-            .option('--mcp [path]', 'enable MCP server (mounts at <path>, default /mcp)')
 
         Object.assign(runtime.options, options || runtime.engine.commander.parse(process.argv).opts())
         runtime.options.info = true
@@ -177,61 +176,24 @@ export async function setup(options) {
             const corsOrigin = runtime.config.server?.cors ?? runtime.options.cors ?? true
             if (corsOrigin) {
                 const origin = corsOrigin === true ? '*' : String(corsOrigin)
-                runtime.options.app.use((req, res, next) => {
-                    res.header('Access-Control-Allow-Origin', origin)
-                    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-                    // mcp-session-id + mcp-protocol-version are
-                    // Streamable HTTP transport headers. Browser-side
-                    // MCP clients (basic-host, mcp-ui, anything not
-                    // running in Node) send mcp-session-id on every
-                    // request after initialize — and they can only
-                    // *read* the initial session-id from the response
-                    // if it's listed in Expose-Headers. Without both
-                    // lines, browser hosts succeed at initialize and
-                    // then hang because they can't continue the
-                    // protocol. last-event-id is the SSE resume token
-                    // — same family.
-                    res.header(
-                        'Access-Control-Allow-Headers',
-                        'Content-Type, Authorization, mcp-session-id, mcp-protocol-version, last-event-id',
-                    )
-                    res.header(
-                        'Access-Control-Expose-Headers',
-                        'mcp-session-id, mcp-protocol-version',
-                    )
-                    if (req.method === 'OPTIONS') return res.sendStatus(204)
-                    next()
-                })
+                // Extensible header arrays. Plugins push values into
+                // these at factory time to teach CORS about headers
+                // they care about — the mcp plugin adds mcp-session-id,
+                // mcp-protocol-version, last-event-id so browser-side
+                // MCP clients can complete the Streamable HTTP
+                // handshake. Default to the minimum every server needs.
+                runtime.options.corsAllowHeaders  = ['Content-Type', 'Authorization']
+                runtime.options.corsExposeHeaders = []
+                const { default: cors } = await import('cors')
+                runtime.options.app.use(cors((req, callback) => {
+                    callback(null, {
+                        origin,
+                        methods:        ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+                        allowedHeaders: runtime.options.corsAllowHeaders,
+                        exposedHeaders: runtime.options.corsExposeHeaders,
+                    })
+                }))
                 logger.debug('CORS enabled: %s', origin)
-            }
-        }
-
-        // MCP substrate — same engine-provides-transport, plugins-
-        // register-tools shape as Express. See
-        // documentation/decisions/0006-when-to-add-to-core.md for
-        // the justification. The substrate object is exposed at
-        // runtime.options.mcp; plugins use it directly via the SDK
-        // (server.registerTool / server.registerResource). The
-        // transport is mounted later, after plugin routes have had
-        // a chance to register (see the onLoad below that handles
-        // static serving + listen).
-        if (runtime.options.mcp) {
-            try {
-                const { createMcpSubstrate, wireLoggerToMcp } = await import('./mcp.js')
-                runtime.options.mcpPath = typeof runtime.options.mcp === 'string'
-                    ? runtime.options.mcp
-                    : '/mcp'
-                runtime.options.mcp = createMcpSubstrate()
-
-                // Fan every engine log call out to MCP clients as
-                // `notifications/message`. Wraps in-place so the
-                // existing logger reference (held by plugins, render
-                // workers, useLogger consumers) gains the side-channel
-                // automatically — no second logger to thread through.
-                wireLoggerToMcp(runtime.engine.logger, runtime.options.mcp)
-                logger.debug('MCP substrate ready (mounts at %s when server is up)', runtime.options.mcpPath)
-            } catch (err) {
-                logger.error('Failed to enable MCP: %s', err.message)
             }
         }
     })
@@ -253,14 +215,7 @@ export async function setup(options) {
             const logger = useLogger()
             const { default: express } = await import('express')
 
-            // Mount MCP transport (if active) BEFORE the static
-            // catch-all so /mcp isn't swallowed. After this runs the
-            // server is fully reachable over HTTP for AI clients.
-            if (runtime.options.mcp && runtime.options.mcpPath) {
-                const { mountMcpOnExpress } = await import('./mcp.js')
-                // mcp.js logs per-endpoint as it mounts — no extra log here.
-                await mountMcpOnExpress(runtime.options.app, runtime.options.mcp, runtime.options.mcpPath)
-            }
+
 
             // Serve the output folder as the catch-all static route.
             // Mounted LAST in the middleware chain so plugin routes
