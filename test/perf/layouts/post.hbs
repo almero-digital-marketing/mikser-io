@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="{{document.meta.lang}}">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>{{document.meta.title}}</title>
+	<meta name="description" content="{{document.meta.description}}">
+	{{#if document.meta.tags}}<meta name="keywords" content="{{#each document.meta.tags}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}">{{/if}}
+</head>
+<body>
+	<article>
+		<header class="post-header">
+			<h1>{{document.meta.title}}</h1>
+			<div class="post-meta">
+				{{#if document.meta.date}}<time datetime="{{document.meta.date}}">{{document.meta.date}}</time>{{/if}}
+				{{#if document.meta.author}}<span class="byline">by {{document.meta.author}}</span>{{/if}}
+				{{#if document.meta.tags}}
+					<ul class="tags">
+						{{#each document.meta.tags}}<li class="tag">{{this}}</li>{{/each}}
+					</ul>
+				{{/if}}
+			</div>
+		</header>
+		<section class="content">
+			{{{document.content}}}
+		</section>
+		<footer class="post-footer">
+			<p>id: {{document.id}}</p>
+		</footer>
+	</article>
+</body>
+</html>

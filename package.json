@@ -7,6 +7,7 @@
 		"debug": "node --no-warnings app.js --server --watch --working-folder test/fixture",
 		"test:unit": "node --test --test-reporter=spec 'test/unit/**/*.test.js'",
 		"test:smoke": "node --no-warnings app.js --working-folder test/fixture",
+		"test:perf": "node test/perf/generate.js && node --no-warnings app.js --working-folder test/perf",
 		"test": "npm run test:unit && npm run test:smoke"
 	},
 	"bin": {
