@@ -1,11 +1,12 @@
 import path from 'node:path'
-import { access, writeFile, readFile, mkdir, rm } from 'node:fs/promises'
+import { access, writeFile, mkdir, rm } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import _ from 'lodash'
 import sift from 'sift'
-import { z } from 'zod'
 import { useRenderer } from '../render.js'
-import { mimeForEntity, isLoopback, expandEntity, projectMeta, ExpandError, useCollection } from '../utils.js'
+import { mimeForEntity, isLoopback, ExpandError, useCollection } from '../utils.js'
+import { queryEntities } from '../catalog.js'
+import { subscribe } from '../subscriptions.js'
 
 // Mongo-style operators recognised in URL query params as `<path>.$<op>=...`.
 // $in / $nin take comma-separated values; $exists takes a truthy/falsy
@@ -121,99 +122,6 @@ function parseQueryString(params) {
     return { filter, page, limit, skip, sort, fields, expand }
 }
 
-// Build a findRef closure that takes a ref string and returns the
-// catalog entity it resolves to, or null. The convention is hrefs (ADR-
-// 0007 A2) — leading slash, no extension. We tolerate three lookup
-// shapes so projects with different addressing schemes work:
-//   - exact id        — for callers that addressed by raw catalog id
-//   - meta.href       — the canonical published-href field
-//   - id-minus-ext    — `/authors/dick` matches `/authors/dick.yml`
-//
-// The same heuristic the schemas plugin uses for ref-existence checks;
-// extracted here so the api expand walker resolves the same way.
-function findRefFactory(findEntities) {
-    return async function findRef(ref) {
-        if (!ref || typeof ref !== 'string') return null
-        const matches = await findEntities(e =>
-            !!e && (
-                e.id === ref ||
-                e.meta?.href === ref ||
-                (typeof e.id === 'string' && e.id.replace(/\.[^./]+$/, '') === ref)
-            ),
-        )
-        return matches[0] ?? null
-    }
-}
-
-// Per-endpoint expansion caps. Plumbed from mikser.config.js:
-//   api: { expand: { maxDepth, maxPaths, maxResolved } }
-// Defaults match ADR-0007 B7. Centralised here so list, query, and
-// read paths apply the same limits.
-function expandLimits(runtime) {
-    const cfg = runtime?.config?.api?.expand ?? {}
-    return {
-        maxDepth:    typeof cfg.maxDepth    === 'number' ? cfg.maxDepth    : 5,
-        maxPaths:    typeof cfg.maxPaths    === 'number' ? cfg.maxPaths    : 20,
-        maxResolved: typeof cfg.maxResolved === 'number' ? cfg.maxResolved : 100,
-    }
-}
-
-// Apply expand-then-project to one entity. When `expand` has entries
-// the walker inlines resolved refs first; in all cases the final meta
-// is normalized (`$`-keys stripped) so the wire shape matches what the
-// SDK consumers and templates expect per ADR-0007 A3.
-//
-// projectMeta on a meta with no $-keys is a structural no-op (same
-// values, new object identity). The small clone cost is acceptable
-// for the consistency benefit — every api response is normalized.
-async function expandAndProject(entity, expand, runtime, findEntities) {
-    let result = entity
-    if (expand?.length) {
-        result = await expandEntity(entity, expand, {
-            findRef: findRefFactory(findEntities),
-            ...expandLimits(runtime),
-        })
-    }
-    if (!result?.meta) return result
-    return { ...result, meta: projectMeta(result.meta) }
-}
-
-// Apply filter → endpoint scope → sort → skip/limit → projection.
-// `findEntities()` returns the live in-memory catalog; for ≤100k docs the
-// per-request scan is plenty fast. Backing this with an index becomes
-// interesting past that — same endpoint contract.
-async function runQuery({ filter, sort, fields, skip, limit, scope, findEntities }) {
-    let all = await findEntities()
-    if (scope) all = all.filter(scope)
-
-    if (filter && Object.keys(filter).length) {
-        const match = sift(filter)
-        all = all.filter(match)
-    }
-
-    const total = all.length
-
-    if (sort && Object.keys(sort).length) {
-        const entries = Object.entries(sort)
-        all.sort((a, b) => {
-            for (const [key, dir] of entries) {
-                const av = _.get(a, key)
-                const bv = _.get(b, key)
-                if (av == null && bv == null) continue
-                if (av == null) return 1
-                if (bv == null) return -1
-                if (av < bv) return -dir
-                if (av > bv) return dir
-            }
-            return 0
-        })
-    }
-
-    let items = all.slice(skip, skip + limit)
-    if (fields?.length) items = items.map(e => _.pick(e, fields))
-    return { items, total }
-}
-
 // Derive the cache filename from the raw query string the client sent.
 //   no query string (`/entities`)       → 'index'
 //   query string ('a=1&b=2&id=/foo/bar') → 16-hex sha256 prefix
@@ -316,9 +224,6 @@ async function clearEndpointCache({ outputFolder, base, name, logger }) {
     }
 }
 
-// mimeForEntity lives in ../utils.js (pure helper, shared by several
-// plugins). Imported at top of file.
-
 // Decide how to send the render output over HTTP. Exported (and pure-ish)
 // so tests can exercise the branching without spinning up a real server.
 export async function sendRenderOutput(res, output, entity) {
@@ -349,12 +254,6 @@ export async function sendRenderOutput(res, output, entity) {
     // Anything else (plain object, etc.) is sent as JSON.
     return res.json(result)
 }
-
-// Subscription bookkeeping shared across all endpoints. Each entry holds
-// the live Express response, the compiled sift filter, the endpoint
-// scope, and a heartbeat timer. Per-cycle the onFinalized hook iterates
-// the journal and dispatches matching changes to every subscription.
-const subscriptions = new Map()
 
 // Per-cache-file graph subscriptions for expand-cached queries (ADR-0007
 // B9). When a GET /entities response with `expand` is written to the
@@ -404,7 +303,6 @@ export default ({
     onFinalize,
     useLogger,
     useJournal,
-    findEntities,
     constants: { OPERATION },
 }) => {
     // Shared between onLoaded (populates) and onFinalize (consumes).
@@ -542,7 +440,8 @@ export default ({
             }
             const cacheEnabled = ep.cache === true
 
-            // Uniform mikser auth rule (same as MCP endpoints):
+            // Uniform mikser auth rule (matches what mikser-io-mcp uses
+            // for its endpoints):
             //   - Token presented and matches → allow (from anywhere)
             //   - Token presented and doesn't match → 401
             //   - No token presented → require loopback unless allowRemote
@@ -580,8 +479,9 @@ export default ({
                 next()
             }
 
-            // Reuse the transport-agnostic primitives from src/api.js so
-            // the library entry point and the HTTP endpoints share the
+            // useRenderer (from ../render.js) is the transport-agnostic
+            // render primitive — HTTP endpoints, mikser-io-mcp's
+            // mikser_render tool, and library callers all share the
             // exact same batching/timeouts/error semantics. One renderer
             // per endpoint so per-endpoint renderTimeout overrides land.
             const { render } = useRenderer(runtime, { defaultTimeout: renderTimeout })
@@ -593,22 +493,20 @@ export default ({
                     const limit = Math.min(100, Math.max(1, parsed.limit ?? pageSize))
                     const skip = parsed.skip ?? (parsed.page - 1) * limit
 
-                    let { items, total } = await runQuery({
+                    // queryEntities performs the full sift+expand+project
+                    // chain (ADR-0007 B1 / A3) so wire shape is normalized
+                    // even when the caller didn't request expand. fields
+                    // projection is applied after expand so dotted-path
+                    // picks see the resolved structure.
+                    const { items, total } = await queryEntities({
                         filter: parsed.filter,
                         sort: parsed.sort,
                         fields: resolveFields(parsed.fields),
                         skip,
                         limit,
+                        expand: parsed.expand,
                         scope: query,
-                        findEntities,
                     })
-
-                    // Expand + project per ADR-0007 B1 / A3. Always
-                    // project so the wire shape is normalized; only
-                    // walk the expansion paths when the caller asked.
-                    items = await Promise.all(items.map(item =>
-                        expandAndProject(item, parsed.expand, runtime, findEntities),
-                    ))
 
                     const page = Math.floor(skip / limit) + 1
                     const totalPages = Math.ceil(total / limit) || 1
@@ -711,17 +609,13 @@ export default ({
                     const limit = Math.min(100, Math.max(1, rawLimit ?? pageSize))
                     const skip = rawSkip ?? (Math.max(1, parseInt(rawPage) || 1) - 1) * limit
 
-                    let { items, total } = await runQuery({
+                    const { items, total } = await queryEntities({
                         filter, sort,
                         fields: resolveFields(fields),
                         skip, limit,
+                        expand,
                         scope: query,
-                        findEntities,
                     })
-
-                    items = await Promise.all(items.map(item =>
-                        expandAndProject(item, expand, runtime, findEntities),
-                    ))
 
                     const page = Math.floor(skip / limit) + 1
                     const totalPages = Math.ceil(total / limit) || 1
@@ -757,6 +651,12 @@ export default ({
             // emits create/update/delete events for entities matching the
             // subscription's filter and the endpoint's scope. Heartbeats
             // every 25s keep proxies happy. Connection close cleans up.
+            //
+            // Dispatch lives in core (src/subscriptions.js). This handler
+            // just translates HTTP/query-string into a subscribe() call
+            // whose onChange writes SSE frames to `res`. subscribe()
+            // throws on invalid input; we wrap it so the error becomes a
+            // 400 BEFORE SSE headers are sent.
             router.get('/entities/subscribe', allow('subscribe'), auth, (req, res) => {
                 let filterFn = null
                 let expand = null
@@ -764,27 +664,47 @@ export default ({
                     const parsed = parseQueryString(req.query)
                     if (Object.keys(parsed.filter).length) filterFn = sift(parsed.filter)
                     expand = parsed.expand?.length ? parsed.expand : null
-                    // Subject `expand` to the same caps as one-shot reads
-                    // so a misconfigured subscriber can't open a session
-                    // that's expensive to dispatch on every cycle.
-                    if (expand) {
-                        const { maxPaths, maxDepth } = expandLimits(runtime)
-                        if (expand.length > maxPaths) {
-                            throw new Error(`expand has ${expand.length} paths, exceeds maxPaths (${maxPaths})`)
-                        }
-                        for (const p of expand) {
-                            const parts = p.split('.').filter(Boolean)
-                            if (parts.length > maxDepth) {
-                                throw new Error(`Path '${p}' has length ${parts.length}, exceeds maxDepth (${maxDepth})`)
-                            }
-                        }
-                    }
+                } catch (err) {
+                    return res.status(400).json({ error: err.message })
+                }
+
+                const subscriptionId = `sub_${Date.now()}_${++subscriptionCounter}`
+
+                // Bridge core subscribe() to SSE frames. The same
+                // onChange handles every event — DELETE has just an id,
+                // graph-dispatched updates carry a `causedBy`, plain
+                // updates don't. Register BEFORE sseInit so a rejection
+                // from subscribe() can still return 400 cleanly with no
+                // headers flushed. onChange won't fire mid-handler —
+                // dispatchers run on onFinalize, never inside a request.
+                let sub
+                try {
+                    sub = subscribe({
+                        scope:  query,
+                        filter: filterFn,
+                        expand,
+                        onChange: ({ operation, entity, causedBy }) => {
+                            const projected = allowedFields
+                                ? _.pick(entity, allowedFields)
+                                : entity
+                            const payload = operation === 'delete'
+                                ? { id: entity.id }
+                                : causedBy !== undefined
+                                    ? { id: entity.id, entity: projected, causedBy }
+                                    : { id: entity.id, entity: projected }
+                            sseSend(res, operation, payload)
+                            logger.trace(
+                                'Api subscription %s %s: %s%s',
+                                subscriptionId, operation, entity.id,
+                                causedBy ? ` (caused-by=${causedBy})` : '',
+                            )
+                        },
+                    })
                 } catch (err) {
                     return res.status(400).json({ error: err.message })
                 }
 
                 sseInit(res)
-                const subscriptionId = `sub_${Date.now()}_${++subscriptionCounter}`
                 sseSend(res, 'init', { subscriptionId, endpoint: name, expand: expand ?? [] })
 
                 // Heartbeat — silent enough to not confuse the SDK but
@@ -793,67 +713,9 @@ export default ({
                 const heartbeat = setInterval(() => sseSend(res, 'heartbeat', {}), 25_000)
                 if (typeof heartbeat.unref === 'function') heartbeat.unref()
 
-                subscriptions.set(subscriptionId, {
-                    endpointName: name,
-                    scope: query,
-                    filter: filterFn,
-                    allowedFields,
-                    expand,
-                    res,
-                })
-
-                // When `expand` is requested, also register a graph
-                // subscription with the engine's refs index so mutations
-                // to entities at any depth within the expansion graph
-                // trigger a re-expand + emit. Without expand, the
-                // existing journal-walk loop covers all cases (it emits
-                // when the mutated entity itself matches the filter).
-                let graphSub = null
-                if (expand && runtime.refs?.subscribeGraph) {
-                    graphSub = runtime.refs.subscribeGraph({
-                        filter: (entity) => {
-                            // Combine the endpoint's scope and the
-                            // subscription's filter, exactly the gates
-                            // the no-expand path applies.
-                            if (query && !query(entity)) return false
-                            if (filterFn && !filterFn(entity)) return false
-                            return true
-                        },
-                        expand,
-                        onAffected: async ({ root, mutated }) => {
-                            try {
-                                const expanded = await expandAndProject(
-                                    root, expand, runtime, findEntities,
-                                )
-                                const projected = allowedFields
-                                    ? _.pick(expanded, allowedFields)
-                                    : expanded
-                                sseSend(res, 'update', {
-                                    id: root.id,
-                                    entity: projected,
-                                    // Surface what triggered the update
-                                    // so consumers can debug, log, or
-                                    // skip self-triggered events.
-                                    causedBy: mutated?.id ?? null,
-                                })
-                                logger.trace(
-                                    'Api subscription %s graph update: root=%s caused-by=%s',
-                                    subscriptionId, root.id, mutated?.id ?? '<none>',
-                                )
-                            } catch (err) {
-                                logger.warn(
-                                    'Api[%s] graph subscription dispatch failed for sub %s: %s',
-                                    name, subscriptionId, err.message,
-                                )
-                            }
-                        },
-                    })
-                }
-
                 req.on('close', () => {
                     clearInterval(heartbeat)
-                    subscriptions.delete(subscriptionId)
-                    graphSub?.dispose()
+                    sub.dispose()
                     logger.debug('Api[%s] subscription closed: %s', name, subscriptionId)
                 })
 
@@ -915,7 +777,8 @@ export default ({
             })
 
             app.use(`${base}/${name}`, router)
-            // Mirror MCP's boot log shape — same three reachability states.
+            // Same three reachability states the mikser-io-mcp plugin's
+            // boot log uses — convention shared across both packages.
             const authLabel = ep.token
                 ? 'token'
                 : (ep.allowRemote ? 'public, REMOTE OPEN' : 'public, loopback-only')
@@ -928,274 +791,45 @@ export default ({
                 location, [...allowedOps].join(','), authLabel)
         }
 
-        // MCP tool registrations. MCP is in-process: whoever can reach
-        // the /mcp transport already controls the engine. So the tool
-        // surface mirrors the *admin*-
-        // shape (list/query/read/update/delete/render) without the HTTP
-        // endpoint's token gate or query scope — the catalog is global.
-        // Tools register once (not per HTTP endpoint); plugin-author
-        // facing API is `mcp.simpleTool` from the substrate.
-        const mcp = runtime.options.mcp
-        if (mcp) {
-            const { render: mcpRender } = useRenderer(runtime, { defaultTimeout: globalRenderTimeout })
-
-            // Helpers — small enough to inline, but factoring them keeps
-            // each tool body to a single shape: parse → query → return.
-            const ok = (data) => ({
-                content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data, null, 2) }],
-            })
-            const fail = (msg) => ({
-                isError: true,
-                content: [{ type: 'text', text: msg }],
-            })
-
-            mcp.simpleTool(
-                'mikser_api_list_entities',
-                'List entities from mikser\'s catalog with optional filter / sort / projection. Use this for "show me all documents about X" or "what entities are in collection Y." Returns paginated results in the same envelope shape as the HTTP /entities endpoint. Pass `expand` to inline referenced entities (per ADR-0007): paths like "author", "author.organization", or "sections.*.image" walk through $-keyed reference fields and replace the ref string with the resolved entity in one round-trip.',
-                {
-                    filter: z.record(z.any()).optional().describe('Mongo-style filter (sift-compatible). Defaults to no filter — every entity.'),
-                    sort:   z.record(z.number()).optional().describe('Sort spec, e.g. { "meta.date": -1, "name": 1 }.'),
-                    fields: z.array(z.string()).optional().describe('Dotted-path projection. Omit to return whole entities.'),
-                    skip:   z.number().int().min(0).optional().describe('Skip N items.'),
-                    limit:  z.number().int().min(1).max(100).optional().describe('Page size, defaults to 25, capped at 100.'),
-                    expand: z.array(z.string()).optional().describe('Inline-expand referenced entities. Each entry is a dotted path that walks through $-keyed reference fields, replacing the ref string with the resolved entity. Use `*` for array iteration. Examples: ["author"], ["author.organization"], ["sections.*.image"]. Default caps: maxDepth 5, maxPaths 20, maxResolved 100 per request.'),
-                },
-                async ({ filter, sort, fields, skip, limit, expand }) => {
-                    try {
-                        const effectiveLimit = Math.min(100, Math.max(1, limit ?? 25))
-                        const effectiveSkip = Math.max(0, skip ?? 0)
-                        let { items, total } = await runQuery({
-                            filter: filter ?? {},
-                            sort, fields,
-                            skip: effectiveSkip,
-                            limit: effectiveLimit,
-                            scope: null,
-                            findEntities,
-                        })
-                        items = await Promise.all(items.map(item =>
-                            expandAndProject(item, expand, runtime, findEntities),
-                        ))
-                        return ok({
-                            items, total,
-                            skip: effectiveSkip,
-                            limit: effectiveLimit,
-                            hasNext: effectiveSkip + effectiveLimit < total,
-                        })
-                    } catch (err) {
-                        logger.error('MCP mikser_api_list_entities error: %s', err.message)
-                        return fail(err.message)
-                    }
-                },
-            )
-
-            mcp.simpleTool(
-                'mikser_api_read_entity',
-                'Read a single entity by its catalog id (e.g. "/documents/about.md"). Returns the full entity record or null when not found. Pass include: ["content"] to also fetch the source file content from disk — useful for reading a layout template, document frontmatter+body, or any text-format source without dropping out to the filesystem. Pass `expand` to inline referenced entities in the response (per ADR-0007): paths like "author", "author.organization", or "sections.*.image" replace the ref string with the resolved entity in one trip.',
-                {
-                    id: z.string().describe('Catalog id of the entity to read.'),
-                    include: z.array(z.enum(['content'])).optional().describe('Optional list of extra fields to populate. Currently only "content" is supported: reads the file at entity.uri and attaches it as .content (text formats only — md, html, yml, liquid, hbs, eta, json, css, js, svg, xml, mjml).'),
-                    expand: z.array(z.string()).optional().describe('Inline-expand referenced entities. Each entry is a dotted path through $-keyed reference fields. Use `*` for array iteration. Examples: ["author"], ["author.organization"], ["sections.*.image"]. Same caps as list_entities.'),
-                },
-                async ({ id, include, expand }) => {
-                    try {
-                        if (!id) return fail('id is required')
-                        const { items } = await runQuery({
-                            filter: { id },
-                            skip: 0, limit: 1,
-                            scope: null,
-                            findEntities,
-                        })
-                        let entity = items[0]
-                        if (!entity) return ok(null)
-
-                        entity = await expandAndProject(entity, expand, runtime, findEntities)
-
-                        if (include?.includes('content') && entity.uri) {
-                            // Heuristic — read content only for text-like
-                            // formats. Binary types (png, pdf, mp4, etc.)
-                            // get a marker so the caller knows to use a
-                            // different tool (mikser_api_render, or fetch
-                            // directly) rather than expecting bytes back.
-                            const TEXT_EXTS = new Set([
-                                'md', 'markdown', 'html', 'htm', 'xhtml',
-                                'yml', 'yaml', 'json', 'jsonc',
-                                'txt', 'csv', 'tsv',
-                                'css', 'js', 'mjs', 'cjs', 'ts',
-                                'liquid', 'hbs', 'handlebars', 'eta', 'mustache',
-                                'svg', 'xml', 'mjml', 'rss', 'atom',
-                                'aml',
-                            ])
-                            const ext = path.extname(entity.uri).slice(1).toLowerCase()
-                            if (TEXT_EXTS.has(ext)) {
-                                try {
-                                    entity.content = await readFile(entity.uri, 'utf8')
-                                } catch (err) {
-                                    entity.contentError = err.message
-                                }
-                            } else {
-                                entity.contentSkipped = `Non-text format (.${ext}). Use mikser_api_render to materialize output or read the file directly at entity.uri.`
-                            }
-                        }
-
-                        return ok(entity)
-                    } catch (err) {
-                        logger.error('MCP mikser_api_read_entity error: %s', err.message)
-                        return fail(err.message)
-                    }
-                },
-            )
-
-            mcp.simpleTool(
-                'mikser_api_update_entity',
-                'Create or update a content file inside a mikser collection. The file is written to disk and the next lifecycle cycle picks it up — same path the HTTP PUT /entities endpoint takes. Use this to author new documents, layouts, or other content from AI.',
-                {
-                    collection:   z.string().describe('Collection name (e.g. "documents", "layouts").'),
-                    relativePath: z.string().describe('Path relative to the collection folder (e.g. "blog/2026-06-02-launch.md").'),
-                    content:      z.string().optional().describe('File content to write. Frontmatter is parsed by the corresponding plugin.'),
-                },
-                async ({ collection, relativePath, content = '' }) => {
-                    try {
-                        await useCollection(runtime, collection).write(relativePath, content)
-                        return ok({ ok: true, collection, relativePath })
-                    } catch (err) {
-                        logger.error('MCP mikser_api_update_entity error: %s', err.message)
-                        return fail(err.message)
-                    }
-                },
-            )
-
-            mcp.simpleTool(
-                'mikser_api_delete_entity',
-                'Remove a content file from a mikser collection. Mirrors HTTP DELETE /entities — deletes the source file, and the next lifecycle cycle prunes its rendered outputs from the manifest.',
-                {
-                    collection:   z.string().describe('Collection name.'),
-                    relativePath: z.string().describe('Path relative to the collection folder.'),
-                },
-                async ({ collection, relativePath }) => {
-                    try {
-                        await useCollection(runtime, collection).remove(relativePath)
-                        return ok({ ok: true, collection, relativePath })
-                    } catch (err) {
-                        logger.error('MCP mikser_api_delete_entity error: %s', err.message)
-                        return fail(err.message)
-                    }
-                },
-            )
-
-            mcp.simpleTool(
-                'mikser_api_render',
-                'Render a transient entity through the engine pipeline (parse → layouts → resources → render → postprocess) and return the FINAL produced bytes. Use this for "preview this layout against this data" without writing the entity to disk. The returned bytes are the pipeline\'s final output — PDF for a `*.html-pdf.*` layout, MJML-derived HTML for `*.html-mjml.*`, etc. Set options.save=false to skip the disk write; options.catalog=false to prune the catalog row after rendering. For a clickable preview URL instead of raw bytes, use mikser_preview_render (preview plugin).',
-                {
-                    entity:  z.record(z.any()).describe('Entity shape with at least { id, collection } and any meta/content the renderer needs.'),
-                    options: z.record(z.any()).optional().describe('Renderer options: { save: false, catalog: false, renderer: "...", postprocessor: "..." }.'),
-                },
-                async ({ entity = {}, options = {} }) => {
-                    try {
-                        const { output, entity: rendered } = await mcpRender(entity, options)
-                        const result = output?.result
-                        if (result == null) {
-                            return ok({ ok: true, entity: rendered, output: null })
-                        }
-                        const mime = mimeForEntity(rendered) ?? 'application/octet-stream'
-                        if (Buffer.isBuffer(result)) {
-                            return {
-                                content: [{
-                                    type: 'resource',
-                                    resource: {
-                                        uri: `mikser://render/${rendered.id ?? 'inline'}`,
-                                        mimeType: mime,
-                                        blob: result.toString('base64'),
-                                    },
-                                }],
-                            }
-                        }
-                        // String result — most renderers (HTML, MJML, etc.).
-                        return {
-                            content: [{
-                                type: 'resource',
-                                resource: {
-                                    uri: `mikser://render/${rendered.id ?? 'inline'}`,
-                                    mimeType: mime,
-                                    text: String(result),
-                                },
-                            }],
-                        }
-                    } catch (err) {
-                        logger.error('MCP mikser_api_render error: %s', err.message)
-                        return fail(err.message)
-                    }
-                },
-            )
-
-            logger.debug('MCP tools registered: mikser_api_{list_entities,read_entity,update_entity,delete_entity,render} (api plugin)')
-        }
     })
 
-    // Dispatcher: once per lifecycle cycle, walk the journal and push
-    // matching CREATE/UPDATE/DELETE events to every active subscription
-    // (regardless of which endpoint opened it). Each subscription has
-    // its own scope + filter; we apply both before sending. Empty when
-    // nothing's subscribed, so it costs ~nothing in normal builds.
+    // Cache-invalidation dispatcher. Once per cycle, check if anything
+    // changed in the journal; if so, rebuild every cached endpoint.
+    // SSE dispatch is separate — see src/subscriptions.js for the
+    // transport-agnostic subscribe primitive.
+    //
+    // Coarse on purpose: per-endpoint scope matching would shave a few
+    // file writes off a churning catalog but adds bug surface for no
+    // real win — buildDefaultEnvelope is microseconds (in-memory sift),
+    // writeFile is milliseconds. Simpler and safer to just rebuild.
     //
     // Hook onFinalize, NOT onFinalized — journal.js registers its own
     // clearJournal callback on onFinalized at module load, which runs
     // before plugin onFinalized hooks. By Finalize we still have the
     // cycle's journal entries; by Finalized they're already gone.
     onFinalize(async (signal) => {
+        if (!cachedEndpoints.length || !runtime.options.outputFolder) return
         const logger = useLogger()
-        const evMap = {
-            [OPERATION.CREATE]: 'create',
-            [OPERATION.UPDATE]: 'update',
-            [OPERATION.DELETE]: 'delete',
-        }
 
-        // Cache invalidation is intentionally coarse: if ANY entity
-        // changed in this cycle, rebuild every cached endpoint. Per-
-        // endpoint scope matching would shave a few file writes off a
-        // churning catalog but adds bug surface for no real win —
-        // buildDefaultEnvelope is microseconds (in-memory sift),
-        // writeFile is milliseconds. Simpler and safer to just rebuild.
+        // Short-circuit on the first entry — we only need to know if
+        // anything changed this cycle, not iterate the rest.
         let anyChange = false
-
-        // Single journal iteration drives both SSE push and the
-        // any-change flag — one pass per cycle.
-        for await (const { operation, entity } of useJournal(
-            'Api subscriptions',
+        for await (const _e of useJournal(
+            'Api cache invalidation',
             [OPERATION.CREATE, OPERATION.UPDATE, OPERATION.DELETE],
             signal,
         )) {
             anyChange = true
-
-            // SSE push to live subscribers
-            for (const [subId, sub] of subscriptions) {
-                // Subscriptions with `expand` get their updates via the
-                // runtime.refs graph dispatch (which emits the
-                // re-expanded entity on any mutation within the
-                // expansion graph, including the root itself). Skip
-                // them here to avoid double-emission.
-                if (sub.expand) continue
-                if (sub.scope && !sub.scope(entity)) continue
-                if (sub.filter && !sub.filter(entity)) continue
-                // Apply the endpoint's field projection to SSE payloads
-                // too — so live updates leak no more than list/query
-                // responses do.
-                const projected = sub.allowedFields
-                    ? _.pick(entity, sub.allowedFields)
-                    : entity
-                const payload = operation === OPERATION.DELETE
-                    ? { id: entity.id }
-                    : { id: entity.id, entity: projected }
-                sseSend(sub.res, evMap[operation], payload)
-                logger.trace('Api subscription %s %s: %s', subId, evMap[operation], entity.id)
-            }
+            break
         }
+        if (!anyChange) return
 
-        // Clear each cached endpoint's directory on any entity change.
-        // Subsequent list requests re-warm the cache via the write-
-        // through path in the GET/POST handlers above. Coarse but
-        // correct — any stale entry, anywhere in the per-endpoint
-        // cache, gets dropped without us having to track which queries
-        // were affected by which entity changes.
+        // Clear each cached endpoint's directory. Subsequent list
+        // requests re-warm the cache via the write-through path in the
+        // GET/POST handlers above. Coarse but correct — any stale entry,
+        // anywhere in the per-endpoint cache, gets dropped without us
+        // having to track which queries were affected by which entity
+        // changes.
         //
         // For expand-cached queries the precise eviction in the GET
         // handler's onAffected callback has already happened (one
@@ -1203,20 +837,18 @@ export default ({
         // is the safety net for cached queries WITHOUT expand. We also
         // dispose any straggler cache subscriptions for this endpoint
         // so they don't leak past the rebuild (next read re-registers).
-        if (anyChange && cachedEndpoints.length > 0 && runtime.options.outputFolder) {
-            for (const ep of cachedEndpoints) {
-                await clearEndpointCache({
-                    outputFolder: runtime.options.outputFolder,
-                    base: apiBase,
-                    name: ep.name,
-                    logger,
-                })
-                const prefix = `${ep.name}/`
-                for (const key of [...cacheSubscriptions.keys()]) {
-                    if (!key.startsWith(prefix)) continue
-                    cacheSubscriptions.get(key)?.dispose()
-                    cacheSubscriptions.delete(key)
-                }
+        for (const ep of cachedEndpoints) {
+            await clearEndpointCache({
+                outputFolder: runtime.options.outputFolder,
+                base: apiBase,
+                name: ep.name,
+                logger,
+            })
+            const prefix = `${ep.name}/`
+            for (const key of [...cacheSubscriptions.keys()]) {
+                if (!key.startsWith(prefix)) continue
+                cacheSubscriptions.get(key)?.dispose()
+                cacheSubscriptions.delete(key)
             }
         }
     })

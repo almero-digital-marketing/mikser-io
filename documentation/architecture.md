@@ -18,7 +18,7 @@ mikser-io/
     ├── config.js             Config file loading
     ├── plugins.js            Plugin resolution and loading
     ├── manager.js            File watching and cron scheduling
-    ├── tracking.js           Progress bars and log formatting
+    ├── logger.js             Progress bars and log formatting (wraps pino so progress lines don't get mangled)
     ├── render.js             Render worker function (runs in main or Piscina threads)
     ├── postprocess.js        Postprocess worker function (runs in main or Piscina threads)
     ├── utils.js              Checksum, normalize, matchEntity, changeExtension, AbortError
@@ -309,8 +309,8 @@ export * from './src/config.js'        // (internal, no public exports)
 // Plugin loading
 export * from './src/plugins.js'       // loadPlugin()
 
-// Tracking
-export * from './src/tracking.js'      // trackProgress(), etc.
+// Logger / progress
+export * from './src/logger.js'        // trackProgress(), stopProgress(), updateProgress(), etc.
 
 // Manager
 export * from './src/manager.js'       // watch(), schedule(), xHook()

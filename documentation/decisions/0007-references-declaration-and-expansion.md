@@ -159,7 +159,7 @@ If a path can't resolve at depth N — cycle closes, target missing — the valu
 
 ```js
 // mikser.config.js
-api: {
+catalog: {
     expand: {
         maxDepth:    5,      // hard cap on path length
         maxPaths:    20,     // entries in `expand`
@@ -180,7 +180,7 @@ Write bodies expect canonical source-file content with refs as strings. An expan
 
 **B9. The engine's `runtime.refs` reverse index drives cache invalidation and live-expand subscriptions.**
 
-When entity X is mutated, the api walks the inverse index (via `runtime.refs.inboundFor` for direct hops or `runtime.refs.subscribeGraph` for live-expand SSE subscriptions) to find cached queries and live consumers that expanded X, then evicts/emits accordingly. The index earns its keep three times — graph queries, cache invalidation, live-expand dispatch — from the same data structure. It lives in the engine (not a plugin) per ADR-0006's four-test analysis: same shape as the catalog (derived projection of files, infrastructure other plugins query against). Always available; no soft-dependency degradation needed in any consumer.
+When entity X is mutated, the api walks the inverse index (via `runtime.refs.inboundFor` for direct hops or `runtime.refs.subscribeGraph` for live-expand SSE subscriptions) to find cached queries and live consumers that expanded X, then evicts/emits accordingly. The index earns its keep three times — graph queries, cache invalidation, live-expand dispatch — from the same data structure. It lives in the engine (not a plugin) per ADR-0006's five-test analysis: same shape as the catalog (derived projection of files, infrastructure other plugins query against). Always available; no soft-dependency degradation needed in any consumer.
 
 ## Consequences
 
@@ -254,10 +254,10 @@ export type ArticleMeta = {
 
 `EntityRef<T>` is a branded `string`; runtime stays a string, the type system carries target info.
 
-**One-trip multi-hop via MCP:**
+**One-trip multi-hop via MCP** (tool provided by the [`mikser-io-mcp`](https://github.com/almero-digital-marketing/mikser-io-mcp) plugin):
 
 ```
-mikser_api_read_entity({
+mikser_read_entity({
     id: '/blog/launch',
     expand: ['author.organization', 'hero'],
 })
@@ -328,7 +328,7 @@ The convention and the expansion are protected by the same disciplines. Drift mo
 - **"Let's make ref-validation errors fail the build."** The whole A6 model exists because that's wrong. Broken refs are routine mid-edit state — error-on-broken-ref fights the file-based editing model. Keep them as warnings, re-evaluated per cycle. If a CI step needs "no broken refs allowed," it queries `mikser://schemas/pending` after a clean build and exits non-zero on non-empty.
 - **"Let's validate at parse-time so we catch it earlier."** Parse-time validation can't tell "broken because target doesn't exist YET" from "broken because target will never exist." The schemas plugin's deferred + retried model handles both gracefully; parse-time validation only handles the second case and breaks the first. Don't reintroduce.
 - **"Refs by id would be nice."** A different addressing scheme is a new ADR. Don't smuggle ids in via the `$` convention.
-- **"Should refs go back to being a plugin?"** It started life as one (Phase 2 of ADR-0007). It moved to the engine after the third consumer turned up: api expand, schemas re-validation, and live-expand SSE all needed the same inverse-graph lookup, each carrying a soft-dependency check. ADR-0006's four-test cleared it as substrate. The catalog comparison is the test — both are derived projections of files, both are infrastructure other plugins query against. If the analysis ever flips, this is where it would be re-litigated.
+- **"Should refs go back to being a plugin?"** It started life as one (Phase 2 of ADR-0007). It moved to the engine after the third consumer turned up: api expand, schemas re-validation, and live-expand SSE all needed the same inverse-graph lookup, each carrying a soft-dependency check. ADR-0006's five-test cleared it as substrate. The catalog comparison is the test — both are derived projections of files, both are infrastructure other plugins query against. If the analysis ever flips, this is where it would be re-litigated.
 - **"Implicit array traversal in expand would be less noisy than `*`."** Would also be ambiguous when a field is sometimes object and sometimes array. Explicit `*` costs one character; saves the ambiguity.
 
 The principle: canonical lives on disk and in the catalog; normalized is presented to render engines and the SDK; expansion is opt-in per call, bounded, read-only. Every guardrail removes a way the feature could erode the file-based ethos.

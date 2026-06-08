@@ -14,9 +14,9 @@ const runtime = {
     started: false,
     // Name of the lifecycle phase currently executing — null between
     // phases. Set inside start() / process() / render() etc. before
-    // each callHooks(), cleared on completion. Used by MCP
-    // introspection (mikser://lifecycle resource) and surfaced via
-    // runtime.engine.logger trace logs.
+    // each callHooks(), cleared on completion. Read by mikser-io-mcp's
+    // `mikser://lifecycle` resource and surfaced via runtime.engine.logger
+    // trace logs.
     phase: null,
     mutex: new Mutex(),
     abortController: undefined,
@@ -48,8 +48,9 @@ const runtime = {
 
     async callHooks(hooks, signal, phaseName) {
         // Lifecycle methods below pass `phaseName` so introspection
-        // (mikser://lifecycle, debuggers) can see what's running. Direct
-        // callers (tests, plugins driving sub-flows) can omit it.
+        // tools (mikser-io-mcp's mikser://lifecycle resource, debuggers)
+        // can see what's running. Direct callers (tests, plugins driving
+        // sub-flows) can omit it.
         if (phaseName) this.phase = phaseName
         try {
             for (let hook of hooks) {

@@ -42,6 +42,72 @@ export function mimeForEntity(entity) {
     return MIME_BY_EXT[ext] ?? null
 }
 
+// File-extension allowlist for "is this source readable as utf8?". Used
+// by callers that want to gate file reads on text-shaped formats — e.g.
+// MCP tools deciding whether to attach `entity.content` or return a
+// hint to use the render API instead. The catalog itself does NOT gate
+// (`readEntity({include:['content']})` unconditionally reads as utf8) —
+// gating is the caller's choice, this helper just centralises the set
+// so every gating consumer agrees on what "text" means.
+const TEXT_EXTENSIONS = new Set([
+    'md', 'markdown', 'html', 'htm', 'xhtml',
+    'yml', 'yaml', 'json', 'jsonc',
+    'txt', 'csv', 'tsv',
+    'css', 'js', 'mjs', 'cjs', 'ts',
+    'liquid', 'hbs', 'handlebars', 'eta', 'mustache',
+    'svg', 'xml', 'mjml', 'rss', 'atom',
+    'aml',
+])
+
+// True when the entity's source URI has a text-shaped extension.
+// Returns false for binaries (png/pdf/mp4/etc.) and for entities
+// without a uri. Pass the entity, not a bare extension — keeps the
+// call site readable and lines up with mimeForEntity's signature.
+export function isTextEntity(entity) {
+    if (!entity?.uri) return false
+    const ext = path.extname(entity.uri).slice(1).toLowerCase()
+    return TEXT_EXTENSIONS.has(ext)
+}
+
+// Read the source bytes for an entity, gated on isTextEntity. Returns
+// an object that callers Object.assign onto the entity (or use directly):
+//
+//   { content }                   — text format read OK
+//   { contentError: message }     — text format but read failed (or no uri)
+//   { contentSkipped: message }   — binary format, deliberately not read
+//
+// Returns `{}` when the entity itself is null. The skip message is
+// generic ("use a render API") — consumers wanting a transport-specific
+// pointer (e.g. "use mikser_render") should compose their own message
+// from `isTextEntity` + `readFile` directly. Centralised so every
+// "load this entity's content for me" caller agrees on the gate
+// semantics and the error shape.
+//
+// Usage:
+//
+//   Object.assign(entity, await readEntityContent(entity))
+//
+// or, when the caller wants to inspect first:
+//
+//   const fields = await readEntityContent(entity)
+//   if (fields.contentSkipped) { ... }
+//   Object.assign(entity, fields)
+export async function readEntityContent(entity) {
+    if (!entity) return {}
+    if (!entity.uri) return { contentError: 'entity has no uri' }
+    if (!isTextEntity(entity)) {
+        const ext = path.extname(entity.uri).slice(1).toLowerCase()
+        return {
+            contentSkipped: `Non-text format (.${ext}). Read the file directly at entity.uri, or use a render API to materialize output.`,
+        }
+    }
+    try {
+        return { content: await readFile(entity.uri, 'utf8') }
+    } catch (err) {
+        return { contentError: err.message }
+    }
+}
+
 // True when `ip` is a loopback address. Handles all three forms:
 //   - IPv4: anything in 127.0.0.0/8
 //   - IPv6: ::1

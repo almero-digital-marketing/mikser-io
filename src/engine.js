@@ -1,4 +1,3 @@
-import pino from 'pino'
 import path from 'node:path'
 import { Command } from 'commander'
 import { rm, lstat, realpath, mkdir, writeFile, readFile, unlink } from 'fs/promises'
@@ -6,7 +5,7 @@ import { existsSync } from 'fs'
 import _ from 'lodash'
 import Piscina from 'piscina'
 import runtime from './runtime.js'
-import { onInitialize, onInitialized, onLoad, onRender, onCancel, onCancelled, onFinalized, onLoaded, onAfterRender, onBeforePostprocess, onPostprocess, postprocessEntities } from './lifecycle.js'
+import { onInitialize, onInitialized, onRender, onCancel, onCancelled, onFinalized, onLoaded, onAfterRender, onBeforePostprocess, onPostprocess, postprocessEntities } from './lifecycle.js'
 import { useJournal, updateEntry } from './journal.js'
 import { globby } from 'globby'
 import { OPERATION, TASKS } from './constants.js'
@@ -16,15 +15,19 @@ import postprocess, { loadPlugin as loadPostPlugin } from './postprocess.js'
 import map from 'p-map'
 import Queue from 'p-queue'
 import packageInfo from '../package.json' with { type: 'json' }
+import { attachServerCliOptions, setupServer } from './server.js'
+import { createMikserLogger } from './logger.js'
 
 export async function setup(options) {
     runtime.options.threads = options?.threads !== undefined ? options.threads : 4
     runtime.engine = {
-        logger: options?.logger || pino({
-            transport: {
-                target: 'pino-pretty'
-            },
-        }),
+        // Logger built from logger.js — pino + multistream + inline
+        // pino-pretty over a gauge-aware terminal stream. Initial level
+        // is 'info'; bumped to 'debug'/'trace' after CLI parse if those
+        // flags are set. Caller can override entirely via options.logger
+        // (e.g. to supply a pre-configured pino instance with their own
+        // transports); progress-bar coordination is then their problem.
+        logger: options?.logger || createMikserLogger('info'),
         commander: new Command(),
         renderWorkers: new Piscina({
             filename: new URL('./render.js', import.meta.url).href,
@@ -46,11 +49,12 @@ export async function setup(options) {
             .option('-d --debug', 'display debug statements')
             .option('-t --trace', 'display trace statements')
             .option('-e --runtime-folder <folder>', 'set mikser runtime folder relative to working folder', 'runtime')
-            .option('-s --server [port]', 'start an Express server on the given port (defaults to 3001)')
-            .option('--cors [origin]', 'restrict server CORS to a specific origin (default *)')
-            .option('--no-cors', 'disable server CORS headers')
+        attachServerCliOptions(runtime.engine.commander)
 
         Object.assign(runtime.options, options || runtime.engine.commander.parse(process.argv).opts())
+        // runtime.options.info gates the progress bar — gauge stays
+        // silent in --debug/--trace modes because logs are voluminous
+        // there and a bar on top would just be noise.
         runtime.options.info = true
         if (runtime.options.debug) {
             runtime.engine.logger.level = 'debug'
@@ -61,7 +65,6 @@ export async function setup(options) {
             runtime.options.debug = false
             runtime.options.info = false
         }
-        runtime.engine.logger.notice = runtime.engine.logger.info
 
         // Resolve folders inside onInitialize so journal.js and
         // catalog.js (which initialize in onInitialized) see absolute
@@ -96,142 +99,15 @@ export async function setup(options) {
 
     onInitialized(async () => {
         const logger = useLogger()
-
         logger.info('Working folder: %s', runtime.options.workingFolder)
         logger.info('Output folder: %s', runtime.options.outputFolder)
-
-        // Server bring-up: two paths, controlled by which of these are set.
-        //
-        //   runtime.options.app   — pre-supplied Express app (e.g. mikser
-        //                           embedded inside an existing service).
-        //                           The caller owns the listen lifecycle
-        //                           and the static-route policy. Engine
-        //                           stays out of routing/listening so it
-        //                           doesn't clobber their setup; plugins
-        //                           still mount their own routers on it.
-        //
-        //   --server [port]       — engine creates the Express app, mounts
-        //   (runtime.options.server)  static for the output folder, and
-        //                           listens on the port. The actual
-        //                           listen() is deferred via the onLoad
-        //                           hook below so it runs LAST in the
-        //                           onLoaded phase — after every plugin
-        //                           has had a chance to register routes.
-        //
-        // If both are present, the externally-supplied app wins; --server
-        // becomes a no-op (the caller is in charge).
-        if (runtime.options.app) {
-            logger.info('Using externally-supplied Express app on runtime.options.app')
-        } else if (runtime.options.server) {
-            const { default: express } = await import('express').catch(() => {
-                throw new Error('Express is required for --server. Run: npm install express')
-            })
-            runtime.options.app = express()
-            runtime.options.port = runtime.options.server === true
-                ? 3001
-                : Number(runtime.options.server) || 3001
-            logger.debug('Server starting on port %d', runtime.options.port)
-
-            // Trust-proxy: when mikser is behind a reverse proxy
-            // (nginx, Caddy, an Express app, ngrok with edge), the
-            // socket peer is the proxy — not the real client. Setting
-            // trust proxy makes Express's req.ip walk X-Forwarded-For
-            // back to the original requester, which is what mikser's
-            // loopback-only auth check compares against.
-            //
-            // Accepted values (Express semantics):
-            //   true                 — trust every hop (only safe when
-            //                          the proxy strips/rewrites
-            //                          X-Forwarded-* headers)
-            //   'loopback'           — trust 127.0.0.1, ::1, and other
-            //                          loopback addresses (correct for
-            //                          a proxy on the same host)
-            //   '10.0.0.0/8'         — trust a specific subnet
-            //   false (default)      — no trust; req.ip == socket peer
-            //
-            // Without this and behind a proxy, mikser sees every
-            // request as coming from the proxy's loopback address and
-            // unauthenticated requests through the proxy would pass
-            // the loopback gate. The startup warning below catches
-            // some of those misconfigurations.
-            const trustProxy = runtime.config.server?.trustProxy
-            if (trustProxy !== undefined) {
-                runtime.options.app.set('trust proxy', trustProxy)
-                logger.info('Server trust proxy: %s', String(trustProxy))
-            }
-
-            // CORS — a server exists to be fetched, and in dev the
-            // frontend is almost always on a different origin (a dev
-            // server on another port, a separate domain). So CORS is ON
-            // by default with Access-Control-Allow-Origin: *. The token
-            // on /api (not CORS) is what gates mutations, and '*' can't
-            // carry credentials, so this is low-risk. Pin it down with
-            // --cors <origin> / config.server.cors, or disable entirely
-            // with --no-cors / config.server.cors:false (recommended for
-            // private/admin deployments). Mounted first so it covers
-            // static routes and every plugin router.
-            // Default on (?? true) so programmatic setup({ server }) —
-            // which bypasses commander's --no-cors default — matches the
-            // CLI. Explicit false (config or --no-cors) still disables.
-            const corsOrigin = runtime.config.server?.cors ?? runtime.options.cors ?? true
-            if (corsOrigin) {
-                const origin = corsOrigin === true ? '*' : String(corsOrigin)
-                // Extensible header arrays. Plugins push values into
-                // these at factory time to teach CORS about headers
-                // they care about — the mcp plugin adds mcp-session-id,
-                // mcp-protocol-version, last-event-id so browser-side
-                // MCP clients can complete the Streamable HTTP
-                // handshake. Default to the minimum every server needs.
-                runtime.options.corsAllowHeaders  = ['Content-Type', 'Authorization']
-                runtime.options.corsExposeHeaders = []
-                const { default: cors } = await import('cors')
-                runtime.options.app.use(cors((req, callback) => {
-                    callback(null, {
-                        origin,
-                        methods:        ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-                        allowedHeaders: runtime.options.corsAllowHeaders,
-                        exposedHeaders: runtime.options.corsExposeHeaders,
-                    })
-                }))
-                logger.debug('CORS enabled: %s', origin)
-            }
-        }
     })
 
-    // Registered here (inside setup) so it runs AFTER plugins.js's onLoad
-    // (which is registered at module-import time). That ordering matters
-    // because plugins.js loads user plugins during its onLoad — each plugin
-    // factory may register onLoaded handlers that mount routes on
-    // runtime.options.app. We want our listen() to run LAST in the
-    // onLoaded phase, which is why we register it from inside another
-    // onLoad — by then plugins have already appended their handlers.
-    onLoad(() => {
-        // Only auto-mount static + auto-listen when the engine owns the
-        // app (created via --server). When an external app was supplied,
-        // `port` is unset and we stay out of the way — the caller manages
-        // both routing decisions and the listen lifecycle themselves.
-        if (!runtime.options.app || runtime.options.port == null) return
-        onLoaded(async () => {
-            const logger = useLogger()
-            const { default: express } = await import('express')
-
-
-
-            // Serve the output folder as the catch-all static route.
-            // Mounted LAST in the middleware chain so plugin routes
-            // (e.g. /api/*) match first; anything that didn't match a
-            // plugin's router falls through to the static handler and
-            // gets served from <outputFolder>.
-            runtime.options.app.use(express.static(runtime.options.outputFolder))
-
-            await new Promise(resolve => {
-                runtime.options.app.listen(runtime.options.port, () => {
-                    logger.info('Server listening: http://localhost:%d', runtime.options.port)
-                    resolve()
-                })
-            })
-        })
-    })
+    // Wire the HTTP server lifecycle (bring-up on onInitialized + late-
+    // binding static mount and listen on onLoad/onLoaded). See server.js.
+    // Called AFTER engine's own onInitialized registration so server's
+    // bring-up logs come after the folder-info lines.
+    setupServer()
 
     onLoaded(async () => {
         const logger = useLogger()

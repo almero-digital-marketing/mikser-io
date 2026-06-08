@@ -18,16 +18,19 @@ describe('layouts plugin', () => {
     it('registers all the expected hooks', () => {
         const h = createHarness()
         layoutsPlugin(h.core)
-        // Two onLoaded handlers: one for state init, one for the
-        // gated MCP tool registration (no-op when MCP isn't active).
-        // The MCP gate goes through the same lifecycle as Express
-        // route mounting — onLoaded + runtime-option check.
-        assert.equal(h.hooks.loaded.length, 2)
+        // One onLoaded handler — state init only. The MCP wrapper
+        // (mikser_layouts_inspect) moved to the mikser-io-mcp plugin
+        // in 8.2.0 and reaches in via runtime.options.layouts.inspect.
+        assert.equal(h.hooks.loaded.length, 1)
         assert.equal(h.hooks.import.length, 1)
         assert.equal(h.hooks.processed.length, 1)
         assert.equal(h.hooks.beforeRender.length, 1)
         assert.equal(h.hooks.complete.length, 1)
         assert.ok(h.sync.has('layouts'))
+        // The inspect primitive is exposed at factory-eval — before any
+        // onLoaded fires — so plugins listed after layouts in the
+        // plugins array can see it during their own onLoaded.
+        assert.equal(typeof h.runtime.options.layouts?.inspect, 'function')
     })
 
     it('initializes runtime.state.layouts on onLoaded with empty maps', async () => {

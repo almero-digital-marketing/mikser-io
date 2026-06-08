@@ -3,7 +3,6 @@ import { mkdir, writeFile, unlink, rmdir, readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { globby } from 'globby'
 import _ from 'lodash'
-import { z } from 'zod'
 
 // Liquid / Handlebars / Eta keywords we don't want surfaced as
 // "variables this layout references." Anything that looks like a path
@@ -186,6 +185,69 @@ export default ({
         }
     }
 
+    // Domain primitive: inspect a layout entity end-to-end. Returns the
+    // layout meta, template source bytes, a regex-derived view of the
+    // variables / includes / iterations referenced by the template, and
+    // up to N sample entities that explicitly target this layout.
+    //
+    // Throws on layout-not-found or template-unreadable — callers (the
+    // mikser-io-mcp plugin's mikser_layouts_inspect tool wraps the
+    // result in an MCP error envelope) choose how to surface failures.
+    //
+    // Lives here, not in mikser-io-mcp, because "what does it mean to
+    // inspect a layout" is template-engine knowledge — naive Liquid /
+    // Handlebars / Eta regex parsing. The MCP plugin should not know
+    // those engines exist; it just wraps this in a tool.
+    async function inspect(id, { samples = 3 } = {}) {
+        const layout = await findEntity({ id })
+        if (!layout || layout.collection !== collection) {
+            const err = new Error(`Layout not found: ${id}`)
+            err.code = 'LAYOUT_NOT_FOUND'
+            throw err
+        }
+
+        let templateSource = ''
+        try {
+            templateSource = await readFile(layout.uri, 'utf8')
+        } catch (err) {
+            const wrapped = new Error(`Layout entity exists but template file unreadable (${layout.uri}): ${err.message}`)
+            wrapped.code = 'LAYOUT_TEMPLATE_UNREADABLE'
+            throw wrapped
+        }
+
+        const references = parseTemplateReferences(templateSource)
+
+        let sampleEntities = []
+        if (samples > 0) {
+            const all = await findEntities()
+            sampleEntities = all
+                .filter(e => e.meta?.layout === layout.name)
+                .slice(0, samples)
+                .map(e => ({ id: e.id, name: e.name, meta: e.meta }))
+        }
+
+        return {
+            layout: {
+                id:            layout.id,
+                name:          layout.name,
+                uri:           layout.uri,
+                format:        layout.format,
+                template:      layout.template,
+                postprocessor: layout.postprocessor ?? null,
+            },
+            templateSource,
+            references,
+            samples: sampleEntities,
+        }
+    }
+
+    // Expose the layouts inspection surface for other plugins (the
+    // mikser-io-mcp plugin wraps inspect() as the mikser_layouts_inspect
+    // tool). Done at factory-eval time — before any onLoaded fires — so
+    // a later plugin's onLoaded can see it. Matches the preview plugin
+    // pattern (`runtime.options.preview = { store, get, stats, config }`).
+    runtime.options.layouts = { inspect }
+
     onSync(collection, async ({ action, context }) => {
         if (!context.relativePath) return false
         const { relativePath } = context
@@ -246,8 +308,13 @@ export default ({
             sitemap: {}
         }
 
-        runtime.options.layouts = runtime.config.layouts?.layoutsFolder || collection
-        runtime.options.layoutsFolder = path.join(runtime.options.workingFolder, runtime.options.layouts)
+        // Folder name resolved here (config override or default to the
+        // collection name) and used immediately to build the absolute
+        // path. No need to keep the bare folder-name string on
+        // runtime.options — runtime.options.layoutsFolder is the only
+        // useful form downstream.
+        const layoutsFolderName = runtime.config.layouts?.layoutsFolder || collection
+        runtime.options.layoutsFolder = path.join(runtime.options.workingFolder, layoutsFolderName)
         runtime.options.layoutsStateFolder = path.join(runtime.options.outputFolder, 'state')
 
         logger.debug('Layouts folder: %s', runtime.options.layoutsFolder)
@@ -559,94 +626,6 @@ export default ({
                 } catch { }
             }
         }
-    })
-
-    // mikser_layouts_inspect lives in the layouts plugin (not core)
-    // because "what does a layout expect?" is layout-specific knowledge.
-    // Follows ADR-0006: domain logic → plugin; the MCP substrate stays
-    // in core.
-    //
-    // Gating on runtime.options.mcp inside onLoaded matches the Express
-    // pattern (gating on runtime.options.app for route mounts) — same
-    // shape, no special wrapper. The check happens once per boot.
-    onLoaded(() => {
-        if (!runtime.options.mcp) return
-        const mcp = runtime.options.mcp
-        mcp.simpleTool(
-            'mikser_layouts_inspect',
-            'Inspect a layout: template source, variables it references, the postprocessor it produces, and sample entities currently using it. Use this to answer "what data does this layout need?" before drafting a preview render — saves a guess-and-render-empty cycle.',
-            {
-                id: z.string().describe('Layout id, e.g. "/layouts/reports/royalty.html-pdf.liquid". Use mikser_api_list_entities with { collection: "layouts" } to discover ids.'),
-                samples: z.number().int().min(0).max(10).optional().describe('How many existing entities currently using this layout to include as data-shape examples. Default 3. Only entities with explicit meta.layout match; auto-matched layouts are not surfaced.'),
-            },
-            async ({ id, samples = 3 }) => {
-                const logger = useLogger()
-                try {
-                    const layout = await findEntity({ id })
-                    if (!layout || layout.collection !== collection) {
-                        return {
-                            isError: true,
-                            content: [{ type: 'text', text: `Layout not found: ${id}` }],
-                        }
-                    }
-
-                    let template = ''
-                    try {
-                        template = await readFile(layout.uri, 'utf8')
-                    } catch (err) {
-                        return {
-                            isError: true,
-                            content: [{
-                                type: 'text',
-                                text: `Layout entity exists but template file unreadable (${layout.uri}): ${err.message}`,
-                            }],
-                        }
-                    }
-
-                    const references = parseTemplateReferences(template)
-
-                    let sampleEntities = []
-                    if (samples > 0) {
-                        const all = await findEntities()
-                        sampleEntities = all
-                            .filter(e => e.meta?.layout === layout.name)
-                            .slice(0, samples)
-                            .map(e => ({ id: e.id, name: e.name, meta: e.meta }))
-                    }
-
-                    return {
-                        content: [{
-                            type: 'text',
-                            text: JSON.stringify({
-                                layout: {
-                                    id: layout.id,
-                                    name: layout.name,
-                                    uri: layout.uri,
-                                    format: layout.format,
-                                    template: layout.template,
-                                    postprocessor: layout.postprocessor ?? null,
-                                },
-                                templateSource: template,
-                                references,
-                                samples: sampleEntities,
-                                notes: [
-                                    'references.variables is a naive regex pass across liquid/handlebars/eta — false positives possible, but covers the common `{{ document.meta.X }}` and `<%= entity.X %>` patterns.',
-                                    'samples only includes entities with explicit meta.layout. Auto-matched layouts are not listed; use mikser_api_list_entities with a filename-pattern filter for those.',
-                                ],
-                            }, null, 2),
-                        }],
-                    }
-                } catch (err) {
-                    logger.error('MCP mikser_layouts_inspect error: %s', err.message)
-                    return {
-                        isError: true,
-                        content: [{ type: 'text', text: err.message }],
-                    }
-                }
-            },
-        )
-        const logger = useLogger()
-        logger.debug('MCP tool registered: mikser_layouts_inspect (layouts plugin)')
     })
 
     return {

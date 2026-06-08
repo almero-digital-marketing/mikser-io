@@ -3,7 +3,7 @@ import { onInitialized, onCancelled, onFinalized } from './lifecycle.js'
 import { unlink } from 'fs/promises'
 import knex from 'knex'
 import path from 'path'
-import { stopProgress, trackProgress, updateProgress } from './tracking.js'
+import { stopProgress, trackProgress, updateProgress } from './logger.js'
 import { AbortError } from './utils.js'
 
 let journal

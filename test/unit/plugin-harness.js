@@ -5,6 +5,8 @@
 // tests we substitute every API surface with a recorder, then drive the
 // callbacks manually with controlled inputs.
 
+import _ from 'lodash'
+import realRuntime from '../../src/runtime.js'
 import { matchEntity, normalize, changeExtension, getFormatInfo, checksum, AbortError } from '../../src/utils.js'
 
 const OPERATION = {
@@ -61,12 +63,40 @@ export function createHarness({
         journalEntries.push({ id: nextId++, entity, operation, context, options, output: null })
     }
 
+    // Stub `runtime.catalog` so catalog.js's module-level findEntity /
+    // findEntities (and the queryEntities / readEntity / expandAndProject
+    // ops built on them) read from the harness's in-memory `entities`
+    // array. Real catalog.js's onInitialized sets up an identical shape
+    // — a lowdb instance with .data.entities and a `_.chain(catalog).get('data')`
+    // chain — but writes/persists to disk; the stub skips persistence
+    // and just wraps the local array. Pushes/mutations to `entities`
+    // are reflected on each .value() call because lodash chains hold
+    // references.
+    //
+    // Set on the runtime SINGLETON imported from src/runtime.js — that's
+    // what catalog.js sees. Setting it on the harness-local `runtime`
+    // object below wouldn't help because plugin code imports the
+    // singleton directly. Each createHarness() call overwrites the
+    // singleton's `.catalog`, which is fine because tests don't run in
+    // parallel within a file.
+    const catalogStub = {
+        data: { entities },
+        // No-op write — real catalog persists to disk via lowdb; the
+        // harness never wants disk side-effects. catalog.js's
+        // onFinalized hook calls runtime.catalog.write(), so any test
+        // that drives the full lifecycle would blow up without this.
+        write: async () => {},
+    }
+    catalogStub.chain = _.chain(catalogStub).get('data')
+    realRuntime.catalog = catalogStub
+
     const runtime = {
         options: { workingFolder: '/tmp/test-mikser', plugins: [], ...options },
         config,
         state,
         hooks,
         engine: { logger },
+        catalog: catalogStub,
         // Real lifecycle.js attaches these to the runtime via side-effect
         // on import. The harness doesn't load that module, so reproduce
         // them here against the in-memory journal.

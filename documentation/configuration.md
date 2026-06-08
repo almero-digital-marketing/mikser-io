@@ -138,7 +138,7 @@ seo:
 </html>
 ```
 
-The renderers (`render-hbs`, `render-eta`, `render-liquid`) consume the stripped body from `entity.layout.content` — the YAML never reaches the template engine. Consumed today: `meta.mcpUi` (by the `preview` plugin's `mikser_preview_ui` tool — see [mcp.md](./mcp.md#layout-frontmatter-and-mcp-ui)). Other namespaces (`seo`, `performance`, `a11y`) are reserved for future plugins; nothing breaks if you author your own keys there before the consuming plugin exists.
+The renderers (`render-hbs`, `render-eta`, `render-liquid`) consume the stripped body from `entity.layout.content` — the YAML never reaches the template engine. Consumed today: `meta.mcpUi` (by the [`mikser-io-mcp`](https://github.com/almero-digital-marketing/mikser-io-mcp) plugin's `mikser_preview_ui` tool — see the plugin's README). Other namespaces (`seo`, `performance`, `a11y`) are reserved for future plugins; nothing breaks if you author your own keys there before the consuming plugin exists.
 
 ECT layouts (`mikser-io-render-ect`) still file-load via ECT's own resolver — YAML at the top of `.ect` files renders as literal text. Pick `hbs` / `eta` / `liquid` for layouts that need self-describing metadata.
 

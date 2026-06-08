@@ -11,12 +11,6 @@
 //      mikser_preview_render tool, library-mode callers) can stash bytes
 //      and retrieve them by URL without going through MCP.
 //
-// MCP integration: this plugin USED to register mikser_preview_render
-// and the MCP-UI surface (mikser_preview_ui, mikser_ui_action, shell
-// resource). All of that moved to the mikser-io-mcp plugin in 8.2.0.
-// What stays here is the engine-internal cache infrastructure that
-// MCP-UI is just one consumer of.
-//
 // Lives outside the api plugin because preview is not a REST catalog
 // concern — it's a render-and-cache workflow whose lifetime is the
 // process, not the catalog. Lives outside core because it's domain

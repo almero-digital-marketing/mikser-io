@@ -22,23 +22,19 @@
 // with no data loss because there's no data to lose.
 //
 // Lives in the engine (not as a plugin) per the analysis in ADR-0006's
-// four-test: substrate (not domain), strategic (it operationalises
+// five-test: substrate (not domain), strategic (it operationalises
 // ADR-0007 as a queryable graph), can't cleanly be a plugin without
 // every consumer paying soft-dependency cost, plugins compose against
-// `runtime.refs` independently.
+// `runtime.refs` independently, and the inverse-graph contract moves
+// on engine cadence (file/refs schema, not external spec).
 
 import runtime from './runtime.js'
 import { useLogger } from './engine.js'
-import { onInitialized, onPersist, onLoaded } from './lifecycle.js'
+import { onInitialized, onPersist } from './lifecycle.js'
 import { useJournal } from './journal.js'
 import { OPERATION } from './constants.js'
 import { extractRefs, isRefKey, writeEntity } from './utils.js'
 import { findEntities, findEntity } from './catalog.js'
-
-// zod is loaded lazily inside the MCP tool registration below. The api
-// plugin already declares it as a peer dep when MCP tools are in use;
-// keeping the import here lazy means the engine doesn't pull zod into
-// the require graph for projects that don't enable MCP.
 
 export function createIndex() {
     /** @type {Map<string, Map<string, string[]>>} */
@@ -417,141 +413,11 @@ onPersist(async (signal) => {
     await runtime.refs._dispatch(mutations)
 })
 
-// MCP tool registrations. Engine-level tools — registered when the MCP
-// substrate is present, not gated on any plugin. Mirrors the existing
-// engine-level mikser:// resources in src/mcp.js.
-//
-// zod is loaded lazily here so the engine doesn't pull it into the
-// require graph for projects that don't enable MCP. If MCP IS enabled
-// but zod isn't installed (an unusual combination — the api plugin
-// already requires it for its own tool registrations), this fails
-// gracefully with a debug log.
-onLoaded(async () => {
-    const mcp = runtime.options.mcp
-    if (!mcp) return
-
-    let z
-    try {
-        ({ z } = await import('zod'))
-    } catch (err) {
-        useLogger().debug('mikser_refs_* MCP tools skipped: zod not installed (%s)', err.message)
-        return
-    }
-
-    const ok = (data) => ({
-        content: [{
-            type: 'text',
-            text: typeof data === 'string' ? data : JSON.stringify(data, null, 2),
-        }],
-    })
-    const fail = (msg) => ({ isError: true, content: [{ type: 'text', text: msg }] })
-
-    mcp.simpleTool(
-        'mikser_refs_inbound',
-        'List entities that reference the given href. Returns every (entity id, field path) pair pointing at this target. Use for "what would break if I delete this?" or "show me everything that mentions /authors/dick." The query is exact-match against the canonical ref value as written in source $-keys.',
-        {
-            ref: z.string().describe('Reference value to look up. Match is exact on the source-file form (e.g. "/authors/dick"). Hrefs, not catalog ids.'),
-        },
-        async ({ ref }) => {
-            try {
-                if (!ref) return fail('ref is required')
-                const entries = runtime.refs.inboundFor(ref)
-                return ok({ ref, count: entries.length, entries })
-            } catch (err) {
-                useLogger().error('MCP mikser_refs_inbound error: %s', err.message)
-                return fail(err.message)
-            }
-        },
-    )
-
-    mcp.simpleTool(
-        'mikser_refs_outbound',
-        'List the references emitted by the given entity. Returns every $-keyed field on the entity and the ref string it carries. Use for "what does this entity link to?" or "show me the relationship graph rooted at /blog/launch.md."',
-        {
-            id: z.string().describe('Catalog id of the source entity (e.g. "/documents/blog/launch.md").'),
-        },
-        async ({ id }) => {
-            try {
-                if (!id) return fail('id is required')
-                const entries = runtime.refs.outboundFor(id)
-                return ok({ id, count: entries.length, entries })
-            } catch (err) {
-                useLogger().error('MCP mikser_refs_outbound error: %s', err.message)
-                return fail(err.message)
-            }
-        },
-    )
-
-    mcp.simpleTool(
-        'mikser_refs_broken',
-        'List all references that do not currently resolve to an entity. Walks every ref in the inverse index and tests each via the catalog. Use for build-time health checks, editor "broken links" panels, or CI gates.',
-        {},
-        async () => {
-            try {
-                const broken = []
-                for (const ref of runtime.refs.allRefs()) {
-                    const exists = await refExists(ref)
-                    if (!exists) {
-                        broken.push({ ref, sources: runtime.refs.inboundFor(ref) })
-                    }
-                }
-                return ok({ count: broken.length, broken })
-            } catch (err) {
-                useLogger().error('MCP mikser_refs_broken error: %s', err.message)
-                return fail(err.message)
-            }
-        },
-    )
-
-    mcp.simpleTool(
-        'mikser_refs_rename',
-        'Rewrite every reference to `from` so it points at `to`. Walks the inverse index for `from`, opens each referencing source file, and rewrites the `$`-keyed value via writeEntity. The watcher picks up each rewrite and the catalog re-syncs on the next cycle. Returns the list of (entity id, fields) pairs that were updated. Idempotent — calling twice with the same args is a no-op on the second call because the first call drained the inbound list.',
-        {
-            from: z.string().describe('Old reference value as written in source files (e.g. "/authors/dick").'),
-            to:   z.string().describe('New reference value to write in its place (e.g. "/authors/dick-marinov").'),
-        },
-        async ({ from, to }) => {
-            try {
-                const result = await runtime.refs.rename({ from, to })
-                return ok(result)
-            } catch (err) {
-                useLogger().error('MCP mikser_refs_rename error: %s', err.message)
-                return fail(err.message)
-            }
-        },
-    )
-
-    try {
-        mcp.registerResource(
-            'mikser-refs-index',
-            'mikser://refs/index',
-            {
-                title: 'Reverse-reference index',
-                description: 'Read-only snapshot of the engine\'s inverse-reference index. Lists every reference in the catalog and the entities that emit it.',
-                mimeType: 'application/json',
-            },
-            async (uri) => ({
-                contents: [{
-                    uri: uri.href,
-                    mimeType: 'application/json',
-                    text: JSON.stringify({
-                        stats: runtime.refs.size(),
-                        refs: runtime.refs.allRefs().map(ref => ({
-                            ref,
-                            sources: runtime.refs.inboundFor(ref),
-                        })),
-                    }, null, 2),
-                }],
-            }),
-        )
-    } catch (err) {
-        useLogger().debug('mikser://refs/index registration skipped: %s', err.message)
-    }
-})
-
-// Resolve a ref to an entity using the same heuristic the api plugin's
-// findRefFactory uses. Exported so other callers can reuse the same
-// matching rules.
+// Resolve a ref to an entity using the same heuristic catalog.js's
+// findRef uses (id / meta.href / id-minus-ext). Exported so other
+// callers can reuse the same matching rules.
+// TODO: the heuristic is duplicated here and in catalog.js — single
+// source of truth would put it in utils.js as a shared predicate.
 export async function refExists(ref) {
     if (!ref || typeof ref !== 'string') return false
     const matches = await findEntities(e =>
