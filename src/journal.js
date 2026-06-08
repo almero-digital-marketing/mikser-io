@@ -1,120 +1,113 @@
-import runtime from './runtime.js'
+// Per-cycle journal — the producer/consumer queue that all phases use
+// to hand work between each other (front-matter → yaml → layouts →
+// render → output → postprocess → ...).
+//
+// Backing store: a plain JS array. The journal is per-cycle (entries
+// are appended during the cycle, walked by `useJournal`, then drained
+// at onFinalized) and nothing outside this module observes individual
+// rows. SQL was over-engineering for a queue that lives for one cycle
+// and never gets queried again.
+//
+// Memory shape per entry: a single object with the fields below. No
+// serialization at insert (the previous sqlite-backed version paid
+// JSON.stringify on every addEntry/updateEntry and JSON.parse on every
+// useJournal yield — gone). Entries are deep-cloned via structuredClone
+// at insert / update time so a plugin that mutates the original object
+// after passing it to runtime.{create,update,delete} can't retroactively
+// rewrite history. Same isolation guarantee the SQL version provided.
+
 import { onInitialized, onCancelled, onFinalized } from './lifecycle.js'
-import knex from 'knex'
 import { stopProgress, trackProgress, updateProgress } from './logger.js'
 import { AbortError } from './utils.js'
 
-let journal
+// Insertion-order array for useJournal's walk + an id-indexed Map for
+// O(1) updateEntry. Both point at the same entry objects, so a mutation
+// via the Map is visible to walkers. The Map costs ~16 bytes per entry
+// at 10k entries — negligible vs the 50M-iteration cost of linear-scan
+// updateEntry it replaces.
+let entries = []
+let byId    = new Map()
+let nextId  = 1
 
-export async function addEntry({ entity, operation, context, options }) {
-    await journal('operations').insert([{ entity, operation, context, options }])
+function makeEntry({ entity, operation, context, options }) {
+    return {
+        id:        nextId++,
+        operation,
+        entity:    entity  != null ? structuredClone(entity)  : entity,
+        context:   context != null ? structuredClone(context) : context,
+        options:   options != null ? structuredClone(options) : options,
+        output:    null,
+    }
 }
 
-export async function addEntries(entries) {
-    await journal.batchInsert('operations', entries.map(({ entity, operation, context, options }) => ({
-        entity: JSON.stringify(entity),
-        operation,
-        context: JSON.stringify(context),
-        options: JSON.stringify(options)
-    })), 10)
+export async function addEntry(entry) {
+    const e = makeEntry(entry)
+    entries.push(e)
+    byId.set(e.id, e)
+}
+
+export async function addEntries(batch) {
+    for (const entry of batch) {
+        const e = makeEntry(entry)
+        entries.push(e)
+        byId.set(e.id, e)
+    }
 }
 
 export async function updateEntry({ id, entity, output }) {
-    const data = {}
-    if (entity) data.entity = JSON.stringify(entity)
-    if (output) data.output = JSON.stringify(output)
-    await journal('operations').where({ id }).update(data)
+    const e = byId.get(id)
+    if (!e) return
+    if (entity !== undefined) e.entity = structuredClone(entity)
+    if (output !== undefined) e.output = structuredClone(output)
 }
 
+// Walk the journal yielding entries matching `operations` (or all if
+// omitted). The walk is over a SNAPSHOT taken at the call site: entries
+// added during iteration are NOT visible to this iterator, which matches
+// the old SQL behavior (a SELECT pinned at query time). Plugins that
+// want to react to entries they added themselves do it via a fresh
+// useJournal in a later phase.
 export async function* useJournal(name, operations, signal) {
-    let query = journal('operations')
-    if (operations?.length) {
-        query.whereIn('operation', operations)
-    }
-    let [total] = await query.clone().count()
-    total = total['count(*)']
-    if (!total) return
+    const filtered = operations?.length
+        ? entries.filter(e => operations.includes(e.operation))
+        : entries.slice()
+    if (!filtered.length) return
 
-    trackProgress(name, total)
+    trackProgress(name, filtered.length)
 
-    let offset = 0
-    const limit = 1000
-    let count = 0
-    do {
-        count = 0
-        const entries = await query.clone().orderBy('id').select().offset(offset).limit(limit)
-        for (let { id, entity, operation, context, options, output } of entries) {
-            if (signal?.aborted) {
-                stopProgress()
-                throw new AbortError()
-            }
-            count++
-
-            updateProgress()
-            yield {
-                id,
-                entity: JSON.parse(entity),
-                operation,
-                context: JSON.parse(context),
-                options: JSON.parse(options),
-                output: JSON.parse(output)
-            }
+    for (const entry of filtered) {
+        if (signal?.aborted) {
+            stopProgress()
+            throw new AbortError()
         }
-        offset += limit
-    } while (count == limit)
-}
-
-export async function clearJournal(aborted) {
-    await journal('operations').del()
-    if (!aborted) {
-        // Tear down the sqlite connection only when this is genuinely a
-        // one-shot run that's about to exit. The two ways mikser stays
-        // alive across cycles are watch mode (chokidar handles keep the
-        // event loop ref'd) and an HTTP server (`runtime.options.app`,
-        // set either by --server or by a caller passing setup({ app }));
-        // both need the journal to survive subsequent cycles.
-        if (runtime.options.watch !== true && !runtime.options.app) {
-            journal.destroy()
-        }
+        updateProgress()
+        yield entry
     }
 }
 
-// Initialize the journal in onInitialized rather than onLoaded.
-// The engine resolves runtime.options.runtimeFolder in its own
-// onInitialized hook; ours runs after (engine.js is imported before
-// any plugin loads, so its onInitialized registers first). This way
-// every plugin hook from onLoad onwards — including plugin onLoaded
-// — can safely call runtime.create / runtime.update without
-// depending on the order in which journal.js's module registered
-// relative to theirs.
-//
-// In-memory sqlite: the journal is per-cycle (cleared on onFinalized)
-// and nothing outside this module reads journal.db. File-backed mode
-// paid for fsyncs we never used. In-memory is roughly an order of
-// magnitude faster for write-heavy transient workloads. Watch mode
-// still works because the knex connection survives across cycles
-// (clearJournal only destroys it in true one-shot mode).
+// Drain. Called by onFinalized / onCancelled. The `aborted` param is
+// preserved for API stability but unused — there's no connection to
+// tear down anymore.
+export async function clearJournal() {
+    entries.length = 0
+    byId.clear()
+    nextId = 1
+}
+
+// Bootstrap hook kept so module-level state lives next to its lifecycle
+// wiring. Nothing to initialize but the containers (already there).
+// Symmetry with catalog.js / refs.js — every engine module declares its
+// onInitialized even when there's nothing to do.
 onInitialized(async () => {
-    journal = knex({
-        client: 'sqlite3',
-        connection: { filename: ':memory:' },
-        useNullAsDefault: true,
-    })
-
-    await journal.schema.createTable('operations', table => {
-        table.increments('id')
-        table.string('operation').index()
-        table.json('entity')
-        table.json('context')
-        table.json('options')
-        table.json('output')
-    })
+    entries = []
+    byId    = new Map()
+    nextId  = 1
 })
 
-onFinalized(async (signal) => {
-    await clearJournal(signal.aborted)
+onFinalized(async () => {
+    await clearJournal()
 })
 
 onCancelled(async () => {
-    await clearJournal(true)
+    await clearJournal()
 })
