@@ -39,7 +39,7 @@ runtime.process()        ◄── mutex.use() — serialized
     ├── PROCESS phase
     │     • front-matter plugin extracts the YAML block
     │     • layouts plugin matches meta.layout → layout file
-    │     • mikser-io-plugin-schemas validates meta against schemas/article.js
+    │     • mikser-io-schemas validates meta against schemas/article.js
     │     • mapper plugin runs user transforms
     │
     ├── PERSIST phase
@@ -64,7 +64,7 @@ runtime.process()        ◄── mutex.use() — serialized
     │
     └── finalize / finalized
           • data plugin writes catalog-wide JSON
-          • mikser-io-plugin-schemas re-emits entities.d.ts if anything changed
+          • mikser-io-schemas re-emits entities.d.ts if anything changed
           • progress bars stop, run timing logged
 
 API (in --server mode)
@@ -98,7 +98,7 @@ The most common confusion when starting out is *which artifact lives where, at w
 | Asset variants | `assets/<preset>/` (preset outputs) | `assets` plugin | `onRender` |
 | Persistent entity registry | `catalog.json` | `catalog.js` | `onPersist` |
 | Per-cycle operations | `journal.sqlite` | every plugin | every phase |
-| Front-matter schemas | `schemas/` | `mikser-io-plugin-schemas` | `onValidate` |
+| Front-matter schemas | `schemas/` | `mikser-io-schemas` | `onValidate` |
 | Rendered HTML | `out/<route>.html` | post plugins + http server | `onRender` |
 | JSON snapshots | `out/api/*.json` (data plugin) | static serving / SDK build mode | `onFinalize` |
 | Live HTTP/SSE | `api` plugin's Express router | `sdk-api`, `sdk-vector` clients | `onLoaded` + runtime |
@@ -160,9 +160,9 @@ The architecture stacks cleanly for client consumers:
 Two parallel chains layer on top of the same engine:
 
 - **Vector search** — `sdk-vector` → `mikser-io-vector` → embeddings store (sqlite-vec or pgvector).
-- **Schemas / types** — `schemas/` Zod modules → `mikser-io-plugin-schemas` → `entities.d.ts` → `sdk-vue`'s `useDocument<T>`.
+- **Schemas / types** — `schemas/` Zod modules → `mikser-io-schemas` → `entities.d.ts` → `sdk-vue`'s `useDocument<T>`.
 
-Each chain is independent. A project that doesn't need semantic search drops `sdk-vector` and pays nothing for it. A project that doesn't type its frontend skips `mikser-io-plugin-schemas` and the engine works identically.
+Each chain is independent. A project that doesn't need semantic search drops `sdk-vector` and pays nothing for it. A project that doesn't type its frontend skips `mikser-io-schemas` and the engine works identically.
 
 ## How extension actually works
 
@@ -176,7 +176,7 @@ That's the entire extension model. There's no plugin manifest, no service regist
 
 This is why the Decap CMS integration is ~150 lines. There's no Decap-specific lifecycle phase. There's no "CMS plugin API." Decap is mounted as Express middleware inside the same shared app the `api` plugin uses, scheduled via `setInterval` to bake content to `out/`, with no engine awareness that any of this is happening. The lifecycle was already open enough.
 
-The same is true for every plugin shipped against mikser to date. `mikser-io-plugin-schemas` doesn't extend the lifecycle — it hooks `onValidate` (which existed already), watches a folder via `watch()` (which existed already), and emits a file at `onFinalized` (which existed already). The plugin layer is the seam; the engine is what stays small.
+The same is true for every plugin shipped against mikser to date. `mikser-io-schemas` doesn't extend the lifecycle — it hooks `onValidate` (which existed already), watches a folder via `watch()` (which existed already), and emits a file at `onFinalized` (which existed already). The plugin layer is the seam; the engine is what stays small.
 
 That's why ADR-0003 (*Plugins independent, engine stable*) is load-bearing.
 

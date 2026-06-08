@@ -220,7 +220,7 @@ export default z.object({
 
 // Typed — existence + target-type validated, EntityRef<T> branding
 import { z } from 'zod'
-import { entityRef } from 'mikser-io-plugin-schemas'
+import { entityRef } from 'mikser-io-schemas'
 export default z.object({
     layout:  z.literal('article'),
     title:   z.string(),

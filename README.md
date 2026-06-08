@@ -139,7 +139,7 @@ The engine is what stays stable — the lifecycle, the catalog, the file-based c
 | Plugin | What it does |
 |---|---|
 | [`mikser-io-vector`](https://github.com/almero-digital-marketing/mikser-io-vector) | OpenAI embeddings + semantic search (sqlite-vec or pgvector) |
-| [`mikser-io-plugin-schemas`](https://github.com/almero-digital-marketing/mikser-io-plugin-schemas) | Zod-backed entity validation + auto-generated TypeScript declarations for the SDK. Auto-detects `$`-keyed references and warns on broken ones — see [ADR-0007](./documentation/decisions/0007-references-declaration-and-expansion.md) |
+| [`mikser-io-schemas`](https://github.com/almero-digital-marketing/mikser-io-schemas) | Zod-backed entity validation + auto-generated TypeScript declarations for the SDK. Auto-detects `$`-keyed references and warns on broken ones — see [ADR-0007](./documentation/decisions/0007-references-declaration-and-expansion.md) |
 | [`mikser-io-archive`](https://github.com/almero-digital-marketing/mikser-io-archive) | Persist matching entities to YAML — audit trail, versioned content history, downstream export |
 | `mapper` | Run config-supplied transforms over matched entities each cycle (in-core, generic transformation layer) |
 | [`mikser-io-live`](https://github.com/almero-digital-marketing/mikser-io-live) | Lightweight dev server with browser auto-refresh — pair with `--watch` for the classic save→reload loop |
@@ -162,7 +162,7 @@ The `api`, `vector`, and `schemas` plugins are paired with client-side SDKs so a
 | [`mikser-io-sdk-api`](https://github.com/almero-digital-marketing/mikser-io-sdk-api) | `api` | `entities(name).list / query / urlFor / pages / update / delete / render / live` — Mongo-style filter operators backed by sift, sort, projection, pagination, SSE-driven live subscriptions, and `expand: [...]` to inline-resolve `$`-keyed references in one round-trip (multi-hop chains, `*` array iteration) |
 | [`mikser-io-sdk-vector`](https://github.com/almero-digital-marketing/mikser-io-sdk-vector) | `vector` | `vector(storeName).findSimilar(text, { limit })` — semantic search hits with the original mapped object attached |
 
-**Framework integrations** — all three wrap `mikser-io-sdk-api` in framework-idiomatic shapes. Same surface: `useDocument` / `useDocuments` live data, multilingual `useHref` / `useAlternates`, asset resolution via `useAsset`, generic on entity type so `mikser-io-plugin-schemas`-emitted types compose:
+**Framework integrations** — all three wrap `mikser-io-sdk-api` in framework-idiomatic shapes. Same surface: `useDocument` / `useDocuments` live data, multilingual `useHref` / `useAlternates`, asset resolution via `useAsset`, generic on entity type so `mikser-io-schemas`-emitted types compose:
 
 | Package | Framework | Notes |
 |---|---|---|
@@ -170,7 +170,7 @@ The `api`, `vector`, and `schemas` plugins are paired with client-side SDKs so a
 | [`mikser-io-sdk-react`](https://github.com/almero-digital-marketing/mikser-io-sdk-react) | React 18+ / 19+ | Hooks, `<MikserProvider>` Context, React Router v6+ integration via `useMikserRoutes` → `useRoutes()`. |
 | [`mikser-io-sdk-svelte`](https://github.com/almero-digital-marketing/mikser-io-sdk-svelte) | Svelte 5 (runes) | `$state` / `$effect` reactives, SvelteKit-friendly `generateMikserRoutes` for `entries()` prerender, `useMikserPages` for live nav. |
 
-Each SDK ships TypeScript declarations so client projects get autocomplete on filters, envelopes, and the `MikserError` thrown on non-2xx responses. Pair any of the framework SDKs with the `entities.d.ts` emitted by `mikser-io-plugin-schemas` for typed entity meta per layout. Install only the one(s) a project needs.
+Each SDK ships TypeScript declarations so client projects get autocomplete on filters, envelopes, and the `MikserError` thrown on non-2xx responses. Pair any of the framework SDKs with the `entities.d.ts` emitted by `mikser-io-schemas` for typed entity meta per layout. Install only the one(s) a project needs.
 
 ## Quick Start
 
@@ -201,7 +201,7 @@ The shape mikser fits cleanly:
 
 - **Marketing sites with editorial teams** — content authors work in files (via their editor, a Git client, or `mikser-io-decap`), engineers ship features without negotiating with a CMS schema, the site stays portable.
 - **Multilingual publishing platforms** — the `useHref()` / `useAlternates()` pattern in `sdk-vue` decouples logical references from per-locale URLs. One source tree, many language deployments.
-- **Content-heavy product catalogues** — `documents` + `mikser-io-plugin-schemas` + `data` plugin + a Vue frontend = typed product listings with live updates, semantic search via `vector`, and static-CDN-friendly JSON snapshots all at once.
+- **Content-heavy product catalogues** — `documents` + `mikser-io-schemas` + `data` plugin + a Vue frontend = typed product listings with live updates, semantic search via `vector`, and static-CDN-friendly JSON snapshots all at once.
 - **AI-augmented media pipelines** — `assets` plugin presets call out to Replicate / OpenAI / local models to upscale images, transcribe audio, transcode video. The pipeline is JS code, so anything Node can do is in scope.
 - **Mixed-output publishing** — the same source document renders to HTML, PDF (via `post-pdf`), MJML email (via `post-mjml`), and JSON snapshots. One catalog, many output formats, all concurrent.
 - **Headless backends for static frontends** — pair the `api` plugin with `sdk-api` for SSE-driven live frontends; pair the `data` plugin output with any static host for pre-rendered consumption.
