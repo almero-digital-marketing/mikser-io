@@ -1,8 +1,6 @@
 import runtime from './runtime.js'
 import { onInitialized, onCancelled, onFinalized } from './lifecycle.js'
-import { unlink } from 'fs/promises'
 import knex from 'knex'
-import path from 'path'
 import { stopProgress, trackProgress, updateProgress } from './logger.js'
 import { AbortError } from './utils.js'
 
@@ -89,18 +87,18 @@ export async function clearJournal(aborted) {
 // — can safely call runtime.create / runtime.update without
 // depending on the order in which journal.js's module registered
 // relative to theirs.
+//
+// In-memory sqlite: the journal is per-cycle (cleared on onFinalized)
+// and nothing outside this module reads journal.db. File-backed mode
+// paid for fsyncs we never used. In-memory is roughly an order of
+// magnitude faster for write-heavy transient workloads. Watch mode
+// still works because the knex connection survives across cycles
+// (clearJournal only destroys it in true one-shot mode).
 onInitialized(async () => {
-    const filename = path.join(runtime.options.runtimeFolder, `journal.db`)
-    try {
-        await unlink(filename)
-    } catch { }
-
     journal = knex({
         client: 'sqlite3',
-        connection: {
-            filename
-        },
-        useNullAsDefault: true
+        connection: { filename: ':memory:' },
+        useNullAsDefault: true,
     })
 
     await journal.schema.createTable('operations', table => {
