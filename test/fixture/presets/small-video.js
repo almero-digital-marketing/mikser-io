@@ -2,7 +2,7 @@ import ffmpeg from 'fluent-ffmpeg'
 
 export const revision = 2
 export const options = {
-    tasks: 'queue',
+    tasks: 'serial',
 }
 
 export default ({ entity: { name, source, destination, preset }, logger }) => {

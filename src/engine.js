@@ -158,7 +158,7 @@ export async function setup(options) {
                 const renderOptions = {
                     entity: renderEntity,
                     options: {
-                        tasks: TASKS.POOL,
+                        tasks: TASKS.INLINE,
                         ...runtime.options,
                         ...options,
                     },
@@ -169,14 +169,14 @@ export async function setup(options) {
                 try {
                     let result
                     switch (renderOptions.options.tasks) {
-                        case TASKS.POOL:
+                        case TASKS.INLINE:
                             renderOptions.logger = logger
                             renderOptions.signal = signal
                             if (!signal.aborted) {
                                 result = await render(renderOptions)
                             }
                             break
-                        case TASKS.QUEUE:
+                        case TASKS.SERIAL:
                             renderOptions.logger = logger
                             renderOptions.signal = signal
                             if (!signal.aborted) {
@@ -355,7 +355,7 @@ export async function setup(options) {
                     const postprocessOptions = {
                         entity,
                         options: {
-                            tasks: TASKS.POOL,
+                            tasks: TASKS.INLINE,
                             ...runtime.options,
                             ...options,
                         },
@@ -366,14 +366,14 @@ export async function setup(options) {
                     try {
                         let result
                         switch (postprocessOptions.options.tasks) {
-                            case TASKS.POOL:
+                            case TASKS.INLINE:
                                 postprocessOptions.logger = logger
                                 postprocessOptions.signal = signal
                                 if (!signal.aborted) {
                                     result = await postprocess(postprocessOptions)
                                 }
                                 break
-                            case TASKS.QUEUE:
+                            case TASKS.SERIAL:
                                 postprocessOptions.logger = logger
                                 postprocessOptions.signal = signal
                                 if (!signal.aborted) {

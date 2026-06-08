@@ -531,7 +531,7 @@ export default ({
                             options: {
                                 renderer: entity.layout.template,
                                 postprocessor: entity.layout.postprocessor,
-                                tasks: entity.meta?.task || TASKS.POOL
+                                tasks: entity.meta?.task || TASKS.INLINE
                             },
                             context: { data, plugins }
                         })
@@ -553,7 +553,7 @@ export default ({
                         options: {
                             renderer: entity.layout.template,
                             postprocessor: entity.layout.postprocessor,
-                            tasks: entity.meta?.task || TASKS.POOL
+                            tasks: entity.meta?.task || TASKS.INLINE
                         },
                         context: { data, plugins }
                     })
