@@ -138,6 +138,16 @@ export async function setup(options) {
     onRender(async (signal) => {
         const logger = useLogger()
         const renderJobs = new Set()
+        // Computed once per cycle — runtime.config doesn't mutate
+        // mid-cycle, so every render gets the same filtered slice.
+        // Native key iteration + String#startsWith; was a per-render
+        // `_.pickBy(runtime.config, (v,k) => _.startsWith(k,'render-'))`
+        // which charged ~20 predicate calls + 1 object allocation per
+        // entry. Symmetric with onPostprocess's `config` below.
+        const renderConfig = {}
+        for (const key in runtime.config) {
+            if (key.startsWith('render-')) renderConfig[key] = runtime.config[key]
+        }
         await map(useJournal('Rendering', [OPERATION.RENDER], signal), async entry => {
             const { id, entity, options, context } = entry
             const jobId = entity.id + ':' + entity.destination
@@ -162,7 +172,7 @@ export async function setup(options) {
                         ...runtime.options,
                         ...options,
                     },
-                    config: _.pickBy(runtime.config, (value, key) => _.startsWith(key, 'render-')),
+                    config: renderConfig,
                     context,
                     state: runtime.state
                 }
