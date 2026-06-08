@@ -15,6 +15,15 @@ const COUNT = Number(process.argv[2]) || 10_000
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const OUT  = path.join(HERE, 'documents', 'posts')
 
+// Optional: set TASK=worker to add `task: worker` to each post's
+// frontmatter. That dispatches renders through the Piscina pool
+// (constants.js TASKS.WORKER) instead of the default in-process async
+// dispatch (TASKS.POOL — misleading name; it's main-thread `await`,
+// not a worker pool). For sub-millisecond Handlebars renders the IPC
+// overhead almost cancels the parallelism gain (~12% faster); for
+// expensive renders (PDF, MJML, image compose) Piscina wins big.
+const TASK = process.env.TASK || null
+
 const TOPICS = [
     'static site generators', 'reactive frontends', 'incremental builds', 'reverse-reference indexes',
     'idempotent renderers', 'cache invalidation', 'shape preservation', 'workflow ergonomics',
@@ -106,7 +115,7 @@ title: ${title}
 description: Perf-test article ${n} — exercises the render pipeline.
 author: B#tter Truth
 date: ${date}
-tags: [${tags.join(', ')}]
+tags: [${tags.join(', ')}]${TASK ? `\ntask: ${TASK}` : ''}
 ---
 
 `
