@@ -1,5 +1,5 @@
 import { hashFile, hash } from 'hasha'
-import { stat, readFile, writeFile, mkdir } from 'node:fs/promises'
+import { stat, readFile, writeFile, mkdir, unlink } from 'node:fs/promises'
 import TruncateStream from 'truncate-stream'
 import { createReadStream } from 'node:fs'
 import _ from 'lodash'
@@ -531,4 +531,54 @@ export function formatErrorContext(entity, err, options) {
     let pos = ''
     if (line) pos = `:${line}${column ? ':' + column : ''}`
     return ` [${rel}${pos}]`
+}
+
+/**
+ * Bind to a single collection's source folder and return file-level
+ * `write` / `remove` operations against it. Each collection plugin sets
+ * `runtime.options.<name>Folder` during its onLoaded hook; this looks
+ * that up lazily, so it's safe to call useCollection() anywhere after
+ * `runtime.start()`.
+ *
+ * Distinct from `lifecycle.updateEntity` / `lifecycle.deleteEntity` —
+ * those write journal entries. These write actual files; in watch mode
+ * the resulting fs change is what kicks the next sync→process cycle.
+ *
+ * @example
+ *   const documents = useCollection(runtime, 'documents')
+ *   await documents.write('en/draft.md', '# Hi')
+ *   await documents.remove('en/old.md')
+ *
+ * @param {object} runtime         - the mikser runtime singleton
+ * @param {string} name            - collection name (e.g. 'documents')
+ * @returns {{
+ *   name: string,
+ *   folder: string,
+ *   write(relativePath: string, content?: string): Promise<string>,
+ *   remove(relativePath: string): Promise<void>,
+ * }}
+ */
+export function useCollection(runtime, name) {
+    function resolveFolder() {
+        const folder = runtime?.options?.[`${name}Folder`]
+        if (!folder) throw new Error(`Unknown collection: ${name}`)
+        return folder
+    }
+
+    return {
+        name,
+        get folder() { return resolveFolder() },
+
+        async write(relativePath, content = '') {
+            const uri = path.join(resolveFolder(), relativePath)
+            await mkdir(path.dirname(uri), { recursive: true })
+            await writeFile(uri, content, 'utf8')
+            return uri
+        },
+
+        async remove(relativePath) {
+            const uri = path.join(resolveFolder(), relativePath)
+            await unlink(uri)
+        },
+    }
 }

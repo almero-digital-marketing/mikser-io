@@ -4,8 +4,8 @@ import { createHash } from 'node:crypto'
 import _ from 'lodash'
 import sift from 'sift'
 import { z } from 'zod'
-import { useRenderer, useCollection } from '../api.js'
-import { mimeForEntity, isLoopback, expandEntity, projectMeta, ExpandError } from '../utils.js'
+import { useRenderer } from '../render.js'
+import { mimeForEntity, isLoopback, expandEntity, projectMeta, ExpandError, useCollection } from '../utils.js'
 
 // Mongo-style operators recognised in URL query params as `<path>.$<op>=...`.
 // $in / $nin take comma-separated values; $exists takes a truthy/falsy

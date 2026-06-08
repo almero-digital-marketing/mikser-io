@@ -26,7 +26,7 @@
 import path from 'node:path'
 import { randomUUID, createHmac } from 'node:crypto'
 import { z } from 'zod'
-import { useRenderer } from '../api.js'
+import { useRenderer } from '../render.js'
 import { mimeForEntity, matchEntity } from '../utils.js'
 
 // Forward an MCP-UI action to an external handler URL. Returns the

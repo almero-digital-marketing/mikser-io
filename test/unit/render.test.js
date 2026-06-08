@@ -1,10 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm, mkdir, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import path from 'node:path'
 
-import { useRenderer, useCollection } from '../../src/api.js'
+import { useRenderer } from '../../src/render.js'
 
 // Build a minimal runtime-like object exposing the surface useRenderer
 // uses: hooks.completed (array), and process() + update() the test
@@ -21,7 +18,7 @@ function createFakeRuntime({ process, update = async () => { }, delete: del = as
     }
 }
 
-describe('api: useRenderer', () => {
+describe('useRenderer', () => {
     it('resolves a single render request when the hook fires its correlation id', async () => {
         const updates = []
         const runtime = createFakeRuntime({
@@ -281,75 +278,5 @@ describe('api: useRenderer', () => {
         await assert.rejects(() => render({ id: '/x' }, { timeout: 30 }), /Render timeout/)
         const elapsed = Date.now() - start
         assert.ok(elapsed < 200, `should time out fast, elapsed=${elapsed}ms`)
-    })
-})
-
-describe('api: useCollection', () => {
-    async function withTempCollection(fn) {
-        const dir = await mkdtemp(path.join(tmpdir(), 'mikser-api-'))
-        try {
-            const docsFolder = path.join(dir, 'documents')
-            await mkdir(docsFolder, { recursive: true })
-            const runtime = { options: { workingFolder: dir, documentsFolder: docsFolder } }
-            return await fn({ runtime, dir, docsFolder })
-        } finally {
-            await rm(dir, { recursive: true, force: true })
-        }
-    }
-
-    it('exposes name and folder on the returned binding', async () => {
-        await withTempCollection(async ({ runtime, docsFolder }) => {
-            const docs = useCollection(runtime, 'documents')
-            assert.equal(docs.name, 'documents')
-            assert.equal(docs.folder, docsFolder)
-        })
-    })
-
-    it('write() creates the file and any missing parent directories', async () => {
-        await withTempCollection(async ({ runtime, docsFolder }) => {
-            const docs = useCollection(runtime, 'documents')
-            await docs.write('en/posts/hello.md', '# Hi')
-            const content = await readFile(path.join(docsFolder, 'en/posts/hello.md'), 'utf8')
-            assert.equal(content, '# Hi')
-        })
-    })
-
-    it('write() returns the absolute uri of the file it wrote', async () => {
-        await withTempCollection(async ({ runtime, docsFolder }) => {
-            const docs = useCollection(runtime, 'documents')
-            const uri = await docs.write('note.md', 'x')
-            assert.equal(uri, path.join(docsFolder, 'note.md'))
-        })
-    })
-
-    it('write() throws "Unknown collection" when the binding\'s folder option is absent', async () => {
-        const layouts = useCollection({ options: {} }, 'layouts')
-        await assert.rejects(() => layouts.write('x.hbs', '...'), /Unknown collection: layouts/)
-    })
-
-    it('remove() unlinks an existing file', async () => {
-        await withTempCollection(async ({ runtime, docsFolder }) => {
-            const file = path.join(docsFolder, 'a.md')
-            await writeFile(file, 'x')
-            const docs = useCollection(runtime, 'documents')
-            await docs.remove('a.md')
-            await assert.rejects(() => readFile(file, 'utf8'), { code: 'ENOENT' })
-        })
-    })
-
-    it('remove() throws "Unknown collection" when the binding\'s folder option is absent', async () => {
-        const layouts = useCollection({ options: {} }, 'layouts')
-        await assert.rejects(() => layouts.remove('x.hbs'), /Unknown collection: layouts/)
-    })
-
-    it('reading .folder throws if the collection has not been loaded yet', async () => {
-        const layouts = useCollection({ options: {} }, 'layouts')
-        assert.throws(() => layouts.folder, /Unknown collection: layouts/)
-    })
-
-    it('binding is lazy — useCollection() succeeds even before the folder is set', () => {
-        const docs = useCollection({ options: {} }, 'documents')
-        // Doesn't throw; resolution happens on actual use.
-        assert.equal(docs.name, 'documents')
     })
 })
