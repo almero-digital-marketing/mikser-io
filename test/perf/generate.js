@@ -6,12 +6,22 @@
 // so timing differences between runs reflect engine changes, not
 // content variance. Title / date / tags / body all derive from the
 // post index via simple modular arithmetic.
+//
+// SIZE env var picks entity weight:
+//   - `light`     (default) — minimal frontmatter; ~2-3KB per catalog entry.
+//                  Fine for measuring engine code paths; misses
+//                  serialization/memory costs at scale.
+//   - `realistic` — full SEO meta, hero + gallery image objects, $-refs
+//                  to author/category/related, ~10-20 paragraph body.
+//                  ~12-18KB per catalog entry. Closer to a real CMS
+//                  blog post.
 
 import { mkdir, writeFile, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const COUNT = Number(process.argv[2]) || 10_000
+const SIZE  = process.env.SIZE || 'light'
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const OUT  = path.join(HERE, 'documents', 'posts')
 
@@ -87,9 +97,117 @@ function makeDate(i) {
 }
 
 function makeBody(i) {
-    const n = 3 + (i % 5)
+    const n = SIZE === 'realistic' ? (10 + (i % 11)) : (3 + (i % 5))
     const paras = pickN(PARAGRAPHS, n, i + 1)
     return paras.map(p => `<p>${p}</p>`).join('\n\n')
+}
+
+// Realistic frontmatter additions. Modeled on a typical headless-CMS
+// blog post: full SEO sub-object, hero image with responsive variants,
+// 3–5 inline gallery images, $-refs to author / category / related
+// posts, search keywords. Pushes per-entity catalog weight from ~3KB
+// → ~12-18KB.
+function makeRealisticMeta(i, baseTags) {
+    const heroId = 1 + (i % 200)
+    const srcset = [320, 640, 960, 1280, 1920].map(w => ({
+        url: `/images/heroes/hero-${heroId}-${w}w.webp`,
+        width: w,
+    }))
+    const gallery = Array.from({ length: 3 + (i % 3) }, (_, k) => ({
+        url: `/images/galleries/post-${i}-${k}.webp`,
+        alt: `Figure ${k + 1} for post ${i}`,
+        width: 1200,
+        height: 800,
+        caption: PARAGRAPHS[(i + k) % PARAGRAPHS.length].slice(0, 120),
+    }))
+    const relatedIds = pickN(
+        Array.from({ length: Math.min(COUNT, 500) }, (_, k) => k + 1),
+        5,
+        i * 11 + 1,
+    ).filter(j => j !== i).slice(0, 4)
+    return {
+        $author:   `/authors/author-${1 + (i % 25)}`,
+        $category: `/categories/cat-${1 + (i % 12)}`,
+        $related:  relatedIds.map(j => `/blog/perf-${String(j).padStart(6, '0')}`),
+        keywords:  pickN([...baseTags, 'mikser', 'guide', 'how-to', 'tutorial', 'best-practices', 'long-read', 'opinion'], 8, i + 7),
+        excerpt:   PARAGRAPHS[i % PARAGRAPHS.length],
+        hero: {
+            url:    `/images/heroes/hero-${heroId}.webp`,
+            alt:    `Hero image for ${makeTitle(i)}`,
+            width:  1920,
+            height: 1080,
+            srcset,
+            credit: `Photo by Contributor ${1 + (i % 50)}`,
+        },
+        gallery,
+        seo: {
+            ogTitle:       makeTitle(i),
+            ogDescription: PARAGRAPHS[(i + 1) % PARAGRAPHS.length].slice(0, 200),
+            ogImage:       `/images/heroes/hero-${heroId}-og.webp`,
+            twitterCard:   'summary_large_image',
+            twitterSite:   '@mikserio',
+            canonical:     `https://example.com/blog/perf-${String(i).padStart(6, '0')}`,
+            robots:        'index,follow',
+            jsonLd: {
+                '@context':    'https://schema.org',
+                '@type':       'BlogPosting',
+                headline:      makeTitle(i),
+                datePublished: makeDate(i),
+                dateModified:  makeDate(i),
+                wordCount:     1500 + (i % 800),
+                articleSection: `Section-${1 + (i % 12)}`,
+            },
+        },
+        translations: {
+            de: `/de/blog/perf-${String(i).padStart(6, '0')}`,
+            fr: `/fr/blog/perf-${String(i).padStart(6, '0')}`,
+            es: `/es/blog/perf-${String(i).padStart(6, '0')}`,
+        },
+        readingTime:    1 + (i % 14),
+        wordCount:      1500 + (i % 800),
+        commentsClosed: i % 7 === 0,
+    }
+}
+
+function yamlKey(k) {
+    // YAML 1.1 reserves leading `@`, `\``, etc. as indicators; safest
+    // to quote any key with non-identifier characters.
+    if (/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(k)) return k
+    return JSON.stringify(k)
+}
+
+function yamlValue(v, indent) {
+    if (v === null || v === undefined) return 'null'
+    if (typeof v === 'boolean' || typeof v === 'number') return String(v)
+    if (typeof v === 'string') {
+        // Quote strings containing YAML-special characters
+        if (/[:#@&*!|>'"\[\]{}%,]/.test(v) || v.includes('\n')) {
+            return JSON.stringify(v)
+        }
+        return v
+    }
+    if (Array.isArray(v)) {
+        if (v.length === 0) return '[]'
+        return '\n' + v.map(item => {
+            if (typeof item === 'object' && item !== null) {
+                // Item lines: first key prefixed with `- `, subsequent
+                // keys with no prefix. Join glue carries the column
+                // alignment (`- ` is 2 chars, so subsequent keys indent
+                // by indent + 2 to land at the same column as the
+                // first key).
+                const inner = Object.entries(item)
+                    .map(([k, vv], idx) => `${idx === 0 ? '- ' : ''}${yamlKey(k)}: ${yamlValue(vv, indent + 4)}`)
+                    .join('\n' + ' '.repeat(indent + 2))
+                return ' '.repeat(indent) + inner
+            }
+            return ' '.repeat(indent) + '- ' + yamlValue(item, indent + 2)
+        }).join('\n')
+    }
+    // Object
+    const lines = Object.entries(v).map(([k, vv]) =>
+        ' '.repeat(indent) + `${yamlKey(k)}: ${yamlValue(vv, indent + 2)}`
+    )
+    return '\n' + lines.join('\n')
 }
 
 async function main() {
@@ -106,7 +224,27 @@ async function main() {
         const tags = pickN(TAG_POOL, 2 + (i % 3), i)
         const body = makeBody(i)
 
-        const fm = `---
+        let fm
+        if (SIZE === 'realistic') {
+            const extras = makeRealisticMeta(i, tags)
+            const extrasYaml = Object.entries(extras)
+                .map(([k, v]) => `${yamlKey(k)}: ${yamlValue(v, 2)}`)
+                .join('\n')
+            fm = `---
+layout: post
+lang: en
+href: /blog/${slug}
+title: ${title}
+description: Perf-test article ${n} — exercises the render pipeline.
+author: B#tter Truth
+date: ${date}
+tags: [${tags.join(', ')}]${TASK ? `\ntask: ${TASK}` : ''}
+${extrasYaml}
+---
+
+`
+        } else {
+            fm = `---
 layout: post
 lang: en
 href: /blog/${slug}
@@ -118,6 +256,7 @@ tags: [${tags.join(', ')}]${TASK ? `\ntask: ${TASK}` : ''}
 ---
 
 `
+        }
         writes.push(writeFile(path.join(OUT, `${slug}.html`), fm + body, 'utf8'))
 
         // Flush in batches so we don't hold 10k pending promises at once
@@ -129,7 +268,7 @@ tags: [${tags.join(', ')}]${TASK ? `\ntask: ${TASK}` : ''}
     await Promise.all(writes)
 
     const ms = Date.now() - t0
-    console.log(`Wrote ${COUNT} posts to ${OUT} in ${ms}ms`)
+    console.log(`Wrote ${COUNT} posts (SIZE=${SIZE}) to ${OUT} in ${ms}ms`)
 }
 
 main().catch(err => {

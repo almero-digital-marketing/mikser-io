@@ -175,12 +175,18 @@ There is **no `--mcp` CLI flag**. Activation is plugin-presence only.
 
 - Rig: `npm run test:perf` (generates 10k corpus, runs render-only
   pipeline). Configurable: `node test/perf/generate.js 50000`.
-  Use `TASK=worker node test/perf/generate.js 10000` to dispatch
-  through Piscina.
+  `SIZE=realistic node test/perf/generate.js 10000` switches to fat
+  entities (full SEO meta, hero/gallery image objects, $-refs to
+  author/category/related, longer body — ~7KB per catalog entry
+  instead of ~3KB). Use `TASK=worker node test/perf/generate.js
+  10000` to dispatch through Piscina.
 - Current honest numbers (Apple Silicon, 4-thread default,
   in-memory journal, INLINE dispatch):
-  - 1k docs: ~715/sec (~1.4s)
-  - 10k docs: ~925/sec (~10.8s)
+  - 1k docs light:      ~715/sec  (~1.4s)
+  - 10k docs light:     ~925/sec  (~10.8s)
+  - 10k docs realistic: ~775/sec  (~12.9s)
+  - 14k docs realistic: ~750/sec  (~18.6s, **catalog 94MB**)
+  - 50k docs realistic: ~565/sec  (~88.7s, catalog 352MB, RSS 1.16GB)
 - Throughput stays roughly flat from 1k to 10k now that the layouts
   plugin's sitemap is indexed by uri (commit f1a978e). Previously the
   bookkeeping was O(N²) — `removePagesFromSitemap` ran on every
@@ -190,6 +196,20 @@ There is **no `--mcp` CLI flag**. Activation is plugin-presence only.
   in workers (~30%) and idle/GC. The dispatcher itself is a tiny
   slice — earlier "dispatcher per-render bookkeeping" hypothesis
   was wrong.
+- **Catalog scale ceiling: ~100MB on-disk file.** That's where the
+  full-file-rewrite save crosses the human-perception threshold for
+  watch-mode rebuilds (~200-300ms save → noticeably not-instant).
+  Map+NDJSON wins on per-call findById (~30ns vs sqlite's ~10-30μs)
+  but loses on save latency once catalog file size grows. Switch
+  to the sqlite catalog driver above this size:
+  ```js
+  // mikser.config.js
+  export default { catalog: { driver: 'sqlite' } }
+  ```
+  The driver swap is invisible to plugin code — `findById`,
+  `findEntities`, `queryEntities` all keep the same shape. What
+  changes: save becomes O(mutations) per cycle instead of O(catalog),
+  startup skips the full-file load, RSS stays bounded.
 - **Profile before optimizing.** `node --cpu-prof app.js
   --working-folder test/perf --clear` produces `.cpuprofile` for
   Chrome DevTools. Intuition has a real miss rate (we shipped 3
