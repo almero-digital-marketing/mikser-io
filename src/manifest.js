@@ -9,9 +9,12 @@
 //     render is short-circuited
 //   - disk verification (`mikser --verify`, planned)
 //
-// Storage: `runtime/manifest.json`, a JSON array of compact snapshots
-// keyed in-memory by `${id}:${destination}` so paginated outputs from
-// the same source stay distinct.
+// Storage: `runtime/manifest.ndjson` — newline-delimited JSON, one
+// snapshot per line, keyed in-memory by `${id}:${destination}` so
+// paginated outputs from the same source stay distinct. Streaming
+// read at startup keeps memory bounded as the manifest grows; write
+// is skipped entirely on cycles where nothing diverged from disk
+// (the warm-restart common case).
 //
 // Snapshot shape (intentionally tiny — the full entity is in the catalog;
 // the manifest only stores what's needed to make the skip decision plus
@@ -47,8 +50,9 @@
 
 import crypto from 'node:crypto'
 import path from 'node:path'
-import { readFile, writeFile, unlink } from 'fs/promises'
-import { existsSync } from 'fs'
+import { readFile, writeFile, unlink, rename } from 'fs/promises'
+import { existsSync, createReadStream } from 'fs'
+import { createInterface } from 'node:readline'
 import sift from 'sift'
 import runtime from './runtime.js'
 import { useLogger } from './engine.js'
@@ -63,11 +67,19 @@ import { findById } from './catalog.js'
 // manifest don't break. Canonical home is utils.js.
 export { inputHashOf } from './utils.js'
 
-const MANIFEST_FILE = 'manifest.json'
+const MANIFEST_FILE = 'manifest.ndjson'
 
 // Module-level Map shared by the public API and the lifecycle hooks
 // below. One manifest per process. Values are snapshots, not entities.
 const entries = new Map()
+
+// Track whether the in-memory state has diverged from the on-disk
+// file. Lets onFinalize skip the write entirely when nothing changed
+// this cycle — the common case on warm restarts with the source.js
+// gate firing for every file. Any mutation to `entries` (record,
+// remove, the cleanup passes in onFinalize) sets this true; loading
+// from disk and a successful persist reset it.
+let dirty = false
 
 function key(query) {
     return `${query.id}:${query.destination}`
@@ -240,6 +252,7 @@ export function createManifest() {
         // behind as a stale entry that the next DELETE pass reclaims.
         record(entity, deps) {
             entries.set(key(entity), buildSnapshot(entity, deps))
+            dirty = true
         },
 
         // Drop all snapshots owned by entity id (direct outputs and
@@ -252,6 +265,7 @@ export function createManifest() {
                 if (value.id === id || value.parent === id) {
                     dropped.push(value.destination)
                     entries.delete(k)
+                    dirty = true
                 }
             }
             return dropped
@@ -405,18 +419,29 @@ onLoaded(async () => {
     const manifestPath = path.join(runtime.options.runtimeFolder, MANIFEST_FILE)
     if (existsSync(manifestPath)) {
         try {
-            const arr = JSON.parse(await readFile(manifestPath, 'utf8'))
-            if (Array.isArray(arr)) {
-                for (const snapshot of arr) {
+            // NDJSON: one snapshot per line. Streaming read so memory
+            // stays flat at large scales — at 1M entries with ~500 bytes
+            // each, a JSON.parse over the whole file would peak at
+            // ~1GB resident; readline keeps it bounded.
+            const stream = createReadStream(manifestPath)
+            const rl = createInterface({ input: stream, crlfDelay: Infinity })
+            for await (const line of rl) {
+                if (!line.trim()) continue
+                try {
+                    const snapshot = JSON.parse(line)
                     if (snapshot?.id && snapshot?.destination) {
                         entries.set(key(snapshot), snapshot)
                     }
+                } catch (err) {
+                    logger.warn('Skipping malformed manifest line: %s', err.message)
                 }
             }
         } catch (err) {
-            logger.warn('Could not load manifest.json: %s', err.message)
+            logger.warn('Could not load %s: %s', MANIFEST_FILE, err.message)
         }
     }
+    // Loaded from disk; in-memory matches the file.
+    dirty = false
 
     // Replay each snapshot's refClosure into runtime.refs so the
     // first post-restart cycle's inverseClosureOf returns correctly.
@@ -454,6 +479,7 @@ async function dropEntriesWhere(predicate, reason) {
             logger.debug('%s: unlinked %s', reason, snap.destination)
         } catch { }
         entries.delete(k)
+        dirty = true
     }
 }
 
@@ -510,6 +536,7 @@ onFinalize(async () => {
         if (output?.success && !output.skipped) {
             const outputHash = await hashOutputFile(entity.destination)
             entries.set(key(entity), buildSnapshot(entity, deps, outputHash))
+            dirty = true
         }
     }
 
@@ -561,6 +588,23 @@ onFinalize(async () => {
         )
     }
 
+    // Skip the write entirely when nothing diverged from disk this
+    // cycle — the common case on warm restarts where the source.js
+    // gate suppressed every CREATE and no renders happened. Trims the
+    // largest single fixed cost from the no-op cycle (was ~500ms at
+    // 10k entries).
+    if (!dirty) return
+
+    // NDJSON write — one snapshot per line. Atomic via write-tmp +
+    // rename so a crash mid-write leaves the previous file intact
+    // rather than a truncated half-file that fails JSON.parse.
     const manifestPath = path.join(runtime.options.runtimeFolder, MANIFEST_FILE)
-    await writeFile(manifestPath, JSON.stringify(Array.from(entries.values())), 'utf8')
+    const tmpPath = manifestPath + '.tmp'
+    const lines = []
+    for (const snapshot of entries.values()) {
+        lines.push(JSON.stringify(snapshot))
+    }
+    await writeFile(tmpPath, lines.length ? lines.join('\n') + '\n' : '', 'utf8')
+    await rename(tmpPath, manifestPath)
+    dirty = false
 })

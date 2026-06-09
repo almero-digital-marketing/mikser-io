@@ -78,12 +78,15 @@ export async function cleanup(workdir) {
     await rm(workdir, { recursive: true, force: true })
 }
 
-// Convenience: read the manifest snapshot file directly.
+// Convenience: read the manifest snapshot file directly. NDJSON
+// format (one snapshot per line) — parse line by line and skip empty
+// trailing lines.
 export async function readManifest(workdir) {
-    const file = path.join(workdir, 'runtime', 'manifest.json')
+    const file = path.join(workdir, 'runtime', 'manifest.ndjson')
     if (!existsSync(file)) return null
     const { readFile } = await import('node:fs/promises')
-    return JSON.parse(await readFile(file, 'utf8'))
+    const text = await readFile(file, 'utf8')
+    return text.split('\n').filter(Boolean).map(line => JSON.parse(line))
 }
 
 // Convenience: read the catalog directly.
