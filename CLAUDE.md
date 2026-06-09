@@ -180,7 +180,7 @@ There is **no `--mcp` CLI flag**. Activation is plugin-presence only.
 - Current honest numbers (Apple Silicon, 4-thread default,
   in-memory journal, INLINE dispatch):
   - 1k docs: ~715/sec (~1.4s)
-  - 10k docs: ~840/sec (~11.9s)
+  - 10k docs: ~925/sec (~10.8s)
 - Throughput stays roughly flat from 1k to 10k now that the layouts
   plugin's sitemap is indexed by uri (commit f1a978e). Previously the
   bookkeeping was O(N²) — `removePagesFromSitemap` ran on every
