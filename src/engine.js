@@ -1,11 +1,11 @@
 import path from 'node:path'
 import { Command } from 'commander'
-import { rm, lstat, realpath, mkdir, writeFile, readFile, unlink } from 'fs/promises'
+import { rm, lstat, realpath, mkdir, unlink } from 'fs/promises'
 import { existsSync } from 'fs'
 import _ from 'lodash'
 import Piscina from 'piscina'
 import runtime from './runtime.js'
-import { onInitialize, onInitialized, onRender, onCancel, onCancelled, onFinalized, onLoaded, onAfterRender, onBeforePostprocess, onPostprocess, postprocessEntities } from './lifecycle.js'
+import { onInitialize, onInitialized, onRender, onCancel, onCancelled, onFinalized, onLoaded, onBeforePostprocess, onPostprocess, postprocessEntities } from './lifecycle.js'
 import { useJournal, updateEntry } from './journal.js'
 import { globby } from 'globby'
 import { OPERATION, TASKS } from './constants.js'
@@ -112,27 +112,6 @@ export async function setup(options) {
     onLoaded(async () => {
         const logger = useLogger()
         logger.debug(runtime.options, 'Mikser options')
-
-        // Cumulative render manifest — survives across watch cycles, used to
-        // unlink stale output files when their source entity is deleted.
-        // Keyed by "<entity.id>:<entity.destination>" so paginated outputs
-        // for the same id stay distinct.
-        runtime.state.manifest = new Map()
-        const manifestPath = path.join(runtime.options.runtimeFolder, 'render-details.json')
-        if (existsSync(manifestPath)) {
-            try {
-                const arr = JSON.parse(await readFile(manifestPath, 'utf8'))
-                if (Array.isArray(arr)) {
-                    for (const entity of arr) {
-                        if (entity?.id && entity?.destination) {
-                            runtime.state.manifest.set(`${entity.id}:${entity.destination}`, entity)
-                        }
-                    }
-                }
-            } catch (err) {
-                logger.warn('Could not load render-details.json: %s', err.message)
-            }
-        }
     })
 
     onRender(async (signal) => {
@@ -148,11 +127,40 @@ export async function setup(options) {
         for (const key in runtime.config) {
             if (key.startsWith('render-')) renderConfig[key] = runtime.config[key]
         }
+
+        // Collect this cycle's mutated entity ids and hrefs so the
+        // manifest skip check can re-render anything whose `$`-ref
+        // targets changed even if the entity itself is byte-identical.
+        // The Set is built from CREATE/UPDATE/DELETE journal entries —
+        // RENDER entries are this cycle's work, not the trigger.
+        const mutatedRefs = new Set()
+        for await (let { entity } of useJournal('Manifest mutations', [OPERATION.CREATE, OPERATION.UPDATE, OPERATION.DELETE])) {
+            if (entity?.id) mutatedRefs.add(entity.id)
+            if (entity?.meta?.href) mutatedRefs.add(entity.meta.href)
+        }
+        let skipped = 0
+
         await map(useJournal('Rendering', [OPERATION.RENDER], signal), async entry => {
             const { id, entity, options, context } = entry
             const jobId = entity.id + ':' + entity.destination
             if (!renderJobs.has(jobId) && !options.ignore) {
                 renderJobs.add(jobId)
+
+                // Manifest skip: prior snapshot exists, inputHash and
+                // layoutHash match, no ref-target mutated this cycle.
+                // Disabled when a postprocessor is configured because
+                // postprocessors typically consume the intermediate
+                // rendered file (post-pdf, post-mjml). Skipping the
+                // render leaves the postprocess input missing on the
+                // next run. The right fix is a postprocess manifest
+                // that also skips when its output is current — Phase 3.
+                if (!options.postprocessor && runtime.manifest?.shouldSkip(entity, mutatedRefs)) {
+                    skipped++
+                    entry.output = { success: true, skipped: 'manifest' }
+                    await updateEntry({ id, output: entry.output })
+                    logger.debug('Manifest skip: %s → %s', entity.name || entity.id, entity.destination)
+                    return
+                }
                 // Project reference-marker keys (`$author`, `$hero`, …)
                 // into their normalized form (`author`, `hero`) before
                 // the entity crosses into the renderer — applies whether
@@ -233,41 +241,8 @@ export async function setup(options) {
             concurrency: runtime.options.threads,
             signal
         })
-        renderJobs.size && logger.info('Rendered: %d', renderJobs.size)
-    })
-
-    onAfterRender(async () => {
-        const logger = useLogger()
-        const manifest = runtime.state.manifest
-
-        // Unlink stale output files for entities deleted in this cycle, and
-        // prune them from the manifest. Matches by `entity.id` for direct hits
-        // and by `entity.parent` so paginated children (whose id was rewritten
-        // via changeExtension) are reclaimed alongside their source.
-        for await (let { entity } of useJournal('Manifest cleanup', [OPERATION.DELETE])) {
-            for (const [key, value] of manifest) {
-                if (value.id === entity.id || value.parent === entity.id) {
-                    const filePath = path.join(runtime.options.outputFolder, value.destination)
-                    try {
-                        await unlink(filePath)
-                        logger.debug('Manifest unlinked stale output: %s', value.destination)
-                    } catch { }
-                    manifest.delete(key)
-                }
-            }
-        }
-
-        // Merge this cycle's successful renders. New ids appear; re-rendered
-        // ids overwrite (same key); ids whose destination changed leave the
-        // old key as a stale entry — handled by the cleanup pass on next DELETE.
-        for await (let { output, entity } of useJournal('Output', [OPERATION.RENDER])) {
-            if (output?.success) {
-                manifest.set(`${entity.id}:${entity.destination}`, entity)
-            }
-        }
-
-        const manifestPath = path.join(runtime.options.runtimeFolder, 'render-details.json')
-        await writeFile(manifestPath, JSON.stringify(Array.from(manifest.values())), 'utf8')
+        renderJobs.size && logger.info('Rendered: %d', renderJobs.size - skipped)
+        skipped && logger.info('Manifest skipped: %d', skipped)
     })
 
     onBeforePostprocess(async (signal) => {

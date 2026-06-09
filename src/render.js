@@ -293,7 +293,7 @@ export function useRenderer(runtime, { defaultTimeout = 30_000 } = {}) {
             // accumulate. The rendered output file stays on disk — the
             // bytes are the work product. We deliberately bypass the
             // journal/DELETE path here (which would also unlink the file
-            // via engine.js's manifest cleanup) and splice the entity
+            // via the manifest module's cleanup) and splice the entity
             // out of the in-memory catalog directly. Strict equality so
             // ambiguous inputs (null, "false", 0) fall through to the
             // default of keeping the row.
