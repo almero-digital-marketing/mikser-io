@@ -49,6 +49,7 @@ import crypto from 'node:crypto'
 import path from 'node:path'
 import { readFile, writeFile, unlink } from 'fs/promises'
 import { existsSync } from 'fs'
+import sift from 'sift'
 import runtime from './runtime.js'
 import { useLogger } from './engine.js'
 import { onLoaded, onAfterRender } from './lifecycle.js'
@@ -99,22 +100,27 @@ function lookupEntity(id) {
     return runtime.catalog?.chain.get('entities').find({ id }).value()
 }
 
-// refClosure is the unified dependency list for a render. It mixes the
-// edges the engine collected at render time (layout, partials, future:
-// queries) with the entity's own $-refs (extracted statically). One list
-// covers every reason a render might need to invalidate.
+// refClosure is the unified dependency list for a render. It mixes:
+//   - $-key refs from the entity's meta (extracted statically here)
+//   - Render-time edges from the engine's track API: layout / partial
+//     (target + hash) and query (sift filter, no target)
 //
-// Each entry carries the target's content `hash` at the time of this
-// render, so a future cycle can distinguish "this entity reappeared in
-// the journal" (cold-start re-discovery, no real change) from "the
-// content actually differs" (real invalidation reason). Hash is
-// optional — for refs targeting external resources or entities not in
-// the catalog at record time, we omit it and the skip check falls back
-// to the conservative "any journal mutation invalidates" rule.
+// Layout/partial/ref entries carry the target's content `hash` at the
+// time of this render, so a future cycle can distinguish "this entity
+// reappeared in the journal" (cold-start re-discovery, no real change)
+// from "the content actually differs" (real invalidation reason). Hash
+// is optional — refs targeting external resources or entities not in
+// the catalog at record time omit it and the skip check falls back to
+// the conservative "any journal mutation invalidates" rule.
+//
+// Query entries carry a normalized filter object (or null sentinel
+// for unserializable filters like function predicates). At skip-check
+// the filter is replayed against this cycle's mutated entities via
+// sift; any match invalidates the render.
 function buildRefClosure(entity, deps) {
     const closure = []
     const seen = new Set()
-    function push(kind, target, hash) {
+    function pushTarget(kind, target, hash) {
         if (!target) return
         const key = `${kind}:${target}`
         if (seen.has(key)) return
@@ -123,20 +129,29 @@ function buildRefClosure(entity, deps) {
         if (hash) entry.hash = hash
         closure.push(entry)
     }
+    function pushQuery(filter) {
+        // Dedupe queries by their serialized form. Null filter is the
+        // sentinel for "unserializable" — it goes through once.
+        const key = filter === null ? 'query:__null__' : 'query:' + JSON.stringify(filter)
+        if (seen.has(key)) return
+        seen.add(key)
+        closure.push({ kind: 'query', filter })
+    }
     // $-key refs from entity meta (kind: 'ref'). Try to hash the target
     // via catalog lookup; refs that don't resolve fall back to the
     // conservative check.
     if (entity.meta) {
         for (const { ref } of extractRefs(entity.meta)) {
             const target = lookupEntity(ref)
-            push('ref', ref, target ? inputHashOf(target) : undefined)
+            pushTarget('ref', ref, target ? inputHashOf(target) : undefined)
         }
     }
     // Render-time edges supplied by the engine via journal entry.deps.
-    // Each carries the target's hash at render time (computed by the
-    // engine at collection time and threaded through the journal entry).
     if (Array.isArray(deps)) {
-        for (const { kind, target, hash } of deps) push(kind, target, hash)
+        for (const dep of deps) {
+            if (dep.kind === 'query') pushQuery(dep.filter ?? null)
+            else pushTarget(dep.kind, dep.target, dep.hash)
+        }
     }
     return closure
 }
@@ -168,35 +183,50 @@ export function createManifest() {
         // Should this render be skipped? True iff:
         //   - we have a prior snapshot for (id, destination)
         //   - inputHash matches the entity's current bytes
-        //   - for every refClosure target that appears in `mutatedRefs`
-        //     this cycle, the target's current hash matches what we
-        //     recorded last render (i.e. the journal mutation was a
-        //     re-discovery, not a real content change). Without this
-        //     hash gate, cold-start file rediscovery would falsely
-        //     invalidate every render whose layout/partial appears in
-        //     the journal — which is every render.
+        //   - for every refClosure target (layout/partial/$-ref) that
+        //     appears in `mutatedRefs` this cycle, the target's current
+        //     hash matches what we recorded last render (i.e. the
+        //     journal mutation was a re-discovery, not a real content
+        //     change). Without this hash gate, cold-start file
+        //     rediscovery would falsely invalidate every render whose
+        //     layout/partial appears in the journal — which is every
+        //     render.
+        //   - for every refClosure query (kind:'query'), no mutated
+        //     entity matches the recorded sift filter. A null filter
+        //     (sentinel for unserializable predicates) always
+        //     invalidates conservatively.
         //
         // `mutatedRefs` is a Set of ids (and hrefs) mutated this cycle.
         // `currentHashes` is a Map<id, hash> of the *current* hash for
         // every entity that appears in this cycle's journal mutations.
-        // Both are built once at the top of onRender by the engine.
+        // `mutatedEntities` is a Map<id, entity> of the entity payloads
+        // themselves — used by the query check to run sift matchers.
+        // All three are built once at the top of onRender by the engine.
         // Snapshots without per-target hashes (older records, external
         // refs that didn't resolve at record time) fall back to the
         // conservative "any mutation invalidates" rule.
-        shouldSkip(entity, mutatedRefs, currentHashes) {
+        shouldSkip(entity, mutatedRefs, currentHashes, mutatedEntities) {
             const snapshot = this.lookup(entity)
             if (!snapshot?.inputHash) return false
             if (inputHashOf(entity) !== snapshot.inputHash) return false
-            if (snapshot.refClosure?.length && mutatedRefs?.size) {
-                for (const { target, hash } of snapshot.refClosure) {
-                    if (!mutatedRefs.has(target)) continue
-                    // Target appears in journal — was its content really
-                    // different from what we rendered against?
-                    if (!hash) return false                       // no recorded hash → can't verify, force re-render
-                    const currentHash = currentHashes?.get(target)
-                    if (currentHash === undefined) continue       // not in this cycle's mutations after all
-                    if (currentHash !== hash) return false        // real content change
+            if (!snapshot.refClosure?.length) return true
+            for (const entry of snapshot.refClosure) {
+                if (entry.kind === 'query') {
+                    // Unserializable filter → can't verify → force re-render.
+                    if (!entry.filter) return false
+                    if (!mutatedEntities?.size) continue
+                    const matcher = sift(entry.filter)
+                    for (const mutated of mutatedEntities.values()) {
+                        if (matcher(mutated)) return false
+                    }
+                    continue
                 }
+                // layout / partial / ref — target-based.
+                if (!mutatedRefs?.has(entry.target)) continue
+                if (!entry.hash) return false                     // no recorded hash → can't verify
+                const currentHash = currentHashes?.get(entry.target)
+                if (currentHash === undefined) continue           // not really in this cycle's mutations after all
+                if (currentHash !== entry.hash) return false      // real content change
             }
             return true
         },

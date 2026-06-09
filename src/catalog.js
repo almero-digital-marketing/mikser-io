@@ -8,7 +8,50 @@ import path from 'node:path'
 import { JSONFile } from 'lowdb/node'
 import _ from 'lodash'
 import sift from 'sift'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { expandEntity, projectMeta } from './utils.js'
+
+// Render-time context propagated through async boundaries via Node's
+// AsyncLocalStorage. The engine's onRender wraps each render in
+// `_renderContext.run({entityId, track}, …)`; catalog query methods
+// below read it back to report which filters the render consulted.
+// Those filter records flow into the manifest snapshot's refClosure
+// as `kind: 'query'` entries, so a future cycle can detect when a
+// mutation matches a stored filter and invalidate the render.
+//
+// When the catalog is accessed outside a render (plugin lifecycle
+// hooks, MCP/API handlers), `getStore()` returns undefined and no
+// tracking happens — the same query methods serve all callers.
+export const _renderContext = new AsyncLocalStorage()
+
+// Internal raw chain accessors that bypass query tracking. Used by the
+// query-recording wrappers below to call the lowdb chain without
+// re-entering the tracker (which would otherwise log the unfiltered
+// inner findAll as a sentinel-forced re-render dependency).
+function _rawFindEntity(query) {
+	return runtime.catalog.chain.get('entities').find(query).value()
+}
+
+function _rawFindEntities(query) {
+	if (!query) return runtime.catalog.chain.get('entities').value()
+	return runtime.catalog.chain.get('entities').filter(query).value()
+}
+
+// Normalize a filter for snapshot storage. Object filters are
+// serializable as-is; function filters and primitives can't be
+// serialized for replay so we record a `null` sentinel that forces
+// conservative invalidation (any mutation re-renders) — safer than
+// silently losing the dep.
+function _normalizeFilter(filter) {
+	if (filter && typeof filter === 'object' && !Array.isArray(filter)) return filter
+	return null
+}
+
+function _recordQuery(filter) {
+	const ctx = _renderContext.getStore()
+	if (!ctx?.track) return
+	ctx.track.query(_normalizeFilter(filter))
+}
 
 // Same reasoning as journal.js — initialize the catalog in
 // onInitialized so every plugin hook from onLoad onwards can safely
@@ -68,14 +111,13 @@ onFinalized(async () => {
 
 export async function findEntity(query) {
 	if (!query) return
-	return runtime.catalog.chain.get('entities').find(query).value()
+	_recordQuery(query)
+	return _rawFindEntity(query)
 }
 
 export async function findEntities(query) {
-	if (!query) {
-		return runtime.catalog.chain.get('entities').value()
-	}
-	return runtime.catalog.chain.get('entities').filter(query).value()
+	_recordQuery(query)
+	return _rawFindEntities(query)
 }
 
 // High-level CRUD-with-query surface — sift filters, sort, pagination,
@@ -98,7 +140,11 @@ export async function findEntities(query) {
 // expand walker resolves refs the same way everywhere.
 async function findRef(ref) {
 	if (!ref || typeof ref !== 'string') return null
-	const matches = await findEntities(e =>
+	// Use the raw chain accessor so expand-driven lookups don't get
+	// logged as query deps — the parent queryEntities call already
+	// recorded its own filter, and the $-ref edges are tracked
+	// separately via runtime.refs.
+	const matches = _rawFindEntities(e =>
 		!!e && (
 			e.id === ref ||
 			e.meta?.href === ref ||
@@ -174,7 +220,12 @@ export async function queryEntities({
 	const effectiveLimit = Math.min(100, Math.max(1, limit ?? 25))
 	const effectiveSkip = Math.max(0, skip ?? 0)
 
-	let all = await findEntities()
+	// Record the filter (or sentinel) for manifest invalidation when
+	// inside a render context. Use the raw accessor for the inner
+	// findAll so the unfiltered scan doesn't show up as a separate
+	// "depends on everything" sentinel.
+	_recordQuery(filter)
+	let all = _rawFindEntities()
 	if (scope) all = all.filter(scope)
 
 	if (filter && Object.keys(filter).length) {

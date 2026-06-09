@@ -18,6 +18,7 @@ import packageInfo from '../package.json' with { type: 'json' }
 import { attachServerCliOptions, setupServer } from './server.js'
 import { createMikserLogger } from './logger.js'
 import { inputHashOf } from './manifest.js'
+import { _renderContext as renderContext } from './catalog.js'
 
 export async function setup(options) {
     runtime.options.threads = options?.threads !== undefined ? options.threads : 4
@@ -129,26 +130,31 @@ export async function setup(options) {
             if (key.startsWith('render-')) renderConfig[key] = runtime.config[key]
         }
 
-        // Collect this cycle's mutated entity ids and hrefs so the
+        // Collect this cycle's mutated entity ids/hrefs/entities so the
         // manifest skip check can re-render anything whose dependencies
-        // (layout, partials, $-refs) changed even if the entity itself
-        // is byte-identical. The Set is built from CREATE/UPDATE/DELETE
-        // journal entries — RENDER entries are this cycle's work, not
-        // the trigger.
+        // (layout, partials, $-refs, catalog queries) changed even if
+        // the entity itself is byte-identical. Built once from this
+        // cycle's CREATE/UPDATE/DELETE journal entries — RENDER entries
+        // are this cycle's work, not the trigger.
         //
-        // The parallel `currentHashes` Map carries the current input
-        // hash for each mutated entity. Cold-start file discovery emits
-        // a CREATE/UPDATE for every file even when content didn't
-        // change; without the hash gate, every render whose layout or
-        // partial is in the journal would falsely invalidate. The hash
-        // comparison in manifest.shouldSkip distinguishes "re-discovered"
-        // from "actually changed."
+        // - `mutatedRefs` is a Set of ids (and hrefs) — fast membership
+        //   check for layout/partial/$-ref edges.
+        // - `currentHashes` carries the current input hash for each
+        //   mutated entity. Cold-start file discovery emits CREATE for
+        //   every file even when content didn't change; without the
+        //   hash gate, every render whose dep appears in the journal
+        //   would falsely invalidate.
+        // - `mutatedEntities` carries the entity payloads themselves so
+        //   the query-match check can call `sift(filter)` against each
+        //   mutation to decide whether a stored query dep is hit.
         const mutatedRefs = new Set()
         const currentHashes = new Map()
+        const mutatedEntities = new Map()
         for await (let { entity, operation } of useJournal('Manifest mutations', [OPERATION.CREATE, OPERATION.UPDATE, OPERATION.DELETE])) {
             if (!entity?.id) continue
             mutatedRefs.add(entity.id)
             if (entity.meta?.href) mutatedRefs.add(entity.meta.href)
+            mutatedEntities.set(entity.id, entity)
             if (operation !== OPERATION.DELETE) {
                 currentHashes.set(entity.id, inputHashOf(entity))
             }
@@ -169,7 +175,7 @@ export async function setup(options) {
                 // render leaves the postprocess input missing on the
                 // next run. The right fix is a postprocess manifest
                 // that also skips when its output is current — Phase 3.
-                if (!options.postprocessor && runtime.manifest?.shouldSkip(entity, mutatedRefs, currentHashes)) {
+                if (!options.postprocessor && runtime.manifest?.shouldSkip(entity, mutatedRefs, currentHashes, mutatedEntities)) {
                     skipped++
                     entry.output = { success: true, skipped: 'manifest' }
                     await updateEntry({ id, output: entry.output })
@@ -189,18 +195,33 @@ export async function setup(options) {
                     ? { ...entity, meta: projectMeta(entity.meta) }
                     : entity
                 // Per-render dep tracker. Renderers running INLINE/SERIAL
-                // populate this via track.partial(id) / track.query(filter)
-                // as they resolve partials and run catalog queries. The
-                // engine reads it after render to update refs and the
-                // manifest snapshot. Worker dispatch can't share this
-                // object across thread boundaries — those renders get
+                // populate this via track.partial(id) (called from each
+                // render plugin's partial-loading hook) and track.query
+                // (called automatically by catalog query methods via the
+                // renderContext ALS established below). The engine reads
+                // it after render to update refs and the manifest
+                // snapshot. Worker dispatch can't share this object
+                // across thread boundaries — those renders get
                 // layout-only deps (added automatically below) and rely
                 // on coarser invalidation. INLINE is the default mode.
+                //
+                // Queries dedupe by JSON-serialized filter so a render
+                // that fetches `{collection:'posts'}` twenty times only
+                // contributes one closure entry.
+                const queryKeys = new Set()
                 const track = {
                     partials: new Set(),
                     queries:  [],
                     partial(target) { if (target) this.partials.add(target) },
-                    query(filter)   { if (filter) this.queries.push(filter) },
+                    query(filter) {
+                        // null = sentinel for unserializable filters
+                        // (functions / primitives) — force conservative
+                        // re-render. Dedupe by serialized form.
+                        const key = filter === null ? '__null__' : JSON.stringify(filter)
+                        if (queryKeys.has(key)) return
+                        queryKeys.add(key)
+                        this.queries.push(filter)
+                    },
                 }
                 const renderOptions = {
                     entity: renderEntity,
@@ -216,37 +237,46 @@ export async function setup(options) {
                 }
                 try {
                     let result
-                    switch (renderOptions.options.tasks) {
-                        case TASKS.INLINE:
-                            renderOptions.logger = logger
-                            renderOptions.signal = signal
-                            if (!signal.aborted) {
-                                result = await render(renderOptions)
-                            }
-                            break
-                        case TASKS.SERIAL:
-                            renderOptions.logger = logger
-                            renderOptions.signal = signal
-                            if (!signal.aborted) {
-                                result = await runtime.engine.queue.add(() => render(renderOptions), { signal })
-                            }
-                            break
-                        case TASKS.WORKER:
-                            const mc = new MessageChannel();
-                            mc.port2.onmessage = event => {
-                                const message = JSON.parse(event.data)
-                                if (message.command == 'logger') {
-                                    runtime.engine.logger[message.data.log](...message.data.args)
+                    // Wrap the dispatch in the render context so catalog
+                    // queries called anywhere inside the render (renderer
+                    // plugin, layout sidecar, helper functions) report
+                    // their filters to the track object automatically.
+                    // INLINE/SERIAL inherit the ALS through await
+                    // boundaries; WORKER mode crosses a thread boundary
+                    // so its renders don't pick up the context — they
+                    // fall back to layout-only deps.
+                    result = await renderContext.run({ entityId: entity.id, track }, async () => {
+                        switch (renderOptions.options.tasks) {
+                            case TASKS.INLINE:
+                                renderOptions.logger = logger
+                                renderOptions.signal = signal
+                                if (!signal.aborted) {
+                                    return await render(renderOptions)
                                 }
-                            }
-                            mc.port2.unref()
-                            renderOptions.port = mc.port1
-                            result = await runtime.engine.renderWorkers.run(
-                                renderOptions,
-                                { signal, transferList: [mc.port1] }
-                            )
-                            break
-                    }
+                                return undefined
+                            case TASKS.SERIAL:
+                                renderOptions.logger = logger
+                                renderOptions.signal = signal
+                                if (!signal.aborted) {
+                                    return await runtime.engine.queue.add(() => render(renderOptions), { signal })
+                                }
+                                return undefined
+                            case TASKS.WORKER:
+                                const mc = new MessageChannel();
+                                mc.port2.onmessage = event => {
+                                    const message = JSON.parse(event.data)
+                                    if (message.command == 'logger') {
+                                        runtime.engine.logger[message.data.log](...message.data.args)
+                                    }
+                                }
+                                mc.port2.unref()
+                                renderOptions.port = mc.port1
+                                return await runtime.engine.renderWorkers.run(
+                                    renderOptions,
+                                    { signal, transferList: [mc.port1] }
+                                )
+                        }
+                    })
                     if (!signal.aborted) {
                         entry.output = {
                             success: true,
@@ -258,8 +288,9 @@ export async function setup(options) {
                         // Auto layout edge first (entity.layout is the
                         // full layout entity, hash it directly); then
                         // partials reported via track (INLINE/SERIAL
-                        // only). Queries (kind:'query') wire here in
-                        // Phase 3B.
+                        // only); then catalog queries the render issued
+                        // — those carry no target/hash, only the
+                        // (normalized, serializable) filter.
                         const edges = []
                         if (entity.layout?.id) {
                             edges.push({
@@ -275,6 +306,9 @@ export async function setup(options) {
                                 target,
                                 hash: partial ? inputHashOf(partial) : undefined,
                             })
+                        }
+                        for (const filter of track.queries) {
+                            edges.push({ kind: 'query', filter })
                         }
                         entry.deps = edges
                         runtime.refs?.replaceDynamic(entity.id, edges)
