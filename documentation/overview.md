@@ -8,7 +8,7 @@ Mikser does one thing: it takes **inputs** (files, external resources, API pulls
 
 Three things to hold in your head:
 
-1. **The catalog** — the persistent registry of every entity that exists. Think: *the truth*. lowdb-backed JSON on disk.
+1. **The catalog** — the persistent registry of every entity that exists. Think: *the truth*. `Map<id, entity>` in memory, NDJSON on disk.
 2. **The journal** — the ephemeral log of operations to apply. Think: *what changed since last cycle*. SQLite-backed.
 3. **The lifecycle** — twenty-some named phases that fire in order. Plugins hook into phases. The engine doesn't decide what runs; the phases decide when.
 
@@ -43,7 +43,7 @@ runtime.process()        ◄── mutex.use() — serialized
     │     • mapper plugin runs user transforms
     │
     ├── PERSIST phase
-    │     • catalog.js applies journal entries to lowdb
+    │     • catalog.js applies journal entries to the entity Map
     │     • the entity is now "official"
     │
     ├── beforeRender phase
@@ -96,7 +96,7 @@ The most common confusion when starting out is *which artifact lives where, at w
 | Source content | `documents/` as files | `documents` plugin | `onImport` |
 | External media | `resources/` (downloaded) | `resources` plugin | `onImport` |
 | Asset variants | `assets/<preset>/` (preset outputs) | `assets` plugin | `onRender` |
-| Persistent entity registry | `catalog.json` | `catalog.js` | `onPersist` |
+| Persistent entity registry | `catalog.ndjson` | `catalog.js` | `onPersist` |
 | Per-cycle operations | `journal.sqlite` | every plugin | every phase |
 | Front-matter schemas | `schemas/` | `mikser-io-schemas` | `onValidate` |
 | Rendered HTML | `out/<route>.html` | post plugins + http server | `onRender` |

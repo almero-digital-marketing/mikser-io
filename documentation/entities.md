@@ -176,26 +176,19 @@ await updateEntry({ id: journalId, output: { success: true, result: '/out/page.h
 
 ## Catalog
 
-The catalog is a persistent JSON database of all entities across all runs. Unlike the journal (which is ephemeral), the catalog is kept between runs and used for incremental change detection.
+The catalog is a persistent registry of all entities across all runs. Unlike the journal (which is ephemeral), the catalog is kept between runs and used for incremental change detection.
 
-**Location:** `{runtimeFolder}/catalog.json`
+**Location:** `{runtimeFolder}/catalog.ndjson` (newline-delimited JSON; first line is a metadata header, one entity per line after that).
 
 ### Structure
 
-```json
-{
-  "entities": [
-    {
-      "id": "/documents/blog/post.md",
-      "collection": "documents",
-      "type": "document",
-      "format": "md",
-      "checksum": "abc123",
-      ...
-    }
-  ]
-}
 ```
+{"__meta__":true,"version":"8.2.0"}
+{"id":"/documents/blog/post.md","collection":"documents","type":"document","format":"md","checksum":"abc123", ...}
+{"id":"/documents/blog/other.md","collection":"documents", ...}
+```
+
+In memory: `runtime.catalog.byId` is a `Map<id, entity>` — O(1) lookups for refs walks, manifest edges, and the source-scan gate.
 
 ### Querying the Catalog
 
@@ -217,11 +210,18 @@ const everything = await findEntities()
 
 ### Catalog in Plugins / Render Templates
 
-The raw lowdb catalog instance is also available on the runtime:
+The raw catalog instance is also available on the runtime:
 
 ```js
-// In a plugin
-runtime.catalog.chain.get('entities').filter({ collection: 'documents' }).value()
+// In a plugin — iterate the Map directly when you need to scan
+for (const entity of runtime.catalog.byId.values()) {
+    if (entity.collection === 'documents') { /* ... */ }
+}
+
+// Or use the public ops (preferred — they go through the AsyncLocalStorage
+// query-context so refs can track dependencies)
+import { findEntities } from 'mikser-io'
+const docs = await findEntities({ collection: 'documents' })
 
 // Available as runtime.catalog in templates via the data render plugin
 ```

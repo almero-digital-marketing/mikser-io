@@ -107,7 +107,7 @@ onLoaded(async () => {
 - Loads and evaluates `mikser.config.js` (and `config/*.config.js` files)
 - Calls `loadPlugin()` for each plugin in `runtime.options.plugins`
 - Opens the SQLite journal database
-- Opens the lowdb catalog database
+- Loads the catalog from `runtime/catalog.ndjson` (or starts empty)
 
 ---
 
@@ -189,7 +189,7 @@ onPersisted(async () => {
 
 **What Mikser does here:**
 - Reads CREATE/UPDATE/DELETE operations from the journal
-- Applies them to `runtime.catalog` (the lowdb instance)
+- Applies them to `runtime.catalog.byId` (the in-memory Map)
 
 ---
 
@@ -233,7 +233,7 @@ onFinalized(async () => {
 ```
 
 **What Mikser does here:**
-- `catalog.js` writes `catalog.json` to disk
+- `catalog.js` writes `catalog.ndjson` to disk (skipped if clean)
 - `engine.js` cleans up broken symlinks in the output folder
 - `manager.js` starts scheduled cron tasks (if any)
 

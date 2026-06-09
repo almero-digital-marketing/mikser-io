@@ -611,7 +611,7 @@ export function createRefs() {
 }
 
 // Wire to the lifecycle. catalog.js registers onPersist (writes journal
-// mutations into the catalog) and onFinalized (catalog.write). We
+// mutations into the catalog) and onFinalized (catalog.save). We
 // register AFTER catalog by virtue of being imported later (engine.js
 // imports catalog first, then refs). The persist phase runs both
 // hooks; ours runs after catalog's, so by the time we rebuild the

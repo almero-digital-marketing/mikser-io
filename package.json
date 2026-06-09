@@ -40,7 +40,6 @@
 		"is-url": "^1.2.4",
 		"line-reader": "^0.4.0",
 		"lodash": "^4.18.1",
-		"lowdb": "^7.0.1",
 		"minimatch": "^10.2.5",
 		"node-cron": "^4.2.1",
 		"p-map": "^7.0.4",

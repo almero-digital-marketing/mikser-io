@@ -89,10 +89,21 @@ export async function readManifest(workdir) {
     return text.split('\n').filter(Boolean).map(line => JSON.parse(line))
 }
 
-// Convenience: read the catalog directly.
+// Convenience: read the catalog directly. NDJSON format — first line
+// is a metadata header, subsequent lines are entities. Return a shape
+// compatible with what tests expect from the old JSON-array catalog:
+// `{ version, entities: [...] }`.
 export async function readCatalog(workdir) {
-    const file = path.join(workdir, 'runtime', 'catalog.json')
+    const file = path.join(workdir, 'runtime', 'catalog.ndjson')
     if (!existsSync(file)) return null
     const { readFile } = await import('node:fs/promises')
-    return JSON.parse(await readFile(file, 'utf8'))
+    const text = await readFile(file, 'utf8')
+    const result = { version: null, entities: [] }
+    for (const line of text.split('\n')) {
+        if (!line.trim()) continue
+        const obj = JSON.parse(line)
+        if (obj.__meta__) result.version = obj.version
+        else result.entities.push(obj)
+    }
+    return result
 }

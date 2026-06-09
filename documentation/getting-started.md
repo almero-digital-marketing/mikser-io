@@ -259,7 +259,7 @@ out/
 ├── about/
 │   └── index.html      # Clean URLs produce folders
 runtime/
-├── catalog.json        # Entity catalog snapshot
+├── catalog.ndjson      # Entity catalog (NDJSON snapshot)
 ├── journal.db          # SQLite journal (temporary)
 └── render-details.json # Render results
 ```

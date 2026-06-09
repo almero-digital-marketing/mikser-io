@@ -14,7 +14,7 @@ mikser-io/
     ├── engine.js             setup() function, CLI option parsing, useLogger()
     ├── lifecycle.js          Hook registration functions + entity write helpers
     ├── journal.js            Ephemeral SQLite operation log
-    ├── catalog.js            Persistent lowdb entity registry
+    ├── catalog.js            Persistent entity registry (Map + NDJSON)
     ├── config.js             Config file loading
     ├── plugins.js            Plugin resolution and loading
     ├── manager.js            File watching and cron scheduling
@@ -63,7 +63,7 @@ runtime
 ├── options            Merged CLI + config options
 ├── config             Loaded from mikser.config.js
 ├── state              Arbitrary plugin state (runtime.state.layouts, etc.)
-├── catalog            lowdb instance (set by catalog.js)
+├── catalog            entity registry (set by catalog.js)
 ├── validators[]       Array of validation functions
 ├── mutex              Semaphore for process() serialisation
 ├── abortController    Current run's AbortController
@@ -125,7 +125,7 @@ Journal (SQLite)
      │
      ▼
 [PERSIST phase]
-  catalog.js reads journal → applies to lowdb catalog
+  catalog.js reads journal → applies to entity catalog
      │
      ▼
 Catalog (JSON)

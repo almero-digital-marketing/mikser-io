@@ -64,14 +64,12 @@ export function createHarness({
     }
 
     // Stub `runtime.catalog` so catalog.js's module-level findEntity /
-    // findEntities (and the queryEntities / readEntity / expandAndProject
-    // ops built on them) read from the harness's in-memory `entities`
-    // array. Real catalog.js's onInitialized sets up an identical shape
-    // — a lowdb instance with .data.entities and a `_.chain(catalog).get('data')`
-    // chain — but writes/persists to disk; the stub skips persistence
-    // and just wraps the local array. Pushes/mutations to `entities`
-    // are reflected on each .value() call because lodash chains hold
-    // references.
+    // findEntities / findById / queryEntities / readEntity / expand
+    // walker read from the harness's in-memory entity set. Real
+    // catalog.js's onInitialized sets up an identical shape — a
+    // Map<id, entity> with a no-op save() — but persists to disk; the
+    // stub skips persistence. Pushes/mutations to the input `entities`
+    // array land in the same Map via the constructor below.
     //
     // Set on the runtime SINGLETON imported from src/runtime.js — that's
     // what catalog.js sees. Setting it on the harness-local `runtime`
@@ -80,14 +78,15 @@ export function createHarness({
     // singleton's `.catalog`, which is fine because tests don't run in
     // parallel within a file.
     const catalogStub = {
-        data: { entities },
-        // No-op write — real catalog persists to disk via lowdb; the
-        // harness never wants disk side-effects. catalog.js's
-        // onFinalized hook calls runtime.catalog.write(), so any test
-        // that drives the full lifecycle would blow up without this.
-        write: async () => {},
+        byId: new Map(entities.filter(e => e?.id).map(e => [e.id, e])),
+        version: 'test',
+        cacheInvalidated: false,
+        // No-op save — the harness never wants disk side-effects.
+        // catalog.js's onFinalized hook calls runtime.catalog.save(),
+        // so any test that drives the full lifecycle would blow up
+        // without this.
+        save: async () => {},
     }
-    catalogStub.chain = _.chain(catalogStub).get('data')
     realRuntime.catalog = catalogStub
 
     const runtime = {

@@ -21,7 +21,7 @@ Three guarantees, documented as part of the public contract:
 
 **1. Engine infrastructure (journal, catalog) initializes during `onInitialized`, not `onLoaded`.** By the time any plugin hook runs — including `onLoad`, the earliest phase available to plugins — `runtime.create`, `runtime.update`, `runtime.delete`, `findEntity`, and `findEntities` all work. Plugin authors don't need to know which engine module loaded first.
 
-To make this work, engine.js's folder resolution (workingFolder, runtimeFolder, outputFolder) moves from `onInitialized` into `onInitialize` — the first phase. By `onInitialized`, the runtime folder exists on disk, journal.js can open its sqlite file, and catalog.js can locate its lowdb file.
+To make this work, engine.js's folder resolution (workingFolder, runtimeFolder, outputFolder) moves from `onInitialized` into `onInitialize` — the first phase. By `onInitialized`, the runtime folder exists on disk, journal.js can open its sqlite file, and catalog.js can locate its NDJSON file.
 
 **2. `runtime.update(entity)` is upsert.** If an entity with that id doesn't exist in the catalog, UPDATE creates it. If one does, UPDATE replaces it. There is no "patch-existing-only" semantic to think about; "ensure this entity is in the catalog" is one call.
 

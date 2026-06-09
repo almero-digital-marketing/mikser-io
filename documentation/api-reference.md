@@ -84,7 +84,7 @@ import { runtime } from 'mikser-io'
 | `runtime.options` | object | Merged CLI + programmatic options |
 | `runtime.config` | object | Loaded from `mikser.config.js` |
 | `runtime.state` | object | Arbitrary state set by plugins (e.g. `state.manifest` is the in-memory render manifest, `state.layouts` holds layout index + sitemap) |
-| `runtime.catalog` | object | The lowdb catalog instance |
+| `runtime.catalog` | object | The entity catalog (`{ byId: Map<id, entity>, version, cacheInvalidated, save() }`) |
 | `runtime.validators` | function[] | Registered validation functions |
 | `runtime.engine` | object | Runtime services (logger, renderWorkers, queue, commander) |
 | `runtime.engine.logger` | object | pino logger |

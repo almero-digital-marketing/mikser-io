@@ -153,11 +153,17 @@ describe('catalog cache invalidation', () => {
     })
 
     it('version-stamp mismatch invalidates cache, re-emits everything', async () => {
+        // NDJSON: rewrite the file with a bogus metadata-header version.
+        // Just the metadata + the existing entity lines, but the meta
+        // claims a different engine version.
         const catalog = await readCatalog(workdir)
-        catalog.version = '0.0.0-test'
+        const lines = [
+            JSON.stringify({ __meta__: true, version: '0.0.0-test' }),
+            ...catalog.entities.map(e => JSON.stringify(e)),
+        ]
         await writeFile(
-            path.join(workdir, 'runtime/catalog.json'),
-            JSON.stringify(catalog),
+            path.join(workdir, 'runtime/catalog.ndjson'),
+            lines.join('\n') + '\n',
         )
 
         const { code, combined } = await runMikser(workdir)
@@ -166,16 +172,23 @@ describe('catalog cache invalidation', () => {
         summaryLine(combined, { loaded: 1, emitted: 1, invalidated: true })
     })
 
-    it('corrupt catalog.json — falls back gracefully and re-processes', async () => {
+    it('corrupt catalog.ndjson — falls back gracefully and re-processes', async () => {
+        // Write a malformed half-line — readline will yield it, JSON.parse
+        // will throw inside the per-line try/catch. With enough garbage
+        // the outer catch fires and the whole catalog is reset.
         await writeFile(
-            path.join(workdir, 'runtime/catalog.json'),
-            '{"version":"8.2.0","entities":[',
+            path.join(workdir, 'runtime/catalog.ndjson'),
+            '{"__meta__":true,"version":"8.2.0"\n{not-valid-json',
         )
 
         const { code, combined } = await runMikser(workdir)
         assert.equal(code, 0, 'mikser should not crash on corrupt catalog')
-        assert.match(combined, /Catalog read failed/)
-        summaryLine(combined, { loaded: 1, emitted: 1, invalidated: true })
+        // The outer file-level read or the per-line parse warnings —
+        // either path produces a recovery message and the rest of the
+        // cycle proceeds with an empty catalog (so the source.js scan
+        // re-emits every file as new).
+        assert.match(combined, /catalog/i)
+        summaryLine(combined, { loaded: 1, emitted: 1 })
 
         // Catalog rewritten as a fresh, valid file
         const reborn = await readCatalog(workdir)

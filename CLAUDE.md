@@ -35,8 +35,8 @@ brevity.
   sqlite). Drained at onFinalized. `addEntry`/`addEntries`/`updateEntry`/
   `useJournal`/`clearJournal`. Entries deep-cloned via `structuredClone`
   on insert for snapshot semantics.
-- `catalog.js` — entity persistence via lowdb (`runtime.catalog`,
-  JSON at `runtime/catalog.json`). Public ops: `findEntity`,
+- `catalog.js` — entity persistence via `Map<id, entity>` + NDJSON at
+  `runtime/catalog.ndjson` (`runtime.catalog`). Public ops: `findEntity`,
   `findEntities`, `queryEntities`, `readEntity`, `subscribe`,
   `assertExpand`. Expand internals (`expandLimits`, `expandAndProject`,
   `findRef`) are PRIVATE.
