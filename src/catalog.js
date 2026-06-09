@@ -53,7 +53,20 @@ onInitialized(async () => {
 	// starts with an empty catalog and source plugins re-CREATE every
 	// entity — the source.js checksum gate has nothing to compare
 	// against and the savings disappear.
-	await catalog.read()
+	//
+	// Wrapped in try/catch because malformed catalog.json (truncated by
+	// a crash, hand-edited badly, partially-written on disk-full) would
+	// otherwise blow up the whole startup. Fall back to defaults and
+	// flag the cache as invalidated so the rest of the cycle treats
+	// this as "start from scratch."
+	try {
+		await catalog.read()
+	} catch (err) {
+		const logger = useLogger()
+		logger.error('Catalog read failed (%s) — starting with empty catalog', err.message)
+		catalog.data = { version: packageInfo.version, entities: [] }
+		catalog.cacheInvalidated = true
+	}
 
 	// Version-stamp gate. Catalog persists post-processing state
 	// (entity.meta populated by plugins, entity.checksum from source.js,
