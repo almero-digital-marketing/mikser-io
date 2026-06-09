@@ -332,8 +332,13 @@ export default ({
         // (which catalog.js now reads from disk at onInitialized).
         // Subsequent mutations still flow through addToSitemap in
         // onProcessed for entities that DID actually change.
+        //
+        // Filter mirrors onProcessed below: entities with a resolved
+        // layout (persisted across runs) or with an explicit
+        // meta.href (redirect-style entries with no layout). Plain
+        // catalog entities without either don't belong in the sitemap.
         for (const e of await findEntities()) {
-            if (e.meta?.href) addToSitemap(e)
+            if (e.layout || e.meta?.href) addToSitemap(e)
         }
     })
 
