@@ -67,7 +67,7 @@ onPersist(async () => {
 				// is in the catalog" can call runtime.update without a
 				// findEntity-then-branch dance. Previously a no-op when
 				// the id was new, which was a silent footgun.
-				const existing = catalog.chain.get('entities').find({ id: entity.id }).value()
+				const existing = findById(entity.id)
 				if (existing) {
 					catalog.chain.get('entities').find({ id: entity.id }).assign(entity).value()
 				} else {
@@ -91,6 +91,24 @@ export async function findEntity(query) {
 	if (!query) return
 	recordQuery(query)
 	return runtime.catalog.chain.get('entities').find(query).value()
+}
+
+// Synchronous by-id lookup. Untracked — does NOT record a query
+// dependency in queryContext, because the consumers are hot-path
+// internal modules (manifest snapshot construction, refs inverse
+// walk, catalog's own upsert check) that read the catalog for engine
+// bookkeeping, not as a render-time data dep. Returns the entity or
+// null.
+//
+// Currently sync because the underlying lowdb chain is sync. If a
+// future storage backend forces async, the change is mechanical:
+// add `async` here, then `await` at each callsite. Either way the
+// helper centralizes the "by-id" intent, vs the previous inline
+// chain construct at five sites which would need a riskier
+// fragment-by-fragment grep on swap day.
+export function findById(id) {
+	if (!id) return null
+	return runtime.catalog?.chain.get('entities').find({ id }).value() ?? null
 }
 
 export async function findEntities(query) {

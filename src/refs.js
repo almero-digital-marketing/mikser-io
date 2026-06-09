@@ -35,7 +35,7 @@ import { onInitialized, onPersist } from './lifecycle.js'
 import { useJournal } from './journal.js'
 import { OPERATION } from './constants.js'
 import { extractRefs, isRefKey, writeEntity, lookupKeys, matchesRef } from './utils.js'
-import { findEntities, findEntity } from './catalog.js'
+import { findEntities, findEntity, findById } from './catalog.js'
 
 export function createIndex() {
     // Static edges — $-keyed refs from entity.meta (ADR-0007). Rebuilt
@@ -241,8 +241,8 @@ export function createIndex() {
 //
 // `getEntityById` is injected so tests can run the subscribe/dispatch
 // machinery without a full runtime/catalog harness. In production it's
-// wired to `runtime.catalog.chain.get('entities').find({id}).value()`
-// via createRefs() below.
+// wired to catalog.findById (synchronous, untracked) via createRefs()
+// below.
 export function createSubscribers(index, getEntityById) {
     if (typeof getEntityById !== 'function') {
         throw new Error('createSubscribers: getEntityById is required')
@@ -419,11 +419,10 @@ export function createQuerySubscribers() {
 export function createRefs() {
     const index = createIndex()
     // Catalog lookup is injected so the subscribers can be tested
-    // without a runtime. In production the wired lookup is synchronous
-    // against the in-memory lowdb chain.
-    const getEntityById = (id) =>
-        runtime.catalog?.chain.get('entities').find({ id }).value()
-    const subscribers = createSubscribers(index, getEntityById)
+    // without a runtime. Production binding is catalog.findById — sync,
+    // untracked (refs's hot-path inverse walks don't want to log a
+    // query dep per BFS hop).
+    const subscribers = createSubscribers(index, findById)
     const querySubscribers = createQuerySubscribers()
 
     return {
@@ -447,7 +446,7 @@ export function createRefs() {
         // every entity that depends on any seed. Backs the layouts
         // dispatcher's "render only what mutated and its dependents"
         // path.
-        inverseClosureOf: (seeds) => index.inverseClosureOf(seeds, getEntityById),
+        inverseClosureOf: (seeds) => index.inverseClosureOf(seeds, findById),
 
         // Replace an entity's dynamic outbound edges. Called by the
         // engine after a successful render — the edges list comes from

@@ -57,6 +57,7 @@ import { useJournal } from './journal.js'
 import { OPERATION } from './constants.js'
 import { extractRefs, inputHashOf } from './utils.js'
 import { filterKey } from './track.js'
+import { findById } from './catalog.js'
 
 // Re-export so consumers that previously imported inputHashOf from
 // manifest don't break. Canonical home is utils.js.
@@ -78,13 +79,6 @@ function key(query) {
 
 function sha1(payload) {
     return crypto.createHash('sha1').update(String(payload)).digest('hex')
-}
-
-// Synchronous catalog lookup used at record time to hash refClosure
-// targets (layouts, partials) so future cycles can tell whether a
-// "mutation" was a real content change or just re-discovery.
-function lookupEntity(id) {
-    return runtime.catalog?.chain.get('entities').find({ id }).value()
 }
 
 // refClosure is the unified dependency list for a render. It mixes:
@@ -127,7 +121,7 @@ function buildRefClosure(entity, deps) {
     // conservative check.
     if (entity.meta) {
         for (const { ref } of extractRefs(entity.meta)) {
-            const target = lookupEntity(ref)
+            const target = findById(ref)
             pushTarget('ref', ref, target ? inputHashOf(target) : undefined)
         }
     }
@@ -311,7 +305,7 @@ export function createManifest() {
             }
             if (track?.partials) {
                 for (const target of track.partials) {
-                    const partial = runtime.catalog?.chain.get('entities').find({ id: target }).value()
+                    const partial = findById(target)
                     edges.push({
                         kind: 'partial',
                         target,
