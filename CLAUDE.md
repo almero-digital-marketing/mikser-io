@@ -198,18 +198,29 @@ There is **no `--mcp` CLI flag**. Activation is plugin-presence only.
   was wrong.
 - **Catalog scale ceiling: ~100MB on-disk file.** That's where the
   full-file-rewrite save crosses the human-perception threshold for
-  watch-mode rebuilds (~200-300ms save → noticeably not-instant).
-  Map+NDJSON wins on per-call findById (~30ns vs sqlite's ~10-30μs)
-  but loses on save latency once catalog file size grows. Switch
-  to the sqlite catalog driver above this size:
-  ```js
-  // mikser.config.js
-  export default { catalog: { driver: 'sqlite' } }
-  ```
-  The driver swap is invisible to plugin code — `findById`,
-  `findEntities`, `queryEntities` all keep the same shape. What
-  changes: save becomes O(mutations) per cycle instead of O(catalog),
-  startup skips the full-file load, RSS stays bounded.
+  watch-mode rebuilds (~200-300ms save → noticeably not-instant). At
+  50k realistic entities (~336MB catalog), Map+NDJSON pushes 1.17GB
+  peak RSS and 9s warm cycles — getting heavy.
+- **Sqlite is NOT the right swap-in at that scale.** We tried it
+  (one-shot driver using `node:sqlite`, prepared statements,
+  batched values()) and measured a regression on every metric at
+  both 14k and 50k realistic — warm cycles +59% slower, RSS +124%
+  to +170% larger. Reason: the engine iterates `findEntities()`
+  several times per cycle (layouts.onLoaded rebuild, source.sweep
+  Deleted, plugin lookups). Map's already-parsed in-memory walk is
+  ~100× faster than sqlite's all-rows + per-row JSON.parse. Sqlite
+  saves the catalog write cost (~1ms vs ~300ms at 100MB) but pays
+  it back many times over on every scan. A useful sqlite catalog
+  would need pushdown of common predicates (collection, type), an
+  LRU cache for hot findById, and possibly a separate hot-entity
+  in-memory partition — i.e. a different design, not a 1:1 storage
+  swap. Open question, not a planned commit.
+- What actually helps in the 100MB+ regime: trim entity weight
+  (don't store source `content` in the catalog if the renderer
+  re-reads it; don't keep computed fields you can recompute),
+  filter your `data.entities` exports so the catalog isn't
+  carrying the rendered shape, or split into multiple smaller
+  mikser builds.
 - **Profile before optimizing.** `node --cpu-prof app.js
   --working-folder test/perf --clear` produces `.cpuprofile` for
   Chrome DevTools. Intuition has a real miss rate (we shipped 3
