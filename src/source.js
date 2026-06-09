@@ -41,6 +41,8 @@ import path from 'node:path'
 import { mkdir, readFile } from 'node:fs/promises'
 import { globby } from 'globby'
 import { ACTION } from './constants.js'
+import { checksum as fileChecksum } from './utils.js'
+import { findById, findEntities } from './catalog.js'
 
 /**
  * @param {Object} options
@@ -164,10 +166,27 @@ export function useSource(core, options) {
     // right after Phase 1 in the same hook chain). 'import' for content
     // sources, so they show up under the import progress bar with the
     // other content collections.
+    //
+    // The scan also handles two cache concerns:
+    //   - Checksum gate: if the catalog already has this entity with
+    //     the same file checksum, skip emitting a CREATE — the journal
+    //     stays accurate (mutations = actual changes) and the
+    //     downstream plugin chain (front-matter, yaml, layouts, refs)
+    //     does no per-entity work for unchanged files.
+    //   - Delete sweep: any catalog entity for this collection whose
+    //     file is no longer on disk gets a DELETE — catches deletions
+    //     that happened while mikser was off (chokidar's 'unlink'
+    //     covers watch-mode, this covers the gap).
+    //
+    // Both are bypassed by --force. The gate is also bypassed when
+    // catalog.cacheInvalidated is set (engine version changed; plugin
+    // chain may have evolved).
     const scanHook = phase === 'import' ? onImport : onLoaded
     scanHook(async () => {
         if (!absFolder) return // setup didn't run (shouldn't happen)
         const logger = useLogger()
+        const scanned = new Set()
+        const stats = { loaded: 0, skipped: 0, emitted: 0, deleted: 0 }
         const files = await globby(pattern, {
             cwd: absFolder,
             absolute: true,
@@ -176,21 +195,68 @@ export function useSource(core, options) {
         })
         if (phase === 'import') trackProgress(progressLabel, files.length)
         for (const file of files) {
-            await registerFile(file, { logger })
+            await registerFile(file, { logger, scanned, stats })
             if (phase === 'import') updateProgress()
         }
-        if (phase !== 'import') {
-            logger.info('%s loaded: %d', cap, files.length)
+
+        // Delete sweep — for each catalog entity in this collection,
+        // check if the scan saw its id. If not, the file is gone.
+        // Skipped when --force is set (operator wants a full rebuild
+        // anyway; deletes still flow through the journal naturally on
+        // the rerun).
+        if (!runtime.options.force) {
+            const catalogEntities = await findEntities(e => e.collection === collection)
+            for (const e of catalogEntities) {
+                if (scanned.has(e.id)) continue
+                await deleteEntity({ id: e.id, type, collection })
+                stats.deleted++
+                logger.debug('%s removed (file gone): %s', collection, e.name)
+            }
         }
+
+        const parts = [
+            `${cap} loaded: ${files.length}`,
+            stats.emitted    ? `${stats.emitted} emitted`           : null,
+            stats.skipped    ? `${stats.skipped} unchanged`         : null,
+            stats.deleted    ? `${stats.deleted} removed`           : null,
+            runtime.options.force ? '--force' : null,
+            runtime.catalog?.cacheInvalidated ? 'cache-invalidated' : null,
+        ].filter(Boolean)
+        logger.info(parts.join(', '))
     })
 
-    async function registerFile(file, { logger, action = ACTION.CREATE } = {}) {
+    async function registerFile(file, { logger, action = ACTION.CREATE, scanned, stats } = {}) {
         const reload = action !== ACTION.CREATE
         const relativePath = path.relative(absFolder, file)
         const name = nameFromRelativePath(relativePath)
         const id = stripExtensionFromId
             ? `${prefix}/${name}`
             : `${prefix}/${relativePath.replace(/\\/g, '/')}`
+        scanned?.add(id)
+
+        // Checksum gate. Computed once and reused as the entity's
+        // `checksum` field if we proceed to emit. On cold start (no
+        // prior catalog), every file is new and the gate doesn't fire;
+        // the checksum still lands on the entity so next cycle can
+        // gate. Bypassed by --force, by cache invalidation, and by
+        // reload events (chokidar fires expressly because the file
+        // changed — no point re-checking the hash).
+        let chksum
+        const gateActive = !reload
+            && !runtime.options.force
+            && !runtime.catalog?.cacheInvalidated
+        if (gateActive) {
+            const prior = findById(id)
+            if (prior?.checksum) {
+                chksum = await fileChecksum(file)
+                if (prior.checksum === chksum) {
+                    if (stats) stats.skipped++
+                    return
+                }
+            }
+        }
+        chksum ??= await fileChecksum(file)
+
         const base = {
             id,
             name,
@@ -199,6 +265,7 @@ export function useSource(core, options) {
             format: path.extname(file).slice(1),
             uri: file,
             stamp: Date.now(),
+            checksum: chksum,
         }
         if (content) {
             try {
@@ -221,6 +288,8 @@ export function useSource(core, options) {
             // directions, so the choice is mainly semantic.
             const write = action === ACTION.UPDATE ? updateEntity : createEntity
             await write(entity)
+            if (stats) stats.emitted++
+            if (stats) stats.loaded++
             if (phase !== 'import' || reload) {
                 logger.debug('%s %s: %s', cap, reload ? 'reloaded' : 'loaded', name)
             }

@@ -324,6 +324,17 @@ export default ({
         await mkdir(runtime.options.layoutsFolder, { recursive: true })
 
         watch(collection, runtime.options.layoutsFolder)
+
+        // Rebuild the sitemap from the persisted catalog. Required
+        // because source.js's checksum gate suppresses CREATEs for
+        // unchanged files this cycle, so the sitemap can't be built
+        // from journal walks alone. Source-of-truth is the catalog
+        // (which catalog.js now reads from disk at onInitialized).
+        // Subsequent mutations still flow through addToSitemap in
+        // onProcessed for entities that DID actually change.
+        for (const e of await findEntities()) {
+            if (e.meta?.href) addToSitemap(e)
+        }
     })
 
     onImport(async () => {

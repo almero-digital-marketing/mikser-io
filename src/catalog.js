@@ -11,6 +11,7 @@ import sift from 'sift'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { expandEntity, projectMeta, matchesRef } from './utils.js'
 import { normalizeFilter } from './track.js'
+import packageInfo from '../package.json' with { type: 'json' }
 
 // Context propagated through async boundaries via Node's AsyncLocalStorage.
 // Consumers (engine's render dispatch, api plugin's per-query cache,
@@ -45,10 +46,39 @@ function recordQuery(filter) {
 onInitialized(async () => {
 	const adapter = new JSONFile(path.join(runtime.options.runtimeFolder, `catalog.json`))
 	const catalog = new Low(adapter, {
+		version: packageInfo.version,
 		entities: [],
 	})
+	// Explicit load of persisted catalog. Without this, every restart
+	// starts with an empty catalog and source plugins re-CREATE every
+	// entity — the source.js checksum gate has nothing to compare
+	// against and the savings disappear.
+	await catalog.read()
+
+	// Version-stamp gate. Catalog persists post-processing state
+	// (entity.meta populated by plugins, entity.checksum from source.js,
+	// etc.). If the engine version changed since this catalog was
+	// written, the plugin chain may have evolved and gate-aware paths
+	// should re-process every entity to capture the new behavior.
+	// `runtime.catalog.cacheInvalidated` is the signal — source.js's
+	// checksum gate consults it and bypasses; layouts dispatcher
+	// could too.
+	const persistedVersion = catalog.data?.version
+	if (persistedVersion !== packageInfo.version) {
+		catalog.cacheInvalidated = true
+	}
+	catalog.data.version = packageInfo.version
+
 	catalog.chain = _.chain(catalog).get('data')
 	runtime.catalog = catalog
+
+	if (catalog.cacheInvalidated) {
+		useLogger().notice(
+			'Catalog cache invalidated: prior=%s current=%s — re-processing this cycle',
+			persistedVersion ?? '(none)',
+			packageInfo.version,
+		)
+	}
 })
 
 onPersist(async () => {
@@ -57,16 +87,17 @@ onPersist(async () => {
 	for await (let { operation, entity } of useJournal('Catalog')) {
 		switch (operation) {
 			case OPERATION.CREATE:
-				logger.trace('Database %s %s: %s', entity.collection, operation, entity.id)
-				catalog.data.entities.push(entity)
-				break
 			case OPERATION.UPDATE: {
 				logger.trace('Database %s %s: %s', entity.collection, operation, entity.id)
-				// Upsert semantics: if the entity doesn't already exist,
-				// treat UPDATE as CREATE. Plugins that "ensure an entity
-				// is in the catalog" can call runtime.update without a
-				// findEntity-then-branch dance. Previously a no-op when
-				// the id was new, which was a silent footgun.
+				// Upsert in both directions. Required for CREATE now that
+				// the catalog persists across runs (catalog.read() at
+				// onInitialized): source plugins re-emit CREATE for every
+				// scanned file, and without upsert a warm restart would
+				// duplicate every entity. Required for UPDATE so plugins
+				// that "ensure an entity is in the catalog" can call
+				// runtime.update unconditionally without a
+				// findEntity-then-branch dance — previously a silent
+				// no-op when the id was new.
 				const existing = findById(entity.id)
 				if (existing) {
 					catalog.chain.get('entities').find({ id: entity.id }).assign(entity).value()
