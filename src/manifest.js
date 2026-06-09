@@ -73,6 +73,15 @@ const MANIFEST_FILE = 'manifest.ndjson'
 // below. One manifest per process. Values are snapshots, not entities.
 const entries = new Map()
 
+// Inverse index for pagination cleanup. Maps a paginated parent's id
+// to the set of `entries` keys belonging to its child pages. Same role
+// the layouts plugin's uriIndex plays for the sitemap: turn O(N) scans
+// in `dropEntriesWhere(snap => snap.parent === parentId)` into O(matches).
+// Without it, `lostPagination` accumulated every non-paginated render
+// on cold and the cleanup loop did N × N predicate checks for zero
+// unlinks.
+const childrenByParent = new Map()
+
 // Track whether the in-memory state has diverged from the on-disk
 // file. Lets onFinalize skip the write entirely when nothing changed
 // this cycle — the common case on warm restarts with the source.js
@@ -83,6 +92,41 @@ let dirty = false
 
 function key(query) {
     return `${query.id}:${query.destination}`
+}
+
+// All `entries` mutations go through these so `childrenByParent` stays
+// in lockstep. Direct entries.set/delete elsewhere would leak the
+// invariant.
+function setEntry(k, snap) {
+    const prev = entries.get(k)
+    if (prev?.parent && prev.parent !== snap.parent) {
+        unindexChild(prev.parent, k)
+    }
+    entries.set(k, snap)
+    if (snap.parent) indexChild(snap.parent, k)
+}
+
+function deleteEntry(k) {
+    const snap = entries.get(k)
+    if (!snap) return false
+    if (snap.parent) unindexChild(snap.parent, k)
+    return entries.delete(k)
+}
+
+function indexChild(parentId, k) {
+    let set = childrenByParent.get(parentId)
+    if (!set) {
+        set = new Set()
+        childrenByParent.set(parentId, set)
+    }
+    set.add(k)
+}
+
+function unindexChild(parentId, k) {
+    const set = childrenByParent.get(parentId)
+    if (!set) return
+    set.delete(k)
+    if (set.size === 0) childrenByParent.delete(parentId)
 }
 
 // Pure hash helpers. SHA-1 is fine here — collision resistance is not
@@ -251,7 +295,7 @@ export function createManifest() {
         // destination; ids whose destination changed leave the old key
         // behind as a stale entry that the next DELETE pass reclaims.
         record(entity, deps) {
-            entries.set(key(entity), buildSnapshot(entity, deps))
+            setEntry(key(entity), buildSnapshot(entity, deps))
             dirty = true
         },
 
@@ -264,7 +308,7 @@ export function createManifest() {
             for (const [k, value] of entries) {
                 if (value.id === id || value.parent === id) {
                     dropped.push(value.destination)
-                    entries.delete(k)
+                    deleteEntry(k)
                     dirty = true
                 }
             }
@@ -430,7 +474,7 @@ onLoaded(async () => {
                 try {
                     const snapshot = JSON.parse(line)
                     if (snapshot?.id && snapshot?.destination) {
-                        entries.set(key(snapshot), snapshot)
+                        setEntry(key(snapshot), snapshot)
                     }
                 } catch (err) {
                     logger.warn('Skipping malformed manifest line: %s', err.message)
@@ -466,9 +510,11 @@ onLoaded(async () => {
 })
 
 // Drop manifest entries matching `predicate`, unlinking their output
-// file from disk first. Used by all three onFinalized cleanup passes
-// (entity deletion, pagination shrink, pagination loss) so the
-// "match — unlink — delete" pattern lives in one place.
+// file from disk first. The generic full-scan helper — used by the
+// DELETE-journal cleanup pass below where the match key is id (and
+// we have no id-index, just a destination-suffixed key). Pagination
+// passes use `dropChildrenOf` instead, which is O(matches) via
+// `childrenByParent`.
 async function dropEntriesWhere(predicate, reason) {
     const logger = useLogger()
     for (const [k, snap] of entries) {
@@ -478,7 +524,32 @@ async function dropEntriesWhere(predicate, reason) {
             await unlink(filePath)
             logger.debug('%s: unlinked %s', reason, snap.destination)
         } catch { }
-        entries.delete(k)
+        deleteEntry(k)
+        dirty = true
+    }
+}
+
+// Drop a paginated parent's children — optionally keeping any whose
+// destination is in `keep`. O(matches) via `childrenByParent`. Returns
+// immediately for parents the index doesn't know about (the cold-path
+// case: every non-paginated render ends up in `lostPagination`, and
+// we want each of those to hit a single Map lookup rather than walk
+// the full manifest).
+async function dropChildrenOf(parentId, reason, { keep } = {}) {
+    const childKeys = childrenByParent.get(parentId)
+    if (!childKeys || childKeys.size === 0) return
+    const logger = useLogger()
+    // Snapshot the keys — `deleteEntry` mutates the underlying set.
+    for (const k of [...childKeys]) {
+        const snap = entries.get(k)
+        if (!snap) continue
+        if (keep?.has(snap.destination)) continue
+        const filePath = path.join(runtime.options.outputFolder, snap.destination)
+        try {
+            await unlink(filePath)
+            logger.debug('%s: unlinked %s', reason, snap.destination)
+        } catch { }
+        deleteEntry(k)
         dirty = true
     }
 }
@@ -535,7 +606,7 @@ onFinalize(async () => {
     for await (let { output, entity, deps } of useJournal('Output', [OPERATION.RENDER])) {
         if (output?.success && !output.skipped) {
             const outputHash = await hashOutputFile(entity.destination)
-            entries.set(key(entity), buildSnapshot(entity, deps, outputHash))
+            setEntry(key(entity), buildSnapshot(entity, deps, outputHash))
             dirty = true
         }
     }
@@ -576,16 +647,10 @@ onFinalize(async () => {
     }
 
     for (const [parentId, destinations] of newDestinationsByParent) {
-        await dropEntriesWhere(
-            snap => snap.parent === parentId && !destinations.has(snap.destination),
-            'Pagination shrunk',
-        )
+        await dropChildrenOf(parentId, 'Pagination shrunk', { keep: destinations })
     }
     for (const parentId of lostPagination) {
-        await dropEntriesWhere(
-            snap => snap.parent === parentId,
-            'Pagination dropped',
-        )
+        await dropChildrenOf(parentId, 'Pagination dropped')
     }
 
     // Skip the write entirely when nothing diverged from disk this
