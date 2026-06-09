@@ -38,7 +38,7 @@ describe('layouts plugin', () => {
             const h = createHarness({ options: { workingFolder, outputFolder: path.join(workingFolder, 'out') } })
             layoutsPlugin(h.core)
             await h.runHook('loaded')
-            assert.deepEqual(h.runtime.state.layouts, { layouts: {}, sitemap: {} })
+            assert.deepEqual(h.runtime.state.layouts, { layouts: {}, sitemap: {}, uriIndex: new Map() })
             assert.equal(h.runtime.options.layoutsFolder, path.join(workingFolder, 'layouts'))
         })
     })

@@ -121,6 +121,30 @@ export default ({
         }
     }
 
+    // Track an `href` against its source `uri` in the inverse index.
+    // Both args optional — entities without a uri (rare; mostly layouts
+    // themselves) just don't get indexed, which is fine because
+    // `removePagesFromSitemap` looks up by uri.
+    function indexHref(uri, href) {
+        if (!uri || !href) return
+        const { uriIndex } = runtime.state.layouts
+        let set = uriIndex.get(uri)
+        if (!set) {
+            set = new Set()
+            uriIndex.set(uri, set)
+        }
+        set.add(href)
+    }
+
+    function unindexHref(uri, href) {
+        if (!uri || !href) return
+        const { uriIndex } = runtime.state.layouts
+        const set = uriIndex.get(uri)
+        if (!set) return
+        set.delete(href)
+        if (set.size === 0) uriIndex.delete(uri)
+    }
+
     function addToSitemap(entity) {
         const logger = useLogger()
         const { sitemap } = runtime.state.layouts
@@ -130,6 +154,7 @@ export default ({
             let previous = sitemap[href][lang];
             if (previous && (previous.id != entity.id)) {
                 logger.warn('Entity with equal href: [%s] %s and %s', previous.collection, previous.id, entity.id);
+                unindexHref(previous.uri, href)
             }
             sitemap[href][lang] = entity
         }
@@ -137,11 +162,18 @@ export default ({
             let previous = sitemap[href];
             if (previous && (previous.id != entity.id)) {
                 logger.warn('Entity with equal href: [%s] %s and %s', previous.collection, previous.id, entity.id);
+                unindexHref(previous.uri, href)
             }
             sitemap[href] = entity
         }
+        indexHref(entity.uri, href)
     }
 
+    // Remove every sitemap entry whose entity matches by id or parent.
+    // Still a full scan because the match predicate is by id, not by
+    // href — but called rarely (only on DELETE journal entries, and
+    // the inner cleanup branch of `removePagesFromSitemap`). For the
+    // hot per-entity cleanup, see `removePagesFromSitemap`.
     function removeFromSitemap(entity) {
         const { sitemap } = runtime.state.layouts
         const matches = (current) =>
@@ -150,11 +182,13 @@ export default ({
             let entry = sitemap[href]
             if (entry.id) {
                 if (matches(entry)) {
+                    unindexHref(entry.uri, href)
                     delete sitemap[href]
                 }
             } else {
                 for (let lang in entry) {
                     if (matches(entry[lang])) {
+                        unindexHref(entry[lang].uri, href)
                         delete entry[lang]
                     }
                 }
@@ -162,13 +196,43 @@ export default ({
         }
     }
 
+    // Remove any sitemap entries previously emitted from the same source
+    // uri (the entity itself plus any paginated children). O(matches) via
+    // the inverse index — typically 0 hits on cold (the entity hasn't been
+    // added yet) and 1+ on warm restarts where the prior sitemap state
+    // was restored from the catalog.
+    //
+    // Direct delete by href — we already know the exact slot from
+    // `uriIndex`, no need to call `removeFromSitemap`'s id-based full
+    // scan. That id-based scan is for DELETE journal entries where the
+    // dispatcher only knows the entity id and has to find every sitemap
+    // entry referencing it.
     function removePagesFromSitemap(entity) {
-        const entities = Array.from(getSitemapEntities())
-        for (let current of entities) {
-            if (entity.uri == current.uri) {
-                removeFromSitemap(current)
+        const uri = entity.uri
+        if (!uri) return
+        const { sitemap, uriIndex } = runtime.state.layouts
+        const hrefs = uriIndex.get(uri)
+        if (!hrefs || hrefs.size === 0) return
+        for (const href of hrefs) {
+            const entry = sitemap[href]
+            if (!entry) continue
+            if (entry.id) {
+                delete sitemap[href]
+            } else {
+                // Lang-grouped entry: drop only the variants from this
+                // uri. Keep other-lang siblings (they belong to other
+                // source files).
+                for (const lang in entry) {
+                    if (entry[lang].uri === uri) delete entry[lang]
+                }
+                // Collapse the group if every variant left.
+                if (Object.keys(entry).length === 0) delete sitemap[href]
             }
         }
+        // Single index reset for the whole uri — cheaper than per-href
+        // `unindexHref` and correct because every href we just deleted
+        // came from this uri.
+        uriIndex.delete(uri)
     }
 
     function* getSitemapEntities() {
@@ -309,7 +373,16 @@ export default ({
 
         runtime.state.layouts = {
             layouts: {},
-            sitemap: {}
+            sitemap: {},
+            // Inverse index for `removePagesFromSitemap`. Maps an
+            // entity.uri (source-file path) to the set of sitemap
+            // hrefs that came from that uri — typically the entity
+            // itself plus its paginated children. Without this,
+            // `removePagesFromSitemap` has to scan the whole sitemap
+            // on every CREATE/UPDATE and every render dispatch,
+            // which is O(N) per call → O(N²) per cycle. With it,
+            // lookup is O(matches) — usually 0 or 1.
+            uriIndex: new Map(),
         }
 
         // Folder name resolved here (config override or default to the
