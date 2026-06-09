@@ -179,11 +179,17 @@ There is **no `--mcp` CLI flag**. Activation is plugin-presence only.
   through Piscina.
 - Current honest numbers (Apple Silicon, 4-thread default,
   in-memory journal, INLINE dispatch):
-  - 1k docs: ~800/sec (~1.25s)
-  - 10k docs: ~262/sec (~38s)
-- Bottleneck at 10k is dispatcher per-render bookkeeping (fs writes,
-  hook iteration, `structuredClone` in journal, options spread).
-  Journal itself is no longer the bottleneck.
+  - 1k docs: ~715/sec (~1.4s)
+  - 10k docs: ~840/sec (~11.9s)
+- Throughput stays roughly flat from 1k to 10k now that the layouts
+  plugin's sitemap is indexed by uri (commit f1a978e). Previously the
+  bookkeeping was O(N²) — `removePagesFromSitemap` ran on every
+  CREATE/UPDATE and every render dispatch, each time scanning the full
+  sitemap. At 10k that was ~70% of cold wall-clock. Profile confirmed.
+- Remaining cold time is dominated by handlebars template compilation
+  in workers (~30%) and idle/GC. The dispatcher itself is a tiny
+  slice — earlier "dispatcher per-render bookkeeping" hypothesis
+  was wrong.
 - **Profile before optimizing.** `node --cpu-prof app.js
   --working-folder test/perf --clear` produces `.cpuprofile` for
   Chrome DevTools. Intuition has a real miss rate (we shipped 3
