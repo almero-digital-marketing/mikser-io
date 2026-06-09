@@ -316,11 +316,50 @@ populate at each phase boundary:
   per-phase transactions, the longest transaction scales with entity
   count, not build wall-time.
 
+- **Config-driven indexes with engine defaults; user config is
+  additive.** Engine ships with a fixed list of indexed dimensions
+  for the fields engine code itself queries; user config appends
+  project-specific dimensions on top. No auto-discovery, no schema
+  mutation at runtime — schemas stay reproducible across machines
+  and runs.
+
+  **Engine defaults** (the union with `id` as primary key gives us
+  every field the engine actually queries today, audited):
+  ```js
+  const DEFAULT_INDEXED = [
+      'collection', 'type', 'format', 'name',
+      'meta.href', 'meta.layout', 'meta.lang',
+      'time', 'uri',
+  ]
+  ```
+
+  **User config** (additive):
+  ```js
+  catalog: {
+      indexed: ['meta.status', 'meta.tags', 'meta.published'],
+  }
+  ```
+
+  Effective set at runtime = `id` (PK) ∪ `DEFAULT_INDEXED` ∪ user
+  config. Duplicates dedupe naturally — same field, same index.
+
+  **Implementation:** each indexed field gets a denormalized column
+  on `catalog_entities` (populated from the entity body at write
+  time) plus `CREATE INDEX IF NOT EXISTS`. Engine code reads columns
+  directly; the sift→SQL translator pushes structured filters down
+  to indexed columns when possible, falls back to JSON1 extract
+  for un-indexed fields.
+
+  **Observability:** debug log when a query targets a field not in
+  the effective indexed set:
+  ```
+  [catalog] Full scan: findEntities({"meta.priority": {"$gt": 5}})
+  [catalog] Field "meta.priority" is not indexed.
+  [catalog] Add to catalog.indexed if this query is hot.
+  ```
+
 ## Open questions
 
-- **Index discovery.** Do we auto-add indexes based on observed query
-  patterns, or stay strictly config-driven? Lean: config-driven for
-  v1; observability via debug logs.
 - **mikser-io-vector eventually folds into the engine database?** Phase
   4+ candidate. Out of scope for this branch. Note: vector currently
   writes to `runtime/vectors.db`; if it ever shares the engine's
