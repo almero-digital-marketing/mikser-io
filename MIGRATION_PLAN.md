@@ -239,8 +239,11 @@ characteristics documented.
   justification
 - Update README + CLAUDE.md
 - Migration notes for plugin authors (sift filter rules, useDatabase
-  access)
+  access, schema namespacing convention `<plugin>_<table>`)
 - Performance numbers across drivers + entity weights
+- Document the canonical plugin persistence pattern: `useDatabase()` +
+  `registerSchema('<plugin-name>', sql)` — same shape mikser-io-vector
+  will adopt after this branch merges
 
 ## Side-by-side perf comparison
 
@@ -358,13 +361,57 @@ populate at each phase boundary:
   [catalog] Add to catalog.indexed if this query is hot.
   ```
 
+- **Plugins reuse the engine's database connection.** Vector folds in.
+  Same pattern documented as the canonical shape for any plugin that
+  needs persistent state.
+
+  ### Mechanism
+
+  Plugins that want persistence call `useDatabase()` in their
+  `onInitialized` (or later) hook and get the engine's connection.
+  They register their tables under a namespace prefix the engine
+  validates (e.g., `vector_<storeName>`, `comments_<scope>`,
+  `search_index`). Same connection, same transactions, one backup
+  target, one schema-version stamp.
+
+  ### What this means for mikser-io-vector
+
+  - Drops its own `src/drivers/{sqlite,postgres}.js` files
+  - `createDriver({ connection, ... })` becomes `createDriver({ db, ... })`
+    where `db = useDatabase()`
+  - `runtime/vectors.db` retires; tables live in `runtime/mikser.sqlite`
+    alongside catalog/refs/manifest
+  - Vector config simplifies — no more `vector.client` /
+    `vector.connection` (engine config picks the driver)
+  - When engine driver is sqlite, vector keeps using `sqlite-vec`
+    extension; when postgres, vector uses `pgvector`. Driver selection
+    is implicit (follows engine).
+  - Cross-subsystem transactions become possible: catalog write +
+    vector embedding update in one atomic call. Worth it for "I
+    just saved an entity; its embedding is guaranteed up to date."
+
+  ### What this means for other plugins
+
+  Any plugin that needs to persist state uses the engine DB. Schema
+  namespacing convention:
+  - `catalog_*` — catalog tables (engine-owned)
+  - `manifest_*` — manifest tables (engine-owned)
+  - `<plugin-name>_*` — plugin tables (plugin-owned)
+
+  Plugins remain autonomous — a third-party plugin could still spin
+  up its own sqlite file if it wants. But the engine-shared database
+  is the documented pattern.
+
+  ### Phasing
+
+  Vector migration is sibling-repo work, lands after this branch
+  merges. Out of scope for `engine/database` — but the engine's
+  `useDatabase()` API is designed with vector's needs in mind from
+  Phase 1.
+
 ## Open questions
 
-- **mikser-io-vector eventually folds into the engine database?** Phase
-  4+ candidate. Out of scope for this branch. Note: vector currently
-  writes to `runtime/vectors.db`; if it ever shares the engine's
-  `runtime/mikser.sqlite`, transactions could span vector + catalog
-  writes. Powerful but adds coupling — defer.
+(none — all four decisions are locked in)
 
 ## Stop rules
 
