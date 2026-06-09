@@ -5,7 +5,7 @@ import _ from 'lodash'
 import sift from 'sift'
 import { useRenderer } from '../render.js'
 import { mimeForEntity, isLoopback, ExpandError, useCollection } from '../utils.js'
-import { queryEntities } from '../catalog.js'
+import { queryEntities, queryContext } from '../catalog.js'
 import { subscribe } from '../subscriptions.js'
 
 // Mongo-style operators recognised in URL query params as `<path>.$<op>=...`.
@@ -267,6 +267,21 @@ export async function sendRenderOutput(res, output, entity) {
 // endpoints can't happen.
 const cacheSubscriptions = new Map()
 
+// Per-cache-file query filter tracking. cacheKey → array of filter
+// objects (or null sentinel for unserializable filters) that the
+// request consulted while building this cache file. At catalog
+// mutation time, sift each filter against the mutated entity; on
+// match, evict that single cache file. Replaces the coarse "wipe
+// the entire endpoint directory" pass for non-expand queries.
+//
+// In-memory only — on process restart the map is empty and the
+// fallback in onFinalize coarse-clears any cache that doesn't have
+// recorded filters. Acceptable: restarts are rare, coarse-clear is
+// correct, and the next read re-warms with fresh filter tracking.
+//
+// Same key shape as cacheSubscriptions: `${endpointName}/${cacheName}`.
+const cacheFilters = new Map()
+
 // Evict a single cache file. Used by graph-driven precise invalidation.
 // Failure is logged but never throws — the next request rewrites the
 // cache regardless.
@@ -498,7 +513,15 @@ export default ({
                     // even when the caller didn't request expand. fields
                     // projection is applied after expand so dotted-path
                     // picks see the resolved structure.
-                    const { items, total } = await queryEntities({
+                    //
+                    // Wrap in queryContext.run so the catalog records
+                    // every filter the request consulted into capturedQueries.
+                    // After the cache is written below, capturedQueries
+                    // becomes the per-cache-file dep list used for precise
+                    // eviction on mutation.
+                    const capturedQueries = []
+                    const queryTrack = { query(filter) { capturedQueries.push(filter) } }
+                    const { items, total } = await queryContext.run({ track: queryTrack }, () => queryEntities({
                         filter: parsed.filter,
                         sort: parsed.sort,
                         fields: resolveFields(parsed.fields),
@@ -506,7 +529,7 @@ export default ({
                         limit,
                         expand: parsed.expand,
                         scope: query,
-                    })
+                    }))
 
                     const page = Math.floor(skip / limit) + 1
                     const totalPages = Math.ceil(total / limit) || 1
@@ -529,6 +552,7 @@ export default ({
                         const qIdx = url.indexOf('?')
                         const rawQueryString = qIdx >= 0 ? url.slice(qIdx + 1) : ''
                         const cacheName = cacheNameForQueryString(rawQueryString)
+                        const cacheKey = `${name}/${cacheName}`
                         // Fire-and-forget — the response is already sent.
                         writeQueryCache({
                             outputFolder: runtime.options.outputFolder,
@@ -539,16 +563,20 @@ export default ({
                             logger,
                         }).catch(() => {})
 
+                        // Record the filters this request consulted so
+                        // the onFinalize hook below can evict ONLY this
+                        // cache file when a mutation matches any of them.
+                        cacheFilters.set(cacheKey, capturedQueries.slice())
+
                         // Precise invalidation for expand-cached queries
                         // (ADR-0007 B9). Register a graph subscription
                         // against the same filter + expand; on any
                         // mutation in the expansion graph, the
                         // subscription evicts THIS cache file and
-                        // disposes itself. Without expand, the coarse
-                        // "any change → rebuild" pass below handles
-                        // eviction.
+                        // disposes itself. Non-expand queries get
+                        // filter-based precise invalidation via the
+                        // cacheFilters map populated above.
                         if (parsed.expand?.length && runtime.refs?.subscribeGraph) {
-                            const cacheKey = `${name}/${cacheName}`
                             // Dispose any prior subscription for this
                             // cache key — could happen if the same URL
                             // was served twice in a row without an
@@ -793,15 +821,21 @@ export default ({
 
     })
 
-    // Cache-invalidation dispatcher. Once per cycle, check if anything
-    // changed in the journal; if so, rebuild every cached endpoint.
-    // SSE dispatch is separate — see src/subscriptions.js for the
-    // transport-agnostic subscribe primitive.
+    // Cache-invalidation dispatcher. Once per cycle, walk the journal
+    // mutations and evict only the cache files whose recorded filters
+    // match the mutated entity. Replaces the previous coarse "wipe the
+    // endpoint directory on any change" pass — works for both expand
+    // and non-expand cached queries.
     //
-    // Coarse on purpose: per-endpoint scope matching would shave a few
-    // file writes off a churning catalog but adds bug surface for no
-    // real win — buildDefaultEnvelope is microseconds (in-memory sift),
-    // writeFile is milliseconds. Simpler and safer to just rebuild.
+    // Expand-cached queries also get evicted earlier via the
+    // subscribeGraph callback registered in the GET handler. Hitting
+    // an already-evicted file via rm is harmless (force:true).
+    //
+    // Cache files written before this process started (or in cycles
+    // before queryContext was available) have no entry in cacheFilters
+    // — they're covered by the safety-net pass at the end which clears
+    // any leftover files for endpoints that had ANY mutation this
+    // cycle. Coarse but bounded, and re-warms naturally.
     //
     // Hook onFinalize, NOT onFinalized — journal.js registers its own
     // clearJournal callback on onFinalized at module load, which runs
@@ -811,33 +845,63 @@ export default ({
         if (!cachedEndpoints.length || !runtime.options.outputFolder) return
         const logger = useLogger()
 
-        // Short-circuit on the first entry — we only need to know if
-        // anything changed this cycle, not iterate the rest.
-        let anyChange = false
-        for await (const _e of useJournal(
+        // Collect this cycle's mutated entities. Multiple mutations to
+        // the same id (rare but possible) collapse to the latest entity
+        // payload — exactly what we want for filter matching.
+        const mutations = []
+        for await (const { entity } of useJournal(
             'Api cache invalidation',
             [OPERATION.CREATE, OPERATION.UPDATE, OPERATION.DELETE],
             signal,
         )) {
-            anyChange = true
-            break
+            if (entity?.id) mutations.push(entity)
         }
-        if (!anyChange) return
+        if (mutations.length === 0) return
 
-        // Clear each cached endpoint's directory. Subsequent list
-        // requests re-warm the cache via the write-through path in the
-        // GET/POST handlers above. Coarse but correct — any stale entry,
-        // anywhere in the per-endpoint cache, gets dropped without us
-        // having to track which queries were affected by which entity
-        // changes.
-        //
-        // For expand-cached queries the precise eviction in the GET
-        // handler's onAffected callback has already happened (one
-        // subscribeGraph dispatch per affected cache file). This block
-        // is the safety net for cached queries WITHOUT expand. We also
-        // dispose any straggler cache subscriptions for this endpoint
-        // so they don't leak past the rebuild (next read re-registers).
+        // Precise eviction: for each tracked cache file, check whether
+        // any of its recorded filters matches any mutation. On match,
+        // evict the file, drop its filter record, dispose any sibling
+        // subscribeGraph handle.
+        const evicted = new Set()
+        for (const [cacheKey, filters] of cacheFilters) {
+            const matched = filters.some(filter =>
+                // Null filter = unserializable predicate that got into
+                // the cache — conservative: evict on any mutation.
+                !filter || mutations.some(entity => sift(filter)(entity))
+            )
+            if (!matched) continue
+
+            const slashIdx = cacheKey.indexOf('/')
+            const endpointName = cacheKey.slice(0, slashIdx)
+            const cacheName = cacheKey.slice(slashIdx + 1)
+            await evictCacheFile({
+                outputFolder: runtime.options.outputFolder,
+                base: apiBase,
+                name: endpointName,
+                cacheName,
+                logger,
+            })
+            cacheFilters.delete(cacheKey)
+            cacheSubscriptions.get(cacheKey)?.dispose()
+            cacheSubscriptions.delete(cacheKey)
+            evicted.add(cacheKey)
+        }
+
+        // Safety net: cache files written before this process started
+        // (or before any tracking was wired) have no cacheFilters entry
+        // — clear them coarsely per endpoint that saw a mutation this
+        // cycle. Once a request re-warms a file, future invalidations
+        // hit the precise path above.
         for (const ep of cachedEndpoints) {
+            // Skip endpoints that already had a precise eviction —
+            // their other cache files (if any) we have no info about,
+            // but the most common case is "one cached query per
+            // endpoint" so this conservative skip keeps the warm cache
+            // warm in the common case. If you have many cached queries
+            // per endpoint and rely on legacy untracked cache files,
+            // restart mikser to fully reset.
+            const hadPrecise = [...evicted].some(key => key.startsWith(`${ep.name}/`))
+            if (hadPrecise) continue
             await clearEndpointCache({
                 outputFolder: runtime.options.outputFolder,
                 base: apiBase,

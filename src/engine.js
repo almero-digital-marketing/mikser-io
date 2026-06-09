@@ -18,7 +18,7 @@ import packageInfo from '../package.json' with { type: 'json' }
 import { attachServerCliOptions, setupServer } from './server.js'
 import { createMikserLogger } from './logger.js'
 import { inputHashOf } from './manifest.js'
-import { _renderContext as renderContext } from './catalog.js'
+import { queryContext } from './catalog.js'
 
 export async function setup(options) {
     runtime.options.threads = options?.threads !== undefined ? options.threads : 4
@@ -237,7 +237,7 @@ export async function setup(options) {
                 }
                 try {
                     let result
-                    // Wrap the dispatch in the render context so catalog
+                    // Wrap the dispatch in the queryContext so catalog
                     // queries called anywhere inside the render (renderer
                     // plugin, layout sidecar, helper functions) report
                     // their filters to the track object automatically.
@@ -245,7 +245,7 @@ export async function setup(options) {
                     // boundaries; WORKER mode crosses a thread boundary
                     // so its renders don't pick up the context — they
                     // fall back to layout-only deps.
-                    result = await renderContext.run({ entityId: entity.id, track }, async () => {
+                    result = await queryContext.run({ entityId: entity.id, track }, async () => {
                         switch (renderOptions.options.tasks) {
                             case TASKS.INLINE:
                                 renderOptions.logger = logger
