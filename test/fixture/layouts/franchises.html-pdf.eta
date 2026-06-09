@@ -18,5 +18,6 @@
   <h1><%= it.document.meta.title %></h1>
   <p>Franchise: <strong><%= it.document.meta.franchise %></strong></p>
   <p><%= it.document.meta.body %></p>
+  <%~ include('partials/eta-footer') %>
 </body>
 </html>

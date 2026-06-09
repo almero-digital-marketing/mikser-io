@@ -12,6 +12,6 @@
             </header>
             {{ document.content | markdown }}
         </article>
-        <footer>Rendered with LiquidJS · {{ document.meta.author | default: "Mikser" }}</footer>
+        {% include 'partials/liquid-footer' %}
     </body>
 </html>
