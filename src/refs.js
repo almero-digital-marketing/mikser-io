@@ -28,6 +28,7 @@
 // `runtime.refs` independently, and the inverse-graph contract moves
 // on engine cadence (file/refs schema, not external spec).
 
+import sift from 'sift'
 import runtime from './runtime.js'
 import { useLogger } from './engine.js'
 import { onInitialized, onPersist } from './lifecycle.js'
@@ -330,6 +331,49 @@ export function createSubscribers(index, getEntityById) {
     return { add, dispatch, _subscribers: subscribers, _inverseReach: inverseReach }
 }
 
+// Filter-based subscribers. A subscriber registers `{filter, onAffected}`
+// where `filter` is a sift expression (plain object). On each cycle the
+// dispatcher walks the mutated entities; for every (subscriber, mutation)
+// pair where `sift(filter)(mutation)` returns true, onAffected fires.
+//
+// Different intent from createSubscribers (which walks the inverse-ref
+// graph rooted at filter-matching entities). subscribeQuery answers
+// "tell me when any entity matching this filter mutates" — the
+// primitive that backs live-data dashboards and the preview plugin's
+// per-cache deps. No graph walk; pure per-mutation match.
+export function createQuerySubscribers() {
+    const subscribers = new Set()
+
+    function add(sub) {
+        subscribers.add(sub)
+        const dispose = () => subscribers.delete(sub)
+        if (sub.signal) {
+            if (sub.signal.aborted) dispose()
+            else sub.signal.addEventListener('abort', dispose, { once: true })
+        }
+        return { dispose }
+    }
+
+    async function dispatch(mutations) {
+        if (subscribers.size === 0 || mutations.length === 0) return
+        for (const sub of subscribers) {
+            const matcher = sift(sub.filter)
+            for (const mutated of mutations) {
+                if (!matcher(mutated)) continue
+                try {
+                    await sub.onAffected({ mutated })
+                } catch (err) {
+                    try {
+                        useLogger().warn('runtime.refs.subscribeQuery handler threw: %s', err.message)
+                    } catch { /* no logger — silent */ }
+                }
+            }
+        }
+    }
+
+    return { add, dispatch, _subscribers: subscribers }
+}
+
 // Build the public `runtime.refs.*` surface. Tests and direct callers
 // use this factory; the engine wires it in via the lifecycle hooks
 // registered at module level below.
@@ -341,6 +385,7 @@ export function createRefs() {
     const getEntityById = (id) =>
         runtime.catalog?.chain.get('entities').find({ id }).value()
     const subscribers = createSubscribers(index, getEntityById)
+    const querySubscribers = createQuerySubscribers()
 
     return {
         // Index queries (synchronous; backed by in-memory Maps).
@@ -365,8 +410,9 @@ export function createRefs() {
         clearDynamic:   (sourceId)        => index.clearDynamic(sourceId),
 
         // Internal — for the engine's onPersist hook.
-        _rebuildFrom: (entities) => index.rebuild(entities),
-        _dispatch:    (mutations) => subscribers.dispatch(mutations),
+        _rebuildFrom:      (entities)  => index.rebuild(entities),
+        _dispatch:         (mutations) => subscribers.dispatch(mutations),
+        _dispatchQueries:  (mutations) => querySubscribers.dispatch(mutations),
 
         // Public subscribe API per ADR-0007 B9 / live-expand design.
         //
@@ -395,6 +441,32 @@ export function createRefs() {
                 throw new Error('runtime.refs.subscribeGraph: onAffected must be a function')
             }
             return subscribers.add({ filter, expand, onAffected, signal })
+        },
+
+        // Filter-based subscription. Fires onAffected({mutated}) once
+        // per mutated entity that matches `filter` (a sift expression,
+        // plain object). The complement of subscribeGraph: no graph
+        // walk, just per-mutation matching. Backs live-data dashboards
+        // and the preview plugin's per-cache invalidation.
+        //
+        //   const sub = runtime.refs.subscribeQuery({
+        //       filter: { collection: 'posts', 'meta.status': 'published' },
+        //       onAffected: ({ mutated }) => { ... },
+        //       signal,                          // optional AbortSignal
+        //   })
+        //   sub.dispose()                        // explicit teardown
+        //
+        // Returns { dispose }. If `signal` is provided, abort also
+        // disposes (with no need to call dispose explicitly).
+        subscribeQuery(opts = {}) {
+            const { filter, onAffected, signal } = opts
+            if (!filter || typeof filter !== 'object' || Array.isArray(filter)) {
+                throw new Error('runtime.refs.subscribeQuery: filter must be a sift expression object')
+            }
+            if (typeof onAffected !== 'function') {
+                throw new Error('runtime.refs.subscribeQuery: onAffected must be a function')
+            }
+            return querySubscribers.add({ filter, onAffected, signal })
         },
 
         // Atomic rename cascade. Walks the inverse index for `from`,
@@ -503,6 +575,10 @@ onPersist(async (signal) => {
     // the post-mutation graph. (A subscriber asking "who references
     // this?" should see the world as it is after this cycle's writes.)
     await runtime.refs._dispatch(mutations)
+    // Query subscribers run on the same mutation set with sift matching
+    // — no graph walk. Same post-rebuild ordering applies for symmetry,
+    // though sift never reads the graph itself.
+    await runtime.refs._dispatchQueries(mutations)
 })
 
 // Resolve a ref to an entity using the same heuristic catalog.js's
