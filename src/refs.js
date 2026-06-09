@@ -367,7 +367,7 @@ export function createSubscribers(index, getEntityById) {
         }
     }
 
-    return { add, dispatch, _subscribers: subscribers, _inverseReach: inverseReach }
+    return { add, dispatch, inverseReach }
 }
 
 // Filter-based subscribers. A subscriber registers `{filter, onAffected}`
@@ -410,7 +410,7 @@ export function createQuerySubscribers() {
         }
     }
 
-    return { add, dispatch, _subscribers: subscribers }
+    return { add, dispatch }
 }
 
 // Build the public `runtime.refs.*` surface. Tests and direct callers
@@ -424,6 +424,50 @@ export function createRefs() {
     // query dep per BFS hop).
     const subscribers = createSubscribers(index, findById)
     const querySubscribers = createQuerySubscribers()
+
+    // Persist hook lives inside the factory so it closes over the
+    // internal state (index, subscribers, querySubscribers) directly.
+    // Previously these were exposed as `_rebuildFrom` / `_dispatch` /
+    // `_dispatchQueries` on the returned object so the module-level
+    // onPersist could reach them; closure capture is cleaner. catalog.js
+    // registers onPersist for journal-to-catalog writes earlier (it's
+    // imported earlier); our hook runs after, so by the time we rebuild
+    // the index, the catalog reflects this cycle's mutations.
+    onPersist(async (signal) => {
+        const mutations = []
+        for await (let { operation, entity } of useJournal(
+            'Refs index',
+            [OPERATION.CREATE, OPERATION.UPDATE, OPERATION.DELETE],
+            signal,
+        )) {
+            mutations.push(entity)
+            if (operation === OPERATION.DELETE && entity?.id) {
+                // Drop the deleted entity's dynamic (render-time) edges
+                // so a future entity reusing the same id doesn't inherit
+                // stale partial/layout deps.
+                index.clearDynamic(entity.id)
+            }
+        }
+
+        // Rebuild the static (catalog-derived) part of the index from
+        // the post-mutation catalog. Cheap (O(n) walk over in-memory
+        // Maps); future versions can incrementalize if profiling
+        // demands it. Dynamic edges (render-time partial/layout deps)
+        // are preserved across rebuilds — they're owned by the engine,
+        // refreshed per entity at render time.
+        const entities = await findEntities()
+        index.rebuild(entities)
+
+        // Dispatch subscribers AFTER the rebuild so any inverse-walk
+        // uses the post-mutation graph. (A subscriber asking "who
+        // references this?" should see the world as it is after this
+        // cycle's writes.)
+        await subscribers.dispatch(mutations)
+        // Query subscribers run on the same mutation set with sift
+        // matching — no graph walk. Same post-rebuild ordering applies
+        // for symmetry, though sift never reads the graph itself.
+        await querySubscribers.dispatch(mutations)
+    })
 
     return {
         // Index queries (synchronous; backed by in-memory Maps).
@@ -454,11 +498,6 @@ export function createRefs() {
         // Passing an empty array clears all dynamic edges from this source.
         replaceDynamic: (sourceId, edges) => index.replaceDynamic(sourceId, edges),
         clearDynamic:   (sourceId)        => index.clearDynamic(sourceId),
-
-        // Internal — for the engine's onPersist hook.
-        _rebuildFrom:      (entities)  => index.rebuild(entities),
-        _dispatch:         (mutations) => subscribers.dispatch(mutations),
-        _dispatchQueries:  (mutations) => querySubscribers.dispatch(mutations),
 
         // Public subscribe API per ADR-0007 B9 / live-expand design.
         //
@@ -580,51 +619,6 @@ export function createRefs() {
 
 onInitialized(async () => {
     runtime.refs = createRefs()
-})
-
-onPersist(async (signal) => {
-    if (!runtime.refs) return
-    // Collect this cycle's mutations (the same iteration catalog.js
-    // uses, but observed at a separate journal cursor — useJournal
-    // is a fresh generator per call).
-    const mutations = []
-    for await (let { operation, entity } of useJournal(
-        'Refs index',
-        [OPERATION.CREATE, OPERATION.UPDATE, OPERATION.DELETE],
-        signal,
-    )) {
-        if (operation === OPERATION.DELETE) {
-            // Mutations array carries the entity-as-deleted (just id /
-            // collection / type). Subscribers receive this as `mutated`
-            // for "the thing that went away" — they decide whether to
-            // act.
-            mutations.push(entity)
-            // Drop the deleted entity's dynamic (render-time) edges so
-            // a future entity reusing the same id doesn't inherit stale
-            // partial/layout deps.
-            if (entity?.id) runtime.refs.clearDynamic(entity.id)
-        } else {
-            mutations.push(entity)
-        }
-    }
-
-    // Rebuild the static (catalog-derived) part of the index from the
-    // post-mutation catalog. Cheap (O(n) walk over in-memory Maps);
-    // future versions can incrementalize if profiling demands it.
-    // Dynamic edges (render-time partial/layout deps) are preserved
-    // across rebuilds — they're owned by the engine, refreshed per
-    // entity at render time.
-    const entities = await findEntities()
-    runtime.refs._rebuildFrom(entities)
-
-    // Dispatch subscribers AFTER the rebuild so any inverse-walk uses
-    // the post-mutation graph. (A subscriber asking "who references
-    // this?" should see the world as it is after this cycle's writes.)
-    await runtime.refs._dispatch(mutations)
-    // Query subscribers run on the same mutation set with sift matching
-    // — no graph walk. Same post-rebuild ordering applies for symmetry,
-    // though sift never reads the graph itself.
-    await runtime.refs._dispatchQueries(mutations)
 })
 
 // Resolve a ref to an entity using the same heuristic catalog.js's

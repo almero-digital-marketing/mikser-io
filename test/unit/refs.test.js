@@ -438,7 +438,7 @@ describe('createSubscribers — dispatch', () => {
             { id: '/a', meta: { $b: '/b' } },
             { id: '/b', meta: {} },
         ])
-        const reached = subs._inverseReach({ id: '/b', meta: {} }, 0)
+        const reached = subs.inverseReach({ id: '/b', meta: {} }, 0)
         assert.deepEqual([...reached.keys()], ['/b'])
         assert.equal(reached.get('/b'), 0)
     })
@@ -449,7 +449,7 @@ describe('createSubscribers — dispatch', () => {
         const c = { id: '/c', meta: {} }
         const { subs } = makeRig([a, b, c])
 
-        const reached = subs._inverseReach(c, 2)
+        const reached = subs.inverseReach(c, 2)
         // From /c: hop 0 = /c, hop 1 = /b, hop 2 = /a.
         assert.deepEqual([...reached.keys()].sort(), ['/a', '/b', '/c'])
         assert.equal(reached.get('/c'), 0)
@@ -466,7 +466,7 @@ describe('createSubscribers — dispatch', () => {
         const author  = { id: '/authors/dick.yml', meta: { href: '/authors/dick' } }
         const { subs } = makeRig([article, author])
 
-        const reached = subs._inverseReach(author, 1)
+        const reached = subs.inverseReach(author, 1)
         assert.deepEqual([...reached.keys()].sort(), ['/authors/dick.yml', '/blog/launch.md'])
     })
 

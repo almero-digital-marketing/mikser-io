@@ -388,10 +388,6 @@ export function createManifest() {
         size() {
             return entries.size
         },
-
-        // Internal accessor — module-level Map. Exposed for tests and
-        // for the lifecycle hooks below.
-        _entries: entries,
     }
 }
 
