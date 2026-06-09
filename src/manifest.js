@@ -455,6 +455,66 @@ onFinalized(async () => {
         }
     }
 
+    // Pagination cleanup. When a paginated parent re-renders with a
+    // different page count (shrunk, grew, or reverted to single-page),
+    // old child entries persist in manifest and stale files persist on
+    // disk. Track which destinations each parent emitted this cycle,
+    // then drop prior children that weren't re-emitted.
+    //
+    // Pagination conventions (from layouts.js):
+    //   - First page:       entity.id === parentId, entity.parent unset,
+    //                       entity.pages > 1
+    //   - Subsequent pages: entity.id != parentId, entity.parent set,
+    //                       entity.pages > 1
+    //   - Non-paginated:    entity.pages unset or === 1
+    //
+    // So for "parents that ran pagination this cycle" we collect both
+    // first and subsequent page destinations. For "parents that lost
+    // pagination" (was paginated, now single-page) we observe a non-
+    // paginated render of an entity that has prior `parent === id`
+    // children in manifest.
+    const newDestinationsByParent = new Map()
+    const lostPagination = new Set()
+    for await (let { output, entity } of useJournal('Pagination tracking', [OPERATION.RENDER])) {
+        if (!output?.success || output.skipped) continue
+        if (entity.pages > 1) {
+            const parentId = entity.parent ?? entity.id
+            if (!newDestinationsByParent.has(parentId)) {
+                newDestinationsByParent.set(parentId, new Set())
+            }
+            newDestinationsByParent.get(parentId).add(entity.destination)
+        } else if (!entity.parent) {
+            // Non-paginated, non-child render. If it has prior children
+            // in manifest, those need to go (parent un-paginated).
+            lostPagination.add(entity.id)
+        }
+    }
+
+    for (const [parentId, destinations] of newDestinationsByParent) {
+        for (const [k, snap] of entries) {
+            if (snap.parent === parentId && !destinations.has(snap.destination)) {
+                const filePath = path.join(runtime.options.outputFolder, snap.destination)
+                try {
+                    await unlink(filePath)
+                    logger.debug('Pagination shrunk: unlinked %s', snap.destination)
+                } catch { }
+                entries.delete(k)
+            }
+        }
+    }
+    for (const parentId of lostPagination) {
+        for (const [k, snap] of entries) {
+            if (snap.parent === parentId) {
+                const filePath = path.join(runtime.options.outputFolder, snap.destination)
+                try {
+                    await unlink(filePath)
+                    logger.debug('Pagination dropped: unlinked %s', snap.destination)
+                } catch { }
+                entries.delete(k)
+            }
+        }
+    }
+
     const manifestPath = path.join(runtime.options.runtimeFolder, MANIFEST_FILE)
     await writeFile(manifestPath, JSON.stringify(Array.from(entries.values())), 'utf8')
 })
