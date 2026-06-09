@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs'
 import { globby } from 'globby'
 import _ from 'lodash'
 import { inputHashOf } from '../manifest.js'
+import { queryContext } from '../catalog.js'
 
 // Liquid / Handlebars / Eta keywords we don't want surfaced as
 // "variables this layout references." Anything that looks like a path
@@ -522,12 +523,22 @@ export default ({
                 seeds.push(current)
             }
 
-            if (seeds.length === 0) {
+            // Opt-out: `meta.cache: false` on an entity puts it in
+            // every cycle's dispatch regardless of refs. Escape hatch
+            // for renders mikser can't track precisely (external data,
+            // sidecars with API calls, ECT partials).
+            const optOuts = new Set()
+            for (const e of allLayoutEntities) {
+                if (e.meta?.cache === false) optOuts.add(e.id)
+            }
+
+            if (seeds.length === 0 && optOuts.size === 0) {
                 entities = []
             } else {
-                const closure = runtime.refs.inverseClosureOf(seeds)
-                entities = allLayoutEntities.filter(e => closure.has(e.id))
-                logger.debug('Incremental dispatch: %d seeds → %d entities (of %d total)', seeds.length, entities.length, allLayoutEntities.length)
+                const closure = seeds.length ? runtime.refs.inverseClosureOf(seeds) : new Set()
+                entities = allLayoutEntities.filter(e => closure.has(e.id) || optOuts.has(e.id))
+                logger.debug('Incremental dispatch: %d seeds + %d opt-outs → %d entities (of %d total)',
+                    seeds.length, optOuts.size, entities.length, allLayoutEntities.length)
             }
         }
 
@@ -549,6 +560,22 @@ export default ({
             // Existence-check first so a real ERR_MODULE_NOT_FOUND inside the
             // sidecar (e.g. it imports a missing package) doesn't get swallowed
             // as "sidecar doesn't exist".
+            // Sidecar queries get tracked into a sidecarTrack so they
+            // flow into the render's refClosure as `kind: 'query'`
+            // edges. Without this, layouts whose sidecars build their
+            // data with findEntities/queryEntities would silently miss
+            // invalidations when a newly-added entity should make the
+            // listing change.
+            const sidecarTrack = {
+                queries: [],
+                queryKeys: new Set(),
+                query(filter) {
+                    const key = filter === null ? '__null__' : JSON.stringify(filter)
+                    if (this.queryKeys.has(key)) return
+                    this.queryKeys.add(key)
+                    this.queries.push(filter)
+                },
+            }
             if (existsSync(sidecarPath)) {
                 try {
                     ({ load, plugins = [] } = await import(`${sidecarPath}?stamp=${Date.now()}`))
@@ -558,7 +585,10 @@ export default ({
                 }
                 if (load) {
                     try {
-                        data = await load({ entity, findEntity, findEntities, runtime, signal })
+                        data = await queryContext.run(
+                            { entityId: entity.id, track: sidecarTrack },
+                            () => load({ entity, findEntity, findEntities, runtime, signal }),
+                        )
                     } catch (err) {
                         logger.error('Layout sidecar %s load() threw: %s', sidecarPath.replace(runtime.options.workingFolder + '/', ''), err.message)
                         throw err
@@ -612,7 +642,7 @@ export default ({
                                 postprocessor: entity.layout.postprocessor,
                                 tasks: entity.meta?.task || TASKS.INLINE
                             },
-                            context: { data, plugins }
+                            context: { data, plugins, sidecarQueries: sidecarTrack.queries }
                         })
                     }
                 }

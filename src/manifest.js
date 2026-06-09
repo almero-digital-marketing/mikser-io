@@ -52,7 +52,7 @@ import { existsSync } from 'fs'
 import sift from 'sift'
 import runtime from './runtime.js'
 import { useLogger } from './engine.js'
-import { onLoaded, onAfterRender } from './lifecycle.js'
+import { onLoaded, onFinalized } from './lifecycle.js'
 import { useJournal } from './journal.js'
 import { OPERATION } from './constants.js'
 import { extractRefs } from './utils.js'
@@ -156,7 +156,7 @@ function buildRefClosure(entity, deps) {
     return closure
 }
 
-function buildSnapshot(entity, deps) {
+function buildSnapshot(entity, deps, outputHash) {
     const snapshot = {
         id: entity.id,
         destination: entity.destination,
@@ -165,7 +165,23 @@ function buildSnapshot(entity, deps) {
         renderedAt: Date.now(),
     }
     if (entity.parent) snapshot.parent = entity.parent
+    if (outputHash) snapshot.outputHash = outputHash
     return snapshot
+}
+
+// Hash the on-disk output file for a given snapshot destination. Read
+// as a buffer (binary-safe) and SHA-1 it. Returns undefined if the
+// file doesn't exist or can't be read — `mikser --verify` treats that
+// as a missing-output error separately.
+async function hashOutputFile(destination) {
+    if (!destination) return undefined
+    const filePath = path.join(runtime.options.outputFolder, destination)
+    try {
+        const buf = await readFile(filePath)
+        return sha1(buf)
+    } catch {
+        return undefined
+    }
 }
 
 export function createManifest() {
@@ -206,6 +222,11 @@ export function createManifest() {
         // refs that didn't resolve at record time) fall back to the
         // conservative "any mutation invalidates" rule.
         shouldSkip(entity, mutatedRefs, currentHashes, mutatedEntities) {
+            // Per-entity opt-out: `meta.cache: false` declares the
+            // entity unconditionally non-skippable. Escape hatch for
+            // renders with deps mikser can't see (external API calls,
+            // time-sensitive helpers, ECT partials we don't track).
+            if (entity?.meta?.cache === false) return false
             const snapshot = this.lookup(entity)
             if (!snapshot?.inputHash) return false
             if (inputHashOf(entity) !== snapshot.inputHash) return false
@@ -259,6 +280,65 @@ export function createManifest() {
         // Iterable of all currently-recorded snapshots.
         all() {
             return entries.values()
+        },
+
+        // Walk the output folder against recorded snapshots, returning
+        // a diff describing:
+        //   - missing[]    — snapshots whose output file is gone
+        //   - mismatched[] — files whose current hash differs from the
+        //                    recorded outputHash (corruption/tampering/
+        //                    out-of-band edit)
+        //   - orphaned[]   — output files not claimed by any snapshot
+        //                    (stale outputs from prior runs that were
+        //                    never reclaimed)
+        //   - unverifiable[] — snapshots without an outputHash field
+        //                    (older records or content that couldn't
+        //                    be hashed at render time)
+        //
+        // Backs `mikser --verify`. Pure: no mutations, no filesystem
+        // changes. Caller decides whether to report-and-exit, prune,
+        // or re-render.
+        async verify({ outputFolder } = {}) {
+            outputFolder = outputFolder || runtime.options.outputFolder
+            const missing = []
+            const mismatched = []
+            const unverifiable = []
+            const claimed = new Set()
+            for (const snap of entries.values()) {
+                if (!snap.destination) continue
+                claimed.add(snap.destination.replace(/^\/+/, ''))
+                const filePath = path.join(outputFolder, snap.destination)
+                if (!existsSync(filePath)) {
+                    missing.push({ id: snap.id, destination: snap.destination })
+                    continue
+                }
+                if (!snap.outputHash) {
+                    unverifiable.push({ id: snap.id, destination: snap.destination })
+                    continue
+                }
+                try {
+                    const buf = await readFile(filePath)
+                    if (sha1(buf) !== snap.outputHash) {
+                        mismatched.push({ id: snap.id, destination: snap.destination })
+                    }
+                } catch {
+                    missing.push({ id: snap.id, destination: snap.destination })
+                }
+            }
+            // Walk output folder for orphans. Defer the import so the
+            // verify path stays optional at module load time.
+            const { globby } = await import('globby')
+            const onDisk = await globby('**/*', {
+                cwd: outputFolder,
+                onlyFiles: true,
+                followSymbolicLinks: false,
+            })
+            const orphaned = []
+            for (const rel of onDisk) {
+                if (claimed.has(rel)) continue
+                orphaned.push({ path: rel })
+            }
+            return { missing, mismatched, unverifiable, orphaned }
         },
 
         size() {
@@ -319,9 +399,18 @@ onLoaded(async () => {
     }
 })
 
-onAfterRender(async () => {
+onFinalized(async () => {
     const logger = useLogger()
 
+    // Persist manifest at the very end of the cycle so:
+    //   1. Postprocess-modified outputs are captured by outputHash
+    //      (post-mjml overwrites the render HTML, post-pdf produces a
+    //      sibling file). Hashing here means `mikser --verify` checks
+    //      against the *final* on-disk state, not the intermediate
+    //      render output.
+    //   2. Deleted entities get their orphan files unlinked after
+    //      everything that might still need them has run.
+    //
     // Unlink stale output files for entities deleted in this cycle and
     // prune them from the manifest. Matches by `entity.id` for direct
     // hits and by `entity.parent` so paginated children (whose id was
@@ -349,9 +438,20 @@ onAfterRender(async () => {
     // snapshot intact — the entity didn't re-render, so its deps haven't
     // changed and rebuilding the snapshot with empty deps would erase
     // last cycle's partial/layout tracking.
+    //
+    // outputHash is taken from the file on disk AT END OF CYCLE — by
+    // which point postprocess has run, intermediates are gone, and the
+    // entity's `destination` either points at the final file (e.g.
+    // post-mjml leaves HTML at the render destination) or at a file
+    // that's been consumed (post-pdf renames to .pdf). In the latter
+    // case hashOutputFile returns undefined and the snapshot is
+    // recorded without an outputHash — `mikser --verify` will mark
+    // those as unverifiable (warning, not error) since they're
+    // expected for postprocess-bound entities.
     for await (let { output, entity, deps } of useJournal('Output', [OPERATION.RENDER])) {
         if (output?.success && !output.skipped) {
-            entries.set(key(entity), buildSnapshot(entity, deps))
+            const outputHash = await hashOutputFile(entity.destination)
+            entries.set(key(entity), buildSnapshot(entity, deps, outputHash))
         }
     }
 

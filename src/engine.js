@@ -49,6 +49,7 @@ export async function setup(options) {
             .option('-o --output-folder <folder>', 'set mikser output folder relative to working folder', 'out')
             .option('-w --watch', 'watch entities for changes', false)
             .option('-f --force', 'rebuild everything; disable incremental dispatch', false)
+            .option('--verify', 'verify output folder against manifest; report drift instead of building', false)
             .option('-d --debug', 'display debug statements')
             .option('-t --trace', 'display trace statements')
             .option('-e --runtime-folder <folder>', 'set mikser runtime folder relative to working folder', 'runtime')
@@ -115,6 +116,40 @@ export async function setup(options) {
     onLoaded(async () => {
         const logger = useLogger()
         logger.debug(runtime.options, 'Mikser options')
+
+        // --verify is a standalone read-only mode. Manifest has already
+        // loaded in its own onLoaded (registered earlier at module
+        // import). We diff disk against snapshots, print the report,
+        // and exit. No build phases run.
+        //
+        // Exit codes match common CI conventions:
+        //   0 — clean (output matches manifest exactly)
+        //   1 — warnings (orphan files or unverifiable entries — no
+        //                 corruption, but state is messy)
+        //   2 — errors   (missing or mismatched files — output is
+        //                 actually wrong on disk)
+        if (runtime.options.verify) {
+            if (!runtime.manifest) {
+                logger.error('Verify: no manifest available — nothing to check against')
+                process.exit(2)
+            }
+            const diff = await runtime.manifest.verify()
+            const { missing, mismatched, unverifiable, orphaned } = diff
+
+            const total = runtime.manifest.size()
+            const errors = missing.length + mismatched.length
+            const warnings = orphaned.length + unverifiable.length
+
+            for (const e of missing)     logger.error('Missing:    %s (entity %s)', e.destination, e.id)
+            for (const e of mismatched)  logger.error('Mismatched: %s (entity %s)', e.destination, e.id)
+            for (const e of unverifiable) logger.warn('No hash:    %s (entity %s)', e.destination, e.id)
+            for (const e of orphaned)    logger.warn('Orphan:     %s', e.path)
+
+            const verdict = errors > 0 ? 'FAIL' : (warnings > 0 ? 'WARN' : 'OK')
+            logger.notice('Verify %s: %d snapshots, %d missing, %d mismatched, %d unverifiable, %d orphaned',
+                verdict, total, missing.length, mismatched.length, unverifiable.length, orphaned.length)
+            process.exit(errors > 0 ? 2 : (warnings > 0 ? 1 : 0))
+        }
     })
 
     onRender(async (signal) => {
@@ -309,6 +344,15 @@ export async function setup(options) {
                             })
                         }
                         for (const filter of track.queries) {
+                            edges.push({ kind: 'query', filter })
+                        }
+                        // Sidecar queries — collected at layouts.onBeforeRender
+                        // when the sidecar's `load()` ran inside queryContext.
+                        // Threaded through the render task's context so the
+                        // engine can merge them with template-time queries into
+                        // a single snapshot closure. Dedupe handled by manifest's
+                        // buildRefClosure.
+                        for (const filter of (context?.sidecarQueries ?? [])) {
                             edges.push({ kind: 'query', filter })
                         }
                         entry.deps = edges
