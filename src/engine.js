@@ -48,6 +48,7 @@ export async function setup(options) {
             .option('-r --clear', 'clear current state before execution', false)
             .option('-o --output-folder <folder>', 'set mikser output folder relative to working folder', 'out')
             .option('-w --watch', 'watch entities for changes', false)
+            .option('-f --force', 'rebuild everything; disable incremental dispatch', false)
             .option('-d --debug', 'display debug statements')
             .option('-t --trace', 'display trace statements')
             .option('-e --runtime-folder <folder>', 'set mikser runtime folder relative to working folder', 'runtime')

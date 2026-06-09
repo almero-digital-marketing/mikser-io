@@ -3,6 +3,7 @@ import { mkdir, writeFile, unlink, rmdir, readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { globby } from 'globby'
 import _ from 'lodash'
+import { inputHashOf } from '../manifest.js'
 
 // Liquid / Handlebars / Eta keywords we don't want surfaced as
 // "variables this layout references." Anything that looks like a path
@@ -450,9 +451,87 @@ export default ({
     onBeforeRender(async (signal) => {
         const logger = useLogger()
         const tasks = []
-        const entities = Array.from(getSitemapEntities())
-            .filter(entity => entity.layout)
-            .sort((a, b) => b.time - a.time)
+
+        // Sitemap entities with a matched layout are the full universe of
+        // render candidates. `--force` (or a missing refs index) walks all
+        // of them — the old behaviour, kept as a safety net.
+        const allLayoutEntities = Array.from(getSitemapEntities()).filter(e => e.layout)
+
+        let entities
+        if (runtime.options.force || !runtime.refs?.inverseClosureOf) {
+            entities = allLayoutEntities
+            if (runtime.options.force) logger.debug('Force rebuild — dispatching all %d entities', entities.length)
+        } else {
+            // Hash-aware seeding: drop CREATE/UPDATE entries whose
+            // post-processing inputHash matches the last manifest
+            // snapshot. Cold-start file discovery emits CREATE for
+            // every file even when content didn't change — without
+            // this filter, every restart would seed every entity and
+            // the closure walk would expand to the whole catalog.
+            // DELETE seeds always count.
+            //
+            // Journal CREATE/UPDATE entries carry the *raw* entity
+            // (file bytes + uri, before front-matter / yaml extraction
+            // populate entity.meta). Hashes recorded in the manifest
+            // are over the *processed* entity. We resolve through the
+            // catalog to get the post-processing version for the hash
+            // compare.
+            //
+            // Build an id → recorded inputHash Map up front so per-
+            // mutation lookup is O(1). Paginated outputs share an id
+            // with the parent; we keep the first-seen hash (they were
+            // all written from the same parent's render, same inputHash).
+            const recordedHashes = new Map()
+            if (runtime.manifest) {
+                for (const snap of runtime.manifest.all()) {
+                    // The rendered entity's own inputHash.
+                    if (!recordedHashes.has(snap.id) && snap.inputHash) {
+                        recordedHashes.set(snap.id, snap.inputHash)
+                    }
+                    // Dep target hashes — layouts/partials/$-ref targets
+                    // recorded at last render. Lets us hash-filter
+                    // support entities (layouts, partials, authors) that
+                    // never produce output themselves but appear in
+                    // consumers' closures.
+                    for (const dep of snap.refClosure ?? []) {
+                        if (dep.kind === 'query') continue
+                        if (dep.target && dep.hash && !recordedHashes.has(dep.target)) {
+                            recordedHashes.set(dep.target, dep.hash)
+                        }
+                    }
+                }
+            }
+
+            const seenSeeds = new Set()
+            const seeds = []
+            for await (let { entity, operation } of useJournal(
+                'Layouts dispatch',
+                [OPERATION.CREATE, OPERATION.UPDATE, OPERATION.DELETE],
+                signal,
+            )) {
+                if (!entity?.id || seenSeeds.has(entity.id)) continue
+                if (operation === OPERATION.DELETE) {
+                    seenSeeds.add(entity.id)
+                    seeds.push(entity)
+                    continue
+                }
+                const current = await findEntity({ id: entity.id }) ?? entity
+                const priorHash = recordedHashes.get(current.id)
+                if (priorHash && inputHashOf(current) === priorHash) continue
+                seenSeeds.add(current.id)
+                seeds.push(current)
+            }
+
+            if (seeds.length === 0) {
+                entities = []
+            } else {
+                const closure = runtime.refs.inverseClosureOf(seeds)
+                entities = allLayoutEntities.filter(e => closure.has(e.id))
+                logger.debug('Incremental dispatch: %d seeds → %d entities (of %d total)', seeds.length, entities.length, allLayoutEntities.length)
+            }
+        }
+
+        entities.sort((a, b) => b.time - a.time)
 
         for (let original of entities) {
             if (signal.aborted) return

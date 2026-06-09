@@ -296,6 +296,27 @@ onLoaded(async () => {
             logger.warn('Could not load manifest.json: %s', err.message)
         }
     }
+
+    // Replay each snapshot's refClosure into runtime.refs so the
+    // first post-restart cycle's inverseClosureOf returns correctly.
+    // Without this, dynamic layout/partial edges live only in memory
+    // and reset to empty every restart — incremental dispatch would
+    // miss every consumer until that consumer re-renders, producing
+    // silent stale output. (refExtract for $-key refs is rebuilt from
+    // catalog by refs.js's onPersist; we replay only layout/partial.
+    // Query edges don't carry a target, so they have nothing to
+    // populate in the inverse index — sift matching is independent.)
+    if (runtime.refs?.replaceDynamic) {
+        for (const snapshot of entries.values()) {
+            const edges = []
+            for (const entry of snapshot.refClosure ?? []) {
+                if (entry.kind === 'layout' || entry.kind === 'partial') {
+                    if (entry.target) edges.push({ kind: entry.kind, target: entry.target })
+                }
+            }
+            if (edges.length) runtime.refs.replaceDynamic(snapshot.id, edges)
+        }
+    }
 })
 
 onAfterRender(async () => {

@@ -167,6 +167,65 @@ export function createIndex() {
         }
     }
 
+    // Transitive inverse-closure walk from a set of seed entities.
+    // Returns Set<entityId> — every entity that transitively depends
+    // on any seed, via either static $-ref edges or dynamic
+    // layout/partial edges. The seeds themselves are included.
+    //
+    // Each seed contributes three lookup keys (id, meta.href, id with
+    // its extension stripped) — matching the canonical resolution the
+    // schemas plugin / findRef use, so authors who write
+    // `$author: /authors/jane` reach the entity at
+    // `/documents/authors/jane.yml` regardless of which form the
+    // referrer happens to use.
+    //
+    // Layouts dispatcher uses this to constrain its render queue to
+    // the change closure, instead of walking the full sitemap every
+    // cycle. Cycle-safe via the result Set (a node visited once is
+    // never revisited even when reached from multiple keys).
+    function inverseClosureOf(seeds, getEntityById) {
+        const closure = new Set()
+        const keysToWalk = []
+
+        function queueKeys(id, hrefOrUndefined) {
+            keysToWalk.push(id)
+            if (hrefOrUndefined) keysToWalk.push(hrefOrUndefined)
+            if (typeof id === 'string') {
+                const stripped = id.replace(/\.[^./]+$/, '')
+                if (stripped !== id) keysToWalk.push(stripped)
+            }
+        }
+
+        for (const seed of seeds ?? []) {
+            const entity = typeof seed === 'string' ? null : seed
+            const id = entity?.id ?? (typeof seed === 'string' ? seed : null)
+            if (!id) continue
+            if (closure.has(id)) continue
+            closure.add(id)
+            queueKeys(id, entity?.meta?.href)
+        }
+
+        while (keysToWalk.length > 0) {
+            const key = keysToWalk.shift()
+            const inboundRefs = inboundFor(key)
+            const inboundDyn  = dynamicInboundFor(key)
+            for (const { id } of inboundRefs) {
+                if (closure.has(id)) continue
+                closure.add(id)
+                const entity = getEntityById?.(id)
+                queueKeys(id, entity?.meta?.href)
+            }
+            for (const { id } of inboundDyn) {
+                if (closure.has(id)) continue
+                closure.add(id)
+                const entity = getEntityById?.(id)
+                queueKeys(id, entity?.meta?.href)
+            }
+        }
+
+        return closure
+    }
+
     return {
         rebuild,
         indexEntity,
@@ -179,6 +238,7 @@ export function createIndex() {
         clearDynamic,
         dynamicOutboundFor,
         dynamicInboundFor,
+        inverseClosureOf,
     }
 }
 
@@ -401,6 +461,14 @@ export function createRefs() {
         // one of 'layout', 'partial', 'query'.
         dynamicOutboundFor: (id)     => index.dynamicOutboundFor(id),
         dynamicInboundFor:  (target) => index.dynamicInboundFor(target),
+
+        // Transitive inverse closure across both static $-ref edges and
+        // dynamic layout/partial edges. Seeds may be entities (preferred
+        // — get all lookup variants) or raw ids. Returns Set<id> of
+        // every entity that depends on any seed. Backs the layouts
+        // dispatcher's "render only what mutated and its dependents"
+        // path.
+        inverseClosureOf: (seeds) => index.inverseClosureOf(seeds, getEntityById),
 
         // Replace an entity's dynamic outbound edges. Called by the
         // engine after a successful render — the edges list comes from
