@@ -92,8 +92,12 @@ access patterns AND the storage — not just the storage.
     reads. Test that --verify works while a long-running watch process
     is open.
 13. **Schema migrations.** Until v10: drop `runtime/`, rebuild. After v10:
-    real migration scripts. Design the initial schema with future change
-    in mind — numbered version, additive-only discipline.
+    revisit if a real scenario forces it (production postgres with
+    editorial content, multi-instance coordinated upgrade, schema change
+    that needs to preserve data). Initial design uses inline
+    `CREATE IF NOT EXISTS` + a `meta.schema_version` stamp; mismatched
+    version fails loud with "run mikser --clear". No migration framework
+    until we have evidence we need one.
 14. **Native sqlite dep install story.** `better-sqlite3` ships prebuilt
     binaries for common Node + platform combos; exotic environments
     (musl libc, very new Node releases without prebuilts yet) may need
@@ -276,11 +280,24 @@ populate at each phase boundary:
   the codebase, `.iterate()` available for lazy result streaming,
   `db.function()` available for sift→SQL escape hatches.
 
+- **No migration framework. Inline `CREATE IF NOT EXISTS` + schema
+  version stamp.** Mikser's catalog is a derived cache rebuildable
+  from source files; each project has its own self-contained
+  `runtime/mikser.sqlite`. Versioned migrations earn their keep in
+  multi-tenant production where data can't be regenerated — not here.
+  The driver's `open()` hook:
+  - Runs idempotent `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT
+    EXISTS` statements (the schema lives in the driver source, reviewed
+    in PRs like any other code).
+  - Reads `meta.schema_version`. On mismatch with the current engine
+    constant, throws with a clear message: "Database schema is X; this
+    mikser-io expects Y. Run `mikser --clear` to rebuild from sources."
+  - Writes its own version stamp on first open.
+  Same shape as today's catalog version stamp (`cacheInvalidated` flips
+  on mismatch). Revisit only when a post-v10 scenario forces it.
+
 ## Open questions
 
-- **Schema migration discipline.** Versioned `migrations/NNNN-*.sql`
-  files? Inline `CREATE IF NOT EXISTS` only? Decide before Phase 1
-  schema setup.
 - **Per-cycle transaction granularity.** One transaction per cycle, or
   one transaction per onPersist? Tradeoffs: longer transaction =
   better atomicity but holds locks longer in watch-mode.
