@@ -296,11 +296,28 @@ populate at each phase boundary:
   Same shape as today's catalog version stamp (`cacheInvalidated` flips
   on mismatch). Revisit only when a post-v10 scenario forces it.
 
+- **Two transactions per cycle, one per lifecycle phase.** Render is
+  transaction-free.
+  - **`onPersist` transaction.** Applies journal CREATE/UPDATE/DELETE
+    mutations to `catalog_entities` + `catalog_refs` atomically. Closes
+    before render dispatch. Size scales with mutation count — typically
+    <10s, up to ~60s on cold 100k.
+  - **Render phase.** No transaction. Piscina workers read entities
+    (via the dispatcher's hydrated snapshots) and produce output files.
+    The DB sits at the post-onPersist committed state. Concurrent
+    readers (api plugin, MCP tools) see consistent state throughout.
+  - **`onFinalize` transaction.** Applies journal RENDER entries to
+    `manifest_snapshots`. Short — usually <10s.
+
+  This avoids the "one giant 30-minute transaction per cycle" failure
+  mode: in sqlite that grows the WAL unboundedly, blocks other writers,
+  and slows crash recovery; in postgres it blocks VACUUM, holds row
+  locks indefinitely, and breaks pgbouncer transaction pooling. With
+  per-phase transactions, the longest transaction scales with entity
+  count, not build wall-time.
+
 ## Open questions
 
-- **Per-cycle transaction granularity.** One transaction per cycle, or
-  one transaction per onPersist? Tradeoffs: longer transaction =
-  better atomicity but holds locks longer in watch-mode.
 - **Index discovery.** Do we auto-add indexes based on observed query
   patterns, or stay strictly config-driven? Lean: config-driven for
   v1; observability via debug logs.
