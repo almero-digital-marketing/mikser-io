@@ -40,9 +40,68 @@
 import path from 'node:path'
 import { mkdir, readFile } from 'node:fs/promises'
 import { globby } from 'globby'
+import runtime from './runtime.js'
 import { ACTION } from './constants.js'
 import { checksum as fileChecksum } from './utils.js'
 import { findById, findEntities } from './catalog.js'
+
+// Three building blocks shared by useSource and the layouts plugin's
+// custom scan. Extracted so the gate + sweep + summary mechanics live
+// in one place — adding a third scanning consumer in the future is a
+// matter of calling the same three helpers, not re-implementing them.
+
+// Per-file checksum gate. Returns the file's checksum so the caller
+// can stash it on the emitted entity. Returns `null` when the catalog
+// already has this entity at the same checksum and the caller should
+// skip emitting it. Bypassed by reload events (chokidar fires
+// because the file actually changed), --force, and cache
+// invalidation (engine version differs; plugin chain may have evolved).
+export async function gateChecksum(file, id, { reload = false } = {}) {
+    const canGate = !reload
+        && !runtime.options.force
+        && !runtime.catalog?.cacheInvalidated
+    if (canGate) {
+        const prior = findById(id)
+        if (prior?.checksum) {
+            const current = await fileChecksum(file)
+            if (prior.checksum === current) return null
+            return current
+        }
+    }
+    return await fileChecksum(file)
+}
+
+// Delete sweep. After a scan, walk every catalog entity in
+// `collection`; for any whose id wasn't seen in the scan, emit
+// DELETE. `onDelete(entity)` performs the actual `deleteEntity()`
+// call plus any plugin-specific cleanup (state-map removal, etc).
+// Bypassed by --force (operator wants a full rebuild; deletes still
+// flow naturally on the rebuild).
+export async function sweepDeleted(collection, scanned, onDelete) {
+    if (runtime.options.force) return 0
+    let count = 0
+    for (const e of await findEntities(e => e.collection === collection)) {
+        if (scanned.has(e.id)) continue
+        await onDelete(e)
+        count++
+    }
+    return count
+}
+
+// Summary log line shape — same across all scanning consumers so
+// log greppers and integration tests can match on a single pattern.
+// `cap` is the capitalised collection name ("Documents", "Layouts").
+export function scanSummary({ cap, loaded, emitted = 0, skipped = 0, deleted = 0 }) {
+    const parts = [
+        `${cap} loaded: ${loaded}`,
+        emitted ? `${emitted} emitted`         : null,
+        skipped ? `${skipped} unchanged`       : null,
+        deleted ? `${deleted} removed`         : null,
+        runtime.options.force ? '--force' : null,
+        runtime.catalog?.cacheInvalidated ? 'cache-invalidated' : null,
+    ].filter(Boolean)
+    return parts.join(', ')
+}
 
 /**
  * @param {Object} options
@@ -194,38 +253,26 @@ export function useSource(core, options) {
             ignore,
         })
         if (phase === 'import') trackProgress(progressLabel, files.length)
+        const scanStats = { emitted: 0, skipped: 0, deleted: 0 }
         for (const file of files) {
-            await registerFile(file, { logger, scanned, stats })
+            await registerFile(file, { logger, scanned, stats: scanStats })
             if (phase === 'import') updateProgress()
         }
 
-        // Delete sweep — for each catalog entity in this collection,
-        // check if the scan saw its id. If not, the file is gone.
-        // Skipped when --force is set (operator wants a full rebuild
-        // anyway; deletes still flow through the journal naturally on
-        // the rerun).
-        if (!runtime.options.force) {
-            const catalogEntities = await findEntities(e => e.collection === collection)
-            for (const e of catalogEntities) {
-                if (scanned.has(e.id)) continue
-                await deleteEntity({ id: e.id, type, collection })
-                stats.deleted++
-                logger.debug('%s removed (file gone): %s', collection, e.name)
-            }
-        }
+        scanStats.deleted = await sweepDeleted(collection, scanned, async (e) => {
+            await deleteEntity({ id: e.id, type, collection })
+            logger.debug('%s removed (file gone): %s', collection, e.name)
+        })
 
-        const parts = [
-            `${cap} loaded: ${files.length}`,
-            stats.emitted    ? `${stats.emitted} emitted`           : null,
-            stats.skipped    ? `${stats.skipped} unchanged`         : null,
-            stats.deleted    ? `${stats.deleted} removed`           : null,
-            runtime.options.force ? '--force' : null,
-            runtime.catalog?.cacheInvalidated ? 'cache-invalidated' : null,
-        ].filter(Boolean)
-        logger.info(parts.join(', '))
+        logger.info(scanSummary({ cap, loaded: files.length, ...scanStats }))
     })
 
-    async function registerFile(file, { logger, action = ACTION.CREATE, scanned, stats } = {}) {
+    async function registerFile(file, { logger, action = ACTION.CREATE, scanned } = {}) {
+        // stats — when called from the scanHook the outer scan provides
+        // a Map to accumulate counts. For onSync (chokidar single-file
+        // events) the counter is absent and per-file tally is not
+        // meaningful.
+        const stats = arguments[1]?.stats
         const reload = action !== ACTION.CREATE
         const relativePath = path.relative(absFolder, file)
         const name = nameFromRelativePath(relativePath)
@@ -234,28 +281,11 @@ export function useSource(core, options) {
             : `${prefix}/${relativePath.replace(/\\/g, '/')}`
         scanned?.add(id)
 
-        // Checksum gate. Computed once and reused as the entity's
-        // `checksum` field if we proceed to emit. On cold start (no
-        // prior catalog), every file is new and the gate doesn't fire;
-        // the checksum still lands on the entity so next cycle can
-        // gate. Bypassed by --force, by cache invalidation, and by
-        // reload events (chokidar fires expressly because the file
-        // changed — no point re-checking the hash).
-        let chksum
-        const gateActive = !reload
-            && !runtime.options.force
-            && !runtime.catalog?.cacheInvalidated
-        if (gateActive) {
-            const prior = findById(id)
-            if (prior?.checksum) {
-                chksum = await fileChecksum(file)
-                if (prior.checksum === chksum) {
-                    if (stats) stats.skipped++
-                    return
-                }
-            }
+        const chksum = await gateChecksum(file, id, { reload })
+        if (chksum === null) {
+            if (stats) stats.skipped++
+            return
         }
-        chksum ??= await fileChecksum(file)
 
         const base = {
             id,
@@ -289,7 +319,6 @@ export function useSource(core, options) {
             const write = action === ACTION.UPDATE ? updateEntity : createEntity
             await write(entity)
             if (stats) stats.emitted++
-            if (stats) stats.loaded++
             if (phase !== 'import' || reload) {
                 logger.debug('%s %s: %s', cap, reload ? 'reloaded' : 'loaded', name)
             }

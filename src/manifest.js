@@ -226,6 +226,7 @@ export function createManifest() {
                 if (!entry.hash) return false                     // no recorded hash → can't verify
                 const currentHash = currentHashes?.get(entry.target)
                 if (currentHash === undefined) continue           // not really in this cycle's mutations after all
+                if (currentHash === null) return false            // target was deleted → invalidate
                 if (currentHash !== entry.hash) return false      // real content change
             }
             return true

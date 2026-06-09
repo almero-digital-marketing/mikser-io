@@ -263,6 +263,74 @@ describe('multi-cycle state survives across restarts', () => {
     })
 })
 
+describe('layout & partial deletion while mikser off', () => {
+    const workdir = freshWorkdir('layout-delete')
+    after(() => cleanup(workdir))
+
+    before(async () => {
+        await setupFixture(workdir, {
+            'mikser.config.js': MINIMAL_CONFIG,
+            'documents/a.html': doc('<p>A</p>'),
+            'documents/b.html': doc('<p>B</p>'),
+            'layouts/post.hbs': POST_LAYOUT,
+            'layouts/partials/footer.hbs': FOOTER_PARTIAL,
+        })
+        await runMikser(workdir)
+        await runMikser(workdir) // settle
+    })
+
+    it('partial file deleted between runs — sweep emits DELETE, catalog cleans up, consumers loud-fail', async () => {
+        await rm(path.join(workdir, 'layouts/partials/footer.hbs'))
+
+        const { code, combined } = await runMikser(workdir)
+        assert.equal(code, 0, 'mikser process should not crash')
+        assert.match(combined, /Layouts loaded: 1.*1 removed/,
+            'sweep should emit DELETE for the missing partial')
+        assert.match(combined, /Render error/,
+            'consumers should fail loudly when their partial is gone')
+
+        const catalog = await readCatalog(workdir)
+        const partialEntries = catalog.entities.filter(
+            e => e.id === '/layouts/partials/footer.hbs',
+        )
+        assert.equal(partialEntries.length, 0,
+            'deleted partial should be gone from catalog')
+    })
+
+    it('after partial is restored to identical content — emits CREATE, but no re-render needed', async () => {
+        await writeFile(
+            path.join(workdir, 'layouts/partials/footer.hbs'),
+            FOOTER_PARTIAL,
+        )
+
+        const { code, combined } = await runMikser(workdir)
+        assert.equal(code, 0)
+        // 1 emit (the partial wasn't in catalog after the delete sweep,
+        // so source treats it as new).
+        assert.match(combined, /Layouts loaded: 2, 1 emitted, 1 unchanged/)
+        // BUT: the restored content matches the hash consumers
+        // recorded last time they successfully rendered. Dispatcher's
+        // hash-aware seeding correctly sees "same content as before" →
+        // no consumer is invalidated. The on-disk output from the
+        // failed-render cycle is broken; operator can `mikser --verify`
+        // to detect that and `--force` to repair. Not re-rendering by
+        // default is correct: nothing in the dependency graph actually
+        // changed.
+        assertRendered(combined, 0)
+    })
+
+    it('after partial is restored with NEW content — consumers invalidate and re-render', async () => {
+        await writeFile(
+            path.join(workdir, 'layouts/partials/footer.hbs'),
+            FOOTER_PARTIAL + '\n<!-- post-restore -->',
+        )
+
+        const { code, combined } = await runMikser(workdir)
+        assert.equal(code, 0)
+        assertRendered(combined, 2)
+    })
+})
+
 describe('mikser --verify', () => {
     const workdir = freshWorkdir('verify')
     after(() => cleanup(workdir))

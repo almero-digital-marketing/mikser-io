@@ -6,6 +6,7 @@ import _ from 'lodash'
 import { inputHashOf } from '../utils.js'
 import { createTrack } from '../track.js'
 import { queryContext } from '../catalog.js'
+import { gateChecksum, sweepDeleted, scanSummary } from '../source.js'
 
 // Liquid / Handlebars / Eta keywords we don't want surfaced as
 // "variables this layout references." Anything that looks like a path
@@ -325,40 +326,81 @@ export default ({
 
         watch(collection, runtime.options.layoutsFolder)
 
-        // Rebuild the sitemap from the persisted catalog. Required
-        // because source.js's checksum gate suppresses CREATEs for
-        // unchanged files this cycle, so the sitemap can't be built
-        // from journal walks alone. Source-of-truth is the catalog
-        // (which catalog.js now reads from disk at onInitialized).
-        // Subsequent mutations still flow through addToSitemap in
-        // onProcessed for entities that DID actually change.
+        // Rebuild the in-memory layouts map AND sitemap from the
+        // persisted catalog. Required because the gate (below) now
+        // suppresses CREATEs for unchanged layouts this cycle, so
+        // neither map can be built from journal walks alone. Source-
+        // of-truth is the catalog (which catalog.js reads from disk
+        // at onInitialized). Subsequent in-cycle mutations still
+        // flow through createEntity / addToSitemap / onProcessed.
         //
-        // Filter mirrors onProcessed below: entities with a resolved
-        // layout (persisted across runs) or with an explicit
-        // meta.href (redirect-style entries with no layout). Plain
-        // catalog entities without either don't belong in the sitemap.
+        // Sitemap filter mirrors onProcessed below: entities with a
+        // resolved layout (persisted across runs) or with an explicit
+        // meta.href (redirect-style entries with no layout).
+        const { layouts } = runtime.state.layouts
         for (const e of await findEntities()) {
-            if (e.layout || e.meta?.href) addToSitemap(e)
+            if (e.collection === collection) {
+                layouts[e.name] = e
+            } else if (e.layout || e.meta?.href) {
+                addToSitemap(e)
+            }
         }
     })
 
     onImport(async () => {
         const { layouts } = runtime.state.layouts
+        const logger = useLogger()
         const paths = await globby('**/*', { cwd: runtime.options.layoutsFolder, ignore: ['**/*.js'] })
+        const scanned = new Set()
+        const stats = { emitted: 0, skipped: 0, deleted: 0 }
+
+        // Same checksum gate + delete sweep mechanics as useSource
+        // (source.js) — extracted into shared helpers so adding a
+        // future scanning plugin doesn't repeat them again. Layouts
+        // can't simply USE useSource because it owns the in-memory
+        // `runtime.state.layouts.layouts` map (consumed by hbs's
+        // partial registration, by resolveLayout below, and by
+        // layouts.inspect), and the load step layers in
+        // getFormatInfo. The gate + sweep + summary line shape are
+        // shared regardless.
         for (let relativePath of paths) {
             const uri = path.join(runtime.options.layoutsFolder, relativePath)
+            const id = path.join('/layouts', relativePath)
+            scanned.add(id)
+
+            const chksum = await gateChecksum(uri, id)
+            if (chksum === null) {
+                stats.skipped++
+                continue
+            }
+
             const layout = {
-                id: path.join('/layouts', relativePath),
-                uri,
+                id, uri,
                 name: relativePath.replace(path.extname(relativePath), ''),
                 collection,
                 type,
                 content: await readLayoutContent(uri),
+                checksum: chksum,
             }
             Object.assign(layout, await getFormatInfo(relativePath))
             layouts[layout.name] = layout
             await createEntity(layout)
+            stats.emitted++
         }
+
+        stats.deleted = await sweepDeleted(collection, scanned, async (e) => {
+            // Drop the layout from the in-memory map alongside the
+            // journal DELETE so partial-resolution and consumer
+            // renders this cycle don't reach for a layout whose file
+            // is gone.
+            for (let name in layouts) {
+                if (layouts[name].id === e.id) delete layouts[name]
+            }
+            await deleteEntity({ id: e.id, type, collection })
+            logger.debug('Layouts removed (file gone): %s', e.name)
+        })
+
+        logger.info(scanSummary({ cap: 'Layouts', loaded: paths.length, ...stats }))
     })
 
     onProcessed(async (signal) => {

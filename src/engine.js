@@ -192,9 +192,18 @@ export async function setup(options) {
             mutatedRefs.add(entity.id)
             if (entity.meta?.href) mutatedRefs.add(entity.meta.href)
             mutatedEntities.set(entity.id, entity)
-            if (operation !== OPERATION.DELETE) {
-                currentHashes.set(entity.id, inputHashOf(entity))
-            }
+            // For DELETE we set `null` as the current hash so manifest.
+            // shouldSkip can distinguish "target was deleted from the
+            // catalog" from "target wasn't in this cycle's mutations
+            // at all." Without this distinction, a consumer whose
+            // refClosure points at a deleted partial/layout would
+            // silently skip re-rendering — leaving the disk output
+            // pinned to bytes that reference something no longer in
+            // the catalog.
+            currentHashes.set(
+                entity.id,
+                operation === OPERATION.DELETE ? null : inputHashOf(entity),
+            )
         }
         let skipped = 0
 
