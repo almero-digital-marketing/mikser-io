@@ -80,7 +80,7 @@ export async function gateChecksum(file, id, { reload = false } = {}) {
 export async function sweepDeleted(collection, scanned, onDelete) {
     if (runtime.options.force) return 0
     let count = 0
-    for (const e of await findEntities(e => e.collection === collection)) {
+    for (const e of await findEntities({ collection })) {
         if (scanned.has(e.id)) continue
         await onDelete(e)
         count++

@@ -70,13 +70,13 @@ export default ({
                 updateProgress()
             }
 
-            const entitiesToRemove = await findEntities(entity =>
-                entity.type == type &&
-                entity.format == format &&
-                entity.collection == collection &&
-                entity.time < syncTime &&
-                !recent.has(entity.id)
-            )
+            const entitiesToRemove = await findEntities({
+                type,
+                format,
+                collection,
+                time:  { $lt: syncTime },
+                id:    { $nin: [...recent] },
+            })
             if (entitiesToRemove.length) trackProgress(`Observer remove ${observerName}`, entitiesToRemove.length)
             for (let entity of entitiesToRemove) {
                 deleteEntity(entity)

@@ -34,7 +34,7 @@ import { useLogger } from './engine.js'
 import { onInitialized, onPersist } from './lifecycle.js'
 import { useJournal } from './journal.js'
 import { OPERATION } from './constants.js'
-import { extractRefs, isRefKey, writeEntity, lookupKeys, matchesRef } from './utils.js'
+import { extractRefs, isRefKey, writeEntity, lookupKeys, refFilter } from './utils.js'
 import { findEntities, findEntity, findById } from './catalog.js'
 
 export function createIndex() {
@@ -623,11 +623,11 @@ onInitialized(async () => {
 
 // Resolve a ref to an entity using the same heuristic catalog.js's
 // findRef uses (id / meta.href / id-minus-ext) via the shared
-// `matchesRef` predicate in utils.js. Exported so other callers can
+// `refFilter` builder in utils.js. Exported so other callers can
 // reuse the same matching rules.
 export async function refExists(ref) {
     if (!ref || typeof ref !== 'string') return false
-    const matches = await findEntities(e => matchesRef(e, ref))
+    const matches = await findEntities(refFilter(ref))
     return matches.length > 0
 }
 

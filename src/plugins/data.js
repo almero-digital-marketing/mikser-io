@@ -1,6 +1,7 @@
 import path from 'path'
 import { mkdir, writeFile, unlink } from 'fs/promises'
 import _ from 'lodash'
+import sift from 'sift'
 import pMap from 'p-map'
 
 export default ({
@@ -31,8 +32,8 @@ export default ({
         if (entitiesConfig === undefined) {
             entitiesConfig = {
                 document: {
-                    query: entity => entity.type == 'document'
-                }
+                    query: { type: 'document' },
+                },
             }
         }
         for (let entitiesName in entitiesConfig) {
@@ -65,8 +66,11 @@ export default ({
                 }
             } = entitiesConfig[entitiesName]
 
+            // `query` is a sift filter object; compiled once per
+            // entitiesName, then tested per journal entry.
+            const matchEntity = sift(query)
             for await (let { operation, entity } of useJournal('Data entities', [OPERATION.CREATE, OPERATION.UPDATE, OPERATION.DELETE])) {
-                if (query(entity)) {
+                if (matchEntity(entity)) {
                     switch (operation) {
                         case OPERATION.CREATE:
                         case OPERATION.UPDATE:
@@ -94,8 +98,8 @@ export default ({
         if (contextConfig === undefined) {
             contextConfig = {
                 context: {
-                    query: entity => entity.type == 'document'
-                }
+                    query: { type: 'document' },
+                },
             }
         }
         for (let contextName in contextConfig) {
@@ -118,8 +122,9 @@ export default ({
                 }
             } = contextConfig[contextName]
 
+            const matchEntity = sift(query)
             for await (let { entity, context } of useJournal('Data context', [OPERATION.RENDER])) {
-                if (query(entity)) {
+                if (matchEntity(entity)) {
                     logger.debug('Data export context: %s', entity.name)
                     await saveConext(entity, _.pick(await mapEntityContext(entity, context), pick || ['data']))
                 }
@@ -136,7 +141,7 @@ export default ({
                 ? path.join(runtime.options.dataFolder, token)
                 : runtime.options.dataFolder
             const {
-                query: queryEntities = entity => entity.type == 'document',
+                query: catalogFilter = { type: 'document' },
                 map: mapEntity = entity => entity,
                 pick,
                 save: saveEntities = async entities => {
@@ -146,7 +151,7 @@ export default ({
                     await writeFile(entitiesFile, JSON.stringify(entities), 'utf8')
                 }
             } = runtime.config.data?.catalog[catalogName]
-            const entities = await findEntities(queryEntities)
+            const entities = await findEntities(catalogFilter)
             await saveEntities(await pMap(entities, async entity => ({
                 refId: ('/' + entity.name.replaceAll('\\', '/')).replace(/\/index$/g, '/'),
                 name: entity.name,

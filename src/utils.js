@@ -46,15 +46,40 @@ export function lookupKeys(entity) {
 }
 
 // Predicate inverse of `lookupKeys`: does `entity` answer to `refValue`
-// via any of the three canonical forms? Used by `catalog.findRef`,
-// `catalog.refExists`, and anywhere a single sift-style lookup needs
-// to honour the same heuristic.
+// via any of the three canonical forms? Used by anywhere a per-entity
+// JS test of "does this match the ref" is needed without going through
+// the catalog (e.g. testing an in-hand entity).
+//
+// For *querying* the catalog by ref, use `refFilter(refValue)` and
+// pass the result to `findEntities` / `findEntity` — that keeps the
+// query as a structured sift filter that storage engines can index
+// instead of forcing a full scan.
 export function matchesRef(entity, refValue) {
     if (!entity || typeof refValue !== 'string') return false
     if (entity.id === refValue) return true
     if (entity.meta?.href === refValue) return true
     if (typeof entity.id === 'string' && entity.id.replace(/\.[^./]+$/, '') === refValue) return true
     return false
+}
+
+// Structured sift filter equivalent of `matchesRef`. Matches an entity
+// when its id, its meta.href, OR its id-minus-trailing-extension equals
+// `refValue`. The third clause uses a regex anchored at `refValue` and
+// matching exactly one trailing extension — the sift form of
+// `id.replace(/\.[^./]+$/, '') === refValue`.
+//
+// Keep in lockstep with `matchesRef` above. If you change one, change
+// both — tests cover the symmetry.
+export function refFilter(refValue) {
+    if (typeof refValue !== 'string') return { id: '__never__' }
+    const escaped = refValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    return {
+        $or: [
+            { id: refValue },
+            { 'meta.href': refValue },
+            { id: { $regex: `^${escaped}\\.[^./]+$` } },
+        ],
+    }
 }
 
 // Extension → mime type lookup for rendered outputs. Used anywhere an

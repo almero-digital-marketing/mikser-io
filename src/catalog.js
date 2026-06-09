@@ -30,7 +30,7 @@ import { useLogger } from './engine.js'
 import { onInitialized, onPersist, onFinalized } from './lifecycle.js'
 import { useJournal } from './journal.js'
 import { OPERATION } from './constants.js'
-import { expandEntity, projectMeta, matchesRef } from './utils.js'
+import { expandEntity, projectMeta, refFilter } from './utils.js'
 import { normalizeFilter } from './track.js'
 import packageInfo from '../package.json' with { type: 'json' }
 
@@ -172,44 +172,52 @@ export function findById(id) {
     return runtime.catalog?.byId.get(id) ?? null
 }
 
-// Find one entity by query. Query may be:
-//   - an object with `id` — fast O(1) path via Map; remaining properties
-//     filtered against the loaded entity
-//   - any other object — _.isMatch predicate, iterates byId.values()
-//   - a function — predicate, iterates byId.values()
+// Find one entity by sift filter. Two shapes:
+//   - `{id: 'foo', ...rest}` — fast O(1) path: lookup by id, then
+//     run the remaining keys as a sift filter against the result.
+//   - any other sift filter — `sift(filter)` predicate, iterates
+//     `byId.values()`.
+//
+// Function predicates aren't accepted — sift covers `$or`, `$in`,
+// `$nin`, `$gt`/`$lt`, `$regex`, dotted-path keys, etc. The structured
+// shape is the only shape so the catalog's eventual indexed backend
+// can push the filter down to storage. For inline per-entity tests
+// without going through the catalog, use a plain `if` (or `sift(...)`
+// on the filter you already have).
 export async function findEntity(query) {
-    if (!query) return
+    if (!query || typeof query !== 'object') return
     recordQuery(query)
     if (!runtime.catalog) return
 
-    if (typeof query === 'object' && query.id) {
+    if (query.id && typeof query.id === 'string') {
         const entity = runtime.catalog.byId.get(query.id)
         if (!entity) return
-        for (const [k, v] of Object.entries(query)) {
-            if (k === 'id') continue
-            if (entity[k] !== v) return
-        }
-        return entity
+        const rest = Object.fromEntries(
+            Object.entries(query).filter(([k]) => k !== 'id'),
+        )
+        if (Object.keys(rest).length === 0) return entity
+        return sift(rest)(entity) ? entity : undefined
     }
 
-    const pred = typeof query === 'function' ? query : (e) => _.isMatch(e, query)
+    const match = sift(query)
     for (const entity of runtime.catalog.byId.values()) {
-        if (pred(entity)) return entity
+        if (match(entity)) return entity
     }
     return
 }
 
-// All entities (no arg) or those matching `query` (function or
-// _.isMatch-style object). For sift-style filters with pagination and
-// expand, use queryEntities below.
+// All entities (no arg) or those matching `query` (sift filter). For
+// sift filters with pagination, sort, and expand, use `queryEntities`
+// below.
 export async function findEntities(query) {
     recordQuery(query)
     if (!runtime.catalog) return []
     if (!query) return Array.from(runtime.catalog.byId.values())
-    const pred = typeof query === 'function' ? query : (e) => _.isMatch(e, query)
+    if (typeof query !== 'object') return []
+    const match = sift(query)
     const out = []
     for (const entity of runtime.catalog.byId.values()) {
-        if (pred(entity)) out.push(entity)
+        if (match(entity)) out.push(entity)
     }
     return out
 }
@@ -219,16 +227,17 @@ export async function findEntities(query) {
 // references (ADR-0007). Used by the api plugin's HTTP handlers, the
 // mikser-io-mcp plugin's tools, and any library-mode caller.
 
-// Match the same heuristic the schemas plugin uses for ref-existence
-// checks — id, meta.href, or stripped-extension id — via the shared
-// `matchesRef` predicate. Centralised so the expand walker resolves
-// refs the same way everywhere. Untracked: expand-driven ref resolution
-// is an implementation detail of queryEntities and shouldn't surface as
-// a separate query dep.
+// Resolve a ref string to an entity. Uses the same id / meta.href /
+// stripped-extension heuristic as `matchesRef`, expressed as the sift
+// filter from `refFilter` so the storage layer can index it the same
+// way as any other findEntity call. Untracked: expand-driven ref
+// resolution is an implementation detail of queryEntities and
+// shouldn't surface as a separate query dep.
 async function findRef(ref) {
     if (!ref || typeof ref !== 'string' || !runtime.catalog) return null
+    const match = sift(refFilter(ref))
     for (const entity of runtime.catalog.byId.values()) {
-        if (matchesRef(entity, ref)) return entity
+        if (match(entity)) return entity
     }
     return null
 }
