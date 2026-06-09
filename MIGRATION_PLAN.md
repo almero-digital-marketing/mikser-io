@@ -259,7 +259,7 @@ rm -rf test/perf/runtime test/perf/out
 # ...warm runs...
 git checkout engine/database
 rm -rf test/perf/runtime test/perf/out
-/usr/bin/time -p node --experimental-sqlite app.js --working-folder test/perf > /tmp/branch-cold.log 2>&1
+/usr/bin/time -p node app.js --working-folder test/perf > /tmp/branch-cold.log 2>&1
 # ...warm runs...
 git stash pop
 ```
