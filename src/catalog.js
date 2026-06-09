@@ -9,7 +9,8 @@ import { JSONFile } from 'lowdb/node'
 import _ from 'lodash'
 import sift from 'sift'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { expandEntity, projectMeta } from './utils.js'
+import { expandEntity, projectMeta, matchesRef } from './utils.js'
+import { normalizeFilter } from './track.js'
 
 // Context propagated through async boundaries via Node's AsyncLocalStorage.
 // Consumers (engine's render dispatch, api plugin's per-query cache,
@@ -24,20 +25,10 @@ import { expandEntity, projectMeta } from './utils.js'
 // undefined, no tracking. Same query methods serve all callers.
 export const queryContext = new AsyncLocalStorage()
 
-// Normalize a filter for cache/snapshot storage. Object filters are
-// serializable and re-runnable via sift; function filters and
-// primitives can't be — we record a `null` sentinel that forces
-// conservative invalidation (any mutation re-renders) instead of
-// silently losing the dep.
-function normalizeQueryFilter(filter) {
-	if (filter && typeof filter === 'object' && !Array.isArray(filter)) return filter
-	return null
-}
-
 function recordQuery(filter) {
 	const ctx = queryContext.getStore()
 	if (!ctx?.track) return
-	ctx.track.query(normalizeQueryFilter(filter))
+	ctx.track.query(normalizeFilter(filter))
 }
 
 // Same reasoning as journal.js — initialize the catalog in
@@ -124,8 +115,9 @@ export async function findEntities(query) {
 // is one consumer that adds HTTP routing + an on-disk cache on top.
 
 // Match the same heuristic the schemas plugin uses for ref-existence
-// checks — id, meta.href, or stripped-extension id. Centralised so the
-// expand walker resolves refs the same way everywhere.
+// checks — id, meta.href, or stripped-extension id — via the shared
+// `matchesRef` predicate. Centralised so the expand walker resolves
+// refs the same way everywhere.
 async function findRef(ref) {
 	if (!ref || typeof ref !== 'string') return null
 	// Direct chain access. Expand-driven ref resolution is an
@@ -133,14 +125,7 @@ async function findRef(ref) {
 	// as a separate query dep — the parent queryEntities call already
 	// recorded its filter, and $-ref edges are tracked separately via
 	// runtime.refs.
-	const matches = runtime.catalog.chain.get('entities').filter(e =>
-		!!e && (
-			e.id === ref ||
-			e.meta?.href === ref ||
-			(typeof e.id === 'string' && e.id.replace(/\.[^./]+$/, '') === ref)
-		),
-	).value()
-	return matches[0] ?? null
+	return runtime.catalog.chain.get('entities').find(e => matchesRef(e, ref)).value() ?? null
 }
 
 // Per-call expansion caps. Plumbed from mikser.config.js:

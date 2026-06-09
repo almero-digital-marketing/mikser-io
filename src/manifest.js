@@ -52,10 +52,15 @@ import { existsSync } from 'fs'
 import sift from 'sift'
 import runtime from './runtime.js'
 import { useLogger } from './engine.js'
-import { onLoaded, onFinalized } from './lifecycle.js'
+import { onLoaded, onFinalize } from './lifecycle.js'
 import { useJournal } from './journal.js'
 import { OPERATION } from './constants.js'
-import { extractRefs } from './utils.js'
+import { extractRefs, inputHashOf } from './utils.js'
+import { filterKey } from './track.js'
+
+// Re-export so consumers that previously imported inputHashOf from
+// manifest don't break. Canonical home is utils.js.
+export { inputHashOf } from './utils.js'
 
 const MANIFEST_FILE = 'manifest.json'
 
@@ -73,24 +78,6 @@ function key(query) {
 
 function sha1(payload) {
     return crypto.createHash('sha1').update(String(payload)).digest('hex')
-}
-
-// Stable fingerprint of an entity's render-relevant bytes. Excludes
-// volatile fields like stamp/time/uri so re-discovery on startup doesn't
-// produce a different hash for an unchanged file. Exported so the engine
-// can compute hashes for journal-mutation entities to feed the
-// `currentHashes` Map that shouldSkip consults.
-export function inputHashOf(entity) {
-    if (!entity) return ''
-    // For file-only entities (no meta/content surface) the upstream
-    // file-content checksum already exists.
-    if (entity.checksum && entity.meta == null && entity.content == null) {
-        return sha1(entity.checksum)
-    }
-    return sha1(JSON.stringify({
-        meta: entity.meta ?? null,
-        content: entity.content ?? null,
-    }))
 }
 
 // Synchronous catalog lookup used at record time to hash refClosure
@@ -130,9 +117,7 @@ function buildRefClosure(entity, deps) {
         closure.push(entry)
     }
     function pushQuery(filter) {
-        // Dedupe queries by their serialized form. Null filter is the
-        // sentinel for "unserializable" — it goes through once.
-        const key = filter === null ? 'query:__null__' : 'query:' + JSON.stringify(filter)
+        const key = 'query:' + filterKey(filter)
         if (seen.has(key)) return
         seen.add(key)
         closure.push({ kind: 'query', filter })
@@ -282,6 +267,71 @@ export function createManifest() {
             return entries.values()
         },
 
+        // Id → inputHash Map mined across every snapshot:
+        //   - the rendered entity's own `inputHash`
+        //   - target hashes from refClosure entries (kind: 'ref' /
+        //     'layout' / 'partial') for support entities (layouts,
+        //     partials, $-ref targets) that don't produce output
+        //     themselves but appear in consumers' closures
+        //
+        // The layouts dispatcher uses this as its hash-aware seeding
+        // filter: a journal CREATE/UPDATE whose current inputHash
+        // matches the recorded one is a cold-start re-discovery, not
+        // a real change, and shouldn't seed the closure walk.
+        recordedHashes() {
+            const map = new Map()
+            for (const snap of entries.values()) {
+                if (snap.inputHash && !map.has(snap.id)) {
+                    map.set(snap.id, snap.inputHash)
+                }
+                for (const dep of snap.refClosure ?? []) {
+                    if (dep.kind === 'query') continue
+                    if (dep.target && dep.hash && !map.has(dep.target)) {
+                        map.set(dep.target, dep.hash)
+                    }
+                }
+            }
+            return map
+        },
+
+        // Build the dep-edge array the engine threads into a snapshot
+        // via record(entity, edges). One place to know what the
+        // refClosure shape is — engine just collects the components
+        // and hands them off. Auto-includes the layout edge (every
+        // render has one); merges track.partials with hashes looked
+        // up from the catalog; appends template-time + sidecar queries.
+        collectEdges({ entity, track, sidecarQueries }) {
+            const edges = []
+            if (entity?.layout?.id) {
+                edges.push({
+                    kind: 'layout',
+                    target: entity.layout.id,
+                    hash: inputHashOf(entity.layout),
+                })
+            }
+            if (track?.partials) {
+                for (const target of track.partials) {
+                    const partial = runtime.catalog?.chain.get('entities').find({ id: target }).value()
+                    edges.push({
+                        kind: 'partial',
+                        target,
+                        hash: partial ? inputHashOf(partial) : undefined,
+                    })
+                }
+            }
+            if (track?.queries) {
+                for (const filter of track.queries) {
+                    edges.push({ kind: 'query', filter })
+                }
+            }
+            if (sidecarQueries) {
+                for (const filter of sidecarQueries) {
+                    edges.push({ kind: 'query', filter })
+                }
+            }
+            return edges
+        },
+
         // Walk the output folder against recorded snapshots, returning
         // a diff describing:
         //   - missing[]    — snapshots whose output file is gone
@@ -399,7 +449,30 @@ onLoaded(async () => {
     }
 })
 
-onFinalized(async () => {
+// Drop manifest entries matching `predicate`, unlinking their output
+// file from disk first. Used by all three onFinalized cleanup passes
+// (entity deletion, pagination shrink, pagination loss) so the
+// "match — unlink — delete" pattern lives in one place.
+async function dropEntriesWhere(predicate, reason) {
+    const logger = useLogger()
+    for (const [k, snap] of entries) {
+        if (!predicate(snap)) continue
+        const filePath = path.join(runtime.options.outputFolder, snap.destination)
+        try {
+            await unlink(filePath)
+            logger.debug('%s: unlinked %s', reason, snap.destination)
+        } catch { }
+        entries.delete(k)
+    }
+}
+
+// Use onFinalize (not onFinalized) so the journal still has this
+// cycle's RENDER entries when we walk them. journal.js's own
+// onFinalized hook drains entries — running afterwards. The two
+// phases bracket end-of-cycle work cleanly: onFinalize is "the
+// cycle's last chance to read its journal," onFinalized is "the
+// cycle is over, transient state resets."
+onFinalize(async () => {
     const logger = useLogger()
 
     // Persist manifest at the very end of the cycle so:
@@ -417,16 +490,10 @@ onFinalized(async () => {
     // rewritten via changeExtension) are reclaimed alongside their
     // source.
     for await (let { entity } of useJournal('Manifest cleanup', [OPERATION.DELETE])) {
-        for (const [k, value] of entries) {
-            if (value.id === entity.id || value.parent === entity.id) {
-                const filePath = path.join(runtime.options.outputFolder, value.destination)
-                try {
-                    await unlink(filePath)
-                    logger.debug('Manifest unlinked stale output: %s', value.destination)
-                } catch { }
-                entries.delete(k)
-            }
-        }
+        await dropEntriesWhere(
+            snap => snap.id === entity.id || snap.parent === entity.id,
+            'Entity deleted',
+        )
     }
 
     // Merge this cycle's successful renders. New snapshots appear;
@@ -491,28 +558,16 @@ onFinalized(async () => {
     }
 
     for (const [parentId, destinations] of newDestinationsByParent) {
-        for (const [k, snap] of entries) {
-            if (snap.parent === parentId && !destinations.has(snap.destination)) {
-                const filePath = path.join(runtime.options.outputFolder, snap.destination)
-                try {
-                    await unlink(filePath)
-                    logger.debug('Pagination shrunk: unlinked %s', snap.destination)
-                } catch { }
-                entries.delete(k)
-            }
-        }
+        await dropEntriesWhere(
+            snap => snap.parent === parentId && !destinations.has(snap.destination),
+            'Pagination shrunk',
+        )
     }
     for (const parentId of lostPagination) {
-        for (const [k, snap] of entries) {
-            if (snap.parent === parentId) {
-                const filePath = path.join(runtime.options.outputFolder, snap.destination)
-                try {
-                    await unlink(filePath)
-                    logger.debug('Pagination dropped: unlinked %s', snap.destination)
-                } catch { }
-                entries.delete(k)
-            }
-        }
+        await dropEntriesWhere(
+            snap => snap.parent === parentId,
+            'Pagination dropped',
+        )
     }
 
     const manifestPath = path.join(runtime.options.runtimeFolder, MANIFEST_FILE)

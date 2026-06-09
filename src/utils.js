@@ -1,3 +1,4 @@
+import crypto from 'node:crypto'
 import { hashFile, hash } from 'hasha'
 import { stat, readFile, writeFile, mkdir, unlink } from 'node:fs/promises'
 import TruncateStream from 'truncate-stream'
@@ -7,6 +8,54 @@ import { minimatch } from 'minimatch'
 import path from 'path'
 import fm from 'front-matter'
 import yaml from 'yaml'
+
+// Stable content fingerprint for entities — used by manifest snapshots,
+// engine mutation tracking, and the layouts dispatcher's hash-aware
+// seeding. Excludes volatile fields like stamp/time/uri so re-discovery
+// on startup doesn't produce a different hash for an unchanged file.
+// Pure: synchronous, no I/O, no engine state.
+export function inputHashOf(entity) {
+    if (!entity) return ''
+    // For file-only entities (no meta/content surface) the upstream
+    // file-content checksum from `checksum()` above is the authoritative
+    // fingerprint and is already computed.
+    if (entity.checksum && entity.meta == null && entity.content == null) {
+        return crypto.createHash('sha1').update(String(entity.checksum)).digest('hex')
+    }
+    return crypto.createHash('sha1').update(JSON.stringify({
+        meta: entity.meta ?? null,
+        content: entity.content ?? null,
+    })).digest('hex')
+}
+
+// Canonical lookup variants for an entity — the same three forms the
+// schemas plugin, refs subscribers, and the catalog's findRef all use
+// to resolve `$author: '/authors/jane'` against an entity at
+// `/documents/authors/jane.yml` with `meta.href: '/authors/jane'`.
+// Pure: synchronous, no I/O.
+export function lookupKeys(entity) {
+    const id = entity?.id
+    if (!id) return []
+    const keys = [id]
+    if (entity.meta?.href) keys.push(entity.meta.href)
+    if (typeof id === 'string') {
+        const stripped = id.replace(/\.[^./]+$/, '')
+        if (stripped !== id) keys.push(stripped)
+    }
+    return keys
+}
+
+// Predicate inverse of `lookupKeys`: does `entity` answer to `refValue`
+// via any of the three canonical forms? Used by `catalog.findRef`,
+// `catalog.refExists`, and anywhere a single sift-style lookup needs
+// to honour the same heuristic.
+export function matchesRef(entity, refValue) {
+    if (!entity || typeof refValue !== 'string') return false
+    if (entity.id === refValue) return true
+    if (entity.meta?.href === refValue) return true
+    if (typeof entity.id === 'string' && entity.id.replace(/\.[^./]+$/, '') === refValue) return true
+    return false
+}
 
 // Extension → mime type lookup for rendered outputs. Used anywhere an
 // entity's destination is being served over HTTP (the api plugin's

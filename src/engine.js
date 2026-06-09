@@ -17,7 +17,8 @@ import Queue from 'p-queue'
 import packageInfo from '../package.json' with { type: 'json' }
 import { attachServerCliOptions, setupServer } from './server.js'
 import { createMikserLogger } from './logger.js'
-import { inputHashOf } from './manifest.js'
+import { inputHashOf } from './utils.js'
+import { createTrack } from './track.js'
 import { queryContext } from './catalog.js'
 
 export async function setup(options) {
@@ -230,35 +231,15 @@ export async function setup(options) {
                 const renderEntity = entity?.meta
                     ? { ...entity, meta: projectMeta(entity.meta) }
                     : entity
-                // Per-render dep tracker. Renderers running INLINE/SERIAL
-                // populate this via track.partial(id) (called from each
-                // render plugin's partial-loading hook) and track.query
-                // (called automatically by catalog query methods via the
-                // renderContext ALS established below). The engine reads
-                // it after render to update refs and the manifest
-                // snapshot. Worker dispatch can't share this object
-                // across thread boundaries — those renders get
-                // layout-only deps (added automatically below) and rely
-                // on coarser invalidation. INLINE is the default mode.
-                //
-                // Queries dedupe by JSON-serialized filter so a render
-                // that fetches `{collection:'posts'}` twenty times only
-                // contributes one closure entry.
-                const queryKeys = new Set()
-                const track = {
-                    partials: new Set(),
-                    queries:  [],
-                    partial(target) { if (target) this.partials.add(target) },
-                    query(filter) {
-                        // null = sentinel for unserializable filters
-                        // (functions / primitives) — force conservative
-                        // re-render. Dedupe by serialized form.
-                        const key = filter === null ? '__null__' : JSON.stringify(filter)
-                        if (queryKeys.has(key)) return
-                        queryKeys.add(key)
-                        this.queries.push(filter)
-                    },
-                }
+                // Per-render dep tracker — partials reported by the
+                // renderer plugin's partial-loading hooks, queries
+                // reported automatically by catalog methods via the
+                // queryContext ALS established below. Worker dispatch
+                // can't share this object across thread boundaries —
+                // those renders get layout-only deps (added by
+                // manifest.collectEdges) and rely on coarser
+                // invalidation. INLINE is the default mode.
+                const track = createTrack()
                 const renderOptions = {
                     entity: renderEntity,
                     options: {
@@ -318,43 +299,18 @@ export async function setup(options) {
                             success: true,
                             result,
                         }
-                        // Collect this render's dep edges + a hash for
-                        // each target. Hash is what lets the next cycle
-                        // distinguish "in journal" from "really changed."
-                        // Auto layout edge first (entity.layout is the
-                        // full layout entity, hash it directly); then
-                        // partials reported via track (INLINE/SERIAL
-                        // only); then catalog queries the render issued
-                        // — those carry no target/hash, only the
-                        // (normalized, serializable) filter.
-                        const edges = []
-                        if (entity.layout?.id) {
-                            edges.push({
-                                kind: 'layout',
-                                target: entity.layout.id,
-                                hash: inputHashOf(entity.layout),
-                            })
-                        }
-                        for (const target of track.partials) {
-                            const partial = runtime.catalog?.chain.get('entities').find({ id: target }).value()
-                            edges.push({
-                                kind: 'partial',
-                                target,
-                                hash: partial ? inputHashOf(partial) : undefined,
-                            })
-                        }
-                        for (const filter of track.queries) {
-                            edges.push({ kind: 'query', filter })
-                        }
-                        // Sidecar queries — collected at layouts.onBeforeRender
-                        // when the sidecar's `load()` ran inside queryContext.
-                        // Threaded through the render task's context so the
-                        // engine can merge them with template-time queries into
-                        // a single snapshot closure. Dedupe handled by manifest's
-                        // buildRefClosure.
-                        for (const filter of (context?.sidecarQueries ?? [])) {
-                            edges.push({ kind: 'query', filter })
-                        }
+                        // Manifest owns the refClosure schema; we just
+                        // hand it the entity, the track, and the sidecar
+                        // queries (collected at layouts.onBeforeRender
+                        // inside queryContext). collectEdges adds the
+                        // auto-layout edge, hashes track.partials via
+                        // catalog lookup, and merges template-time +
+                        // sidecar queries.
+                        const edges = runtime.manifest.collectEdges({
+                            entity,
+                            track,
+                            sidecarQueries: context?.sidecarQueries,
+                        })
                         entry.deps = edges
                         runtime.refs?.replaceDynamic(entity.id, edges)
                         await runtime.complete(entry)

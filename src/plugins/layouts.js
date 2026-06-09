@@ -3,7 +3,8 @@ import { mkdir, writeFile, unlink, rmdir, readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { globby } from 'globby'
 import _ from 'lodash'
-import { inputHashOf } from '../manifest.js'
+import { inputHashOf } from '../utils.js'
+import { createTrack } from '../track.js'
 import { queryContext } from '../catalog.js'
 
 // Liquid / Handlebars / Eta keywords we don't want surfaced as
@@ -482,26 +483,9 @@ export default ({
             // mutation lookup is O(1). Paginated outputs share an id
             // with the parent; we keep the first-seen hash (they were
             // all written from the same parent's render, same inputHash).
-            const recordedHashes = new Map()
-            if (runtime.manifest) {
-                for (const snap of runtime.manifest.all()) {
-                    // The rendered entity's own inputHash.
-                    if (!recordedHashes.has(snap.id) && snap.inputHash) {
-                        recordedHashes.set(snap.id, snap.inputHash)
-                    }
-                    // Dep target hashes — layouts/partials/$-ref targets
-                    // recorded at last render. Lets us hash-filter
-                    // support entities (layouts, partials, authors) that
-                    // never produce output themselves but appear in
-                    // consumers' closures.
-                    for (const dep of snap.refClosure ?? []) {
-                        if (dep.kind === 'query') continue
-                        if (dep.target && dep.hash && !recordedHashes.has(dep.target)) {
-                            recordedHashes.set(dep.target, dep.hash)
-                        }
-                    }
-                }
-            }
+            // Hash map built across all snapshots (entity inputHash +
+            // dep target hashes) — manifest owns this view.
+            const recordedHashes = runtime.manifest?.recordedHashes() ?? new Map()
 
             const seenSeeds = new Set()
             const seeds = []
@@ -560,22 +544,14 @@ export default ({
             // Existence-check first so a real ERR_MODULE_NOT_FOUND inside the
             // sidecar (e.g. it imports a missing package) doesn't get swallowed
             // as "sidecar doesn't exist".
-            // Sidecar queries get tracked into a sidecarTrack so they
-            // flow into the render's refClosure as `kind: 'query'`
-            // edges. Without this, layouts whose sidecars build their
+            // Sidecar queries flow into the render's refClosure as
+            // `kind: 'query'` edges via the same track shape the engine
+            // uses. Without this, layouts whose sidecars build their
             // data with findEntities/queryEntities would silently miss
             // invalidations when a newly-added entity should make the
-            // listing change.
-            const sidecarTrack = {
-                queries: [],
-                queryKeys: new Set(),
-                query(filter) {
-                    const key = filter === null ? '__null__' : JSON.stringify(filter)
-                    if (this.queryKeys.has(key)) return
-                    this.queryKeys.add(key)
-                    this.queries.push(filter)
-                },
-            }
+            // listing change. partial slot disabled — sidecars don't
+            // load partials themselves.
+            const sidecarTrack = createTrack({ partial: false })
             if (existsSync(sidecarPath)) {
                 try {
                     ({ load, plugins = [] } = await import(`${sidecarPath}?stamp=${Date.now()}`))

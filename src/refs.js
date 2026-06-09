@@ -34,7 +34,7 @@ import { useLogger } from './engine.js'
 import { onInitialized, onPersist } from './lifecycle.js'
 import { useJournal } from './journal.js'
 import { OPERATION } from './constants.js'
-import { extractRefs, isRefKey, writeEntity } from './utils.js'
+import { extractRefs, isRefKey, writeEntity, lookupKeys, matchesRef } from './utils.js'
 import { findEntities, findEntity } from './catalog.js'
 
 export function createIndex() {
@@ -187,39 +187,24 @@ export function createIndex() {
         const closure = new Set()
         const keysToWalk = []
 
-        function queueKeys(id, hrefOrUndefined) {
-            keysToWalk.push(id)
-            if (hrefOrUndefined) keysToWalk.push(hrefOrUndefined)
-            if (typeof id === 'string') {
-                const stripped = id.replace(/\.[^./]+$/, '')
-                if (stripped !== id) keysToWalk.push(stripped)
-            }
-        }
-
         for (const seed of seeds ?? []) {
             const entity = typeof seed === 'string' ? null : seed
             const id = entity?.id ?? (typeof seed === 'string' ? seed : null)
             if (!id) continue
             if (closure.has(id)) continue
             closure.add(id)
-            queueKeys(id, entity?.meta?.href)
+            keysToWalk.push(...lookupKeys(entity ?? { id }))
         }
 
         while (keysToWalk.length > 0) {
             const key = keysToWalk.shift()
             const inboundRefs = inboundFor(key)
             const inboundDyn  = dynamicInboundFor(key)
-            for (const { id } of inboundRefs) {
+            for (const { id } of [...inboundRefs, ...inboundDyn]) {
                 if (closure.has(id)) continue
                 closure.add(id)
                 const entity = getEntityById?.(id)
-                queueKeys(id, entity?.meta?.href)
-            }
-            for (const { id } of inboundDyn) {
-                if (closure.has(id)) continue
-                closure.add(id)
-                const entity = getEntityById?.(id)
-                queueKeys(id, entity?.meta?.href)
+                keysToWalk.push(...lookupKeys(entity ?? { id }))
             }
         }
 
@@ -322,18 +307,12 @@ export function createSubscribers(index, getEntityById) {
 
     function inverseReferrersOf(entity) {
         // Look up by every form the source might have used to write a
-        // ref to this entity — id, meta.href, stripped-extension id —
+        // ref to this entity (id, meta.href, stripped-extension id)
         // since the index keys are author-written values that may use
         // any of those shapes.
         const seenIds = new Set()
-        const refs = [
-            entity.id,
-            entity.meta?.href,
-            typeof entity.id === 'string' ? entity.id.replace(/\.[^./]+$/, '') : null,
-        ].filter(v => typeof v === 'string')
-
         const out = []
-        for (const ref of refs) {
+        for (const ref of lookupKeys(entity)) {
             for (const { id } of index.inboundFor(ref)) {
                 if (seenIds.has(id)) continue
                 seenIds.add(id)
@@ -650,19 +629,12 @@ onPersist(async (signal) => {
 })
 
 // Resolve a ref to an entity using the same heuristic catalog.js's
-// findRef uses (id / meta.href / id-minus-ext). Exported so other
-// callers can reuse the same matching rules.
-// TODO: the heuristic is duplicated here and in catalog.js — single
-// source of truth would put it in utils.js as a shared predicate.
+// findRef uses (id / meta.href / id-minus-ext) via the shared
+// `matchesRef` predicate in utils.js. Exported so other callers can
+// reuse the same matching rules.
 export async function refExists(ref) {
     if (!ref || typeof ref !== 'string') return false
-    const matches = await findEntities(e =>
-        !!e && (
-            e.id === ref ||
-            e.meta?.href === ref ||
-            (typeof e.id === 'string' && e.id.replace(/\.[^./]+$/, '') === ref)
-        ),
-    )
+    const matches = await findEntities(e => matchesRef(e, ref))
     return matches.length > 0
 }
 
