@@ -94,9 +94,11 @@ access patterns AND the storage — not just the storage.
 13. **Schema migrations.** Until v10: drop `runtime/`, rebuild. After v10:
     real migration scripts. Design the initial schema with future change
     in mind — numbered version, additive-only discipline.
-14. **Node version requirement.** `node:sqlite` needs `--experimental-sqlite`
-    on Node 22.x, stable on 24+. Decide: bump engines.node, or use
-    better-sqlite3 (native dep, proven).
+14. **Native sqlite dep install story.** `better-sqlite3` ships prebuilt
+    binaries for common Node + platform combos; exotic environments
+    (musl libc, very new Node releases without prebuilts yet) may need
+    `npm rebuild` from source. Same library mikser-io-vector already
+    uses, so this risk is already in the codebase — no new surface.
 
 ## Phases
 
@@ -110,16 +112,28 @@ to main happens after Phase 6.
 Engine-level `database` config, driver dispatcher, sqlite driver. No
 subsystem migrations yet.
 
+Library choices locked in:
+
+- **sqlite:** `better-sqlite3` (matches mikser-io-vector's choice;
+  consistent install story across the codebase). Gives us `.iterate()`
+  for lazy result streaming, `db.function()` for sift→SQL escape hatches
+  (`$regex` etc.), prepared statements, sync API for hot paths.
+- **postgres:** `pg` (also matches vector). Connection pool via `pg.Pool`.
+
+Tasks:
+
 - `mikser.config.js` reads `database: { driver, sqlite: {...}, postgres: {...} }`
+- Connection config mirrors vector's shape: `sqlite: { filename }`,
+  fallback to `runtime/mikser.sqlite`
 - `src/database.js`: dispatcher + driver registration + `useDatabase()` API
-- `src/database-driver-sqlite.js`: native driver, connection lifecycle,
-  PRAGMAs (WAL, synchronous=NORMAL), schema migration runner
+- `src/database-driver-sqlite.js`: better-sqlite3 wrapper, connection
+  lifecycle, PRAGMAs (WAL, synchronous=NORMAL), schema migration runner
 - Schema registration API: subsystems call `registerSchema('catalog',
   sqlScript)` during `onInitialize`; engine runs migrations at
   `onInitialized`
-- Transaction primitive: `db.transaction(fn)` — runs fn inside
-  `BEGIN; ...; COMMIT` with abort on throw
-- Decide: `node:sqlite` vs `better-sqlite3`
+- Transaction primitive: `db.transaction(fn)` — better-sqlite3's
+  built-in `db.transaction()` wrapper, which handles BEGIN / COMMIT /
+  ROLLBACK on throw automatically
 
 **Validation:** existing tests still pass; `runtime.database` available
 at onLoaded; empty schema initializes cleanly; subsequent runs skip
@@ -255,13 +269,15 @@ populate at each phase boundary:
 | 50k realistic warm | 9.1s | TBD |
 | 50k realistic RSS | 1.17GB | TBD |
 
+## Decisions made
+
+- **better-sqlite3 for sqlite, `pg` for postgres.** Matches
+  mikser-io-vector. Consistent install story, one native dep across
+  the codebase, `.iterate()` available for lazy result streaming,
+  `db.function()` available for sift→SQL escape hatches.
+
 ## Open questions
 
-- **node:sqlite vs better-sqlite3.** Decision needed before Phase 1.
-  Pro node:sqlite: built-in, no native compilation, future-proof for
-  Node 24+. Con: experimental on 22.x, lacks `.iterate()`. Pro
-  better-sqlite3: proven, full API, `.iterate()`. Con: native dep,
-  compilation issues possible.
 - **Schema migration discipline.** Versioned `migrations/NNNN-*.sql`
   files? Inline `CREATE IF NOT EXISTS` only? Decide before Phase 1
   schema setup.
@@ -272,7 +288,10 @@ populate at each phase boundary:
   patterns, or stay strictly config-driven? Lean: config-driven for
   v1; observability via debug logs.
 - **mikser-io-vector eventually folds into the engine database?** Phase
-  4+ candidate. Out of scope for this branch.
+  4+ candidate. Out of scope for this branch. Note: vector currently
+  writes to `runtime/vectors.db`; if it ever shares the engine's
+  `runtime/mikser.sqlite`, transactions could span vector + catalog
+  writes. Powerful but adds coupling — defer.
 
 ## Stop rules
 
