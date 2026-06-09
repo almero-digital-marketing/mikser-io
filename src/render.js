@@ -6,7 +6,7 @@ import _ from 'lodash'
 import { useLogger } from './engine.js'
 import { formatLogArgs } from './utils.js'
 
-export default async ({ entity, options, config, context, state, logger, port }) => {
+export default async ({ entity, options, config, context, state, logger, port, track }) => {
     logger = logger || {
         info(...args) {
             port.postMessage(JSON.stringify({ command: 'logger', data: { log: 'info', args } }))
@@ -102,7 +102,7 @@ export default async ({ entity, options, config, context, state, logger, port })
     }
 
     const rendererPlugin = plugins[`render-${renderer}`]
-    return await rendererPlugin?.render({ entity, options, config, context, plugins, runtime, state, logger })
+    return await rendererPlugin?.render({ entity, options, config, context, plugins, runtime, state, logger, track })
 }
 
 // Build the error thrown when a submitted entity goes through a full

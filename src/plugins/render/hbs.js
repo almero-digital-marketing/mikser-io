@@ -2,7 +2,39 @@ import handlebars from 'handlebars'
 import helpers from '@budibase/handlebars-helpers'
 import dayjs from 'dayjs'
 
-export function load({ config, runtime, context }) {
+// Walk a compiled Handlebars program for partial-reference nodes and
+// yield each partial name. Handlebars' AST has two relevant node types:
+// `PartialStatement` (e.g. `{{> header}}`) and `PartialBlockStatement`
+// (e.g. `{{#> wrapper}}…{{/wrapper}}`). We also recurse into block
+// statements so partials inside `{{#each}}` / `{{#if}}` get reported.
+//
+// Dynamic partial names (e.g. `{{> (lookup type)}}`) where the AST node
+// is a SubExpression are skipped — we can't resolve them statically.
+// Coarser invalidation is the price; correctness still holds because
+// any change to a possible target entity will mutate refs and force
+// the consumer to re-render anyway.
+function* walkPartials(node) {
+    if (!node || typeof node !== 'object') return
+    switch (node.type) {
+        case 'PartialStatement':
+        case 'PartialBlockStatement':
+            if (node.name?.type === 'PathExpression') {
+                yield node.name.original
+            }
+            if (node.program) yield* walkPartials(node.program)
+            if (node.inverse) yield* walkPartials(node.inverse)
+            break
+        case 'Program':
+            for (const child of node.body ?? []) yield* walkPartials(child)
+            break
+        case 'BlockStatement':
+            if (node.program) yield* walkPartials(node.program)
+            if (node.inverse) yield* walkPartials(node.inverse)
+            break
+    }
+}
+
+export function load({ config, runtime, state }) {
     handlebars.registerHelper(helpers(config?.helpers || [
         'array',
         'collection',
@@ -15,12 +47,21 @@ export function load({ config, runtime, context }) {
         'string',
         'url'
     ]))
-    for (let partial in context.layouts) {
-        if (context.layouts[partial].template == 'hbs' && partial.indexOf('partials') == 0) {
-            // Layout bodies live on the entity (populated by the layouts
-            // plugin at sync time, then stripped by front-matter at
-            // onProcess). One source of truth, no re-read from disk.
-            handlebars.registerPartial(partial, context.layouts[partial].content ?? '')
+    // Partials are layouts whose name starts with `partials/`. The
+    // layouts plugin populates `runtime.state.layouts.layouts` as a
+    // name → layout-entity map at sync time, and that map is passed
+    // through as `state.layouts.layouts` to renderer plugins. Same
+    // source of truth: the in-memory layouts index.
+    //
+    // Also build `runtime.hbsPartialIds` so the render path can resolve
+    // `partialName → entityId` cheaply when reporting partial-edge deps
+    // to the manifest via the track API.
+    runtime.hbsPartialIds = {}
+    const layouts = state?.layouts?.layouts ?? {}
+    for (let partial in layouts) {
+        if (layouts[partial].template == 'hbs' && partial.indexOf('partials') == 0) {
+            handlebars.registerPartial(partial, layouts[partial].content ?? '')
+            runtime.hbsPartialIds[partial] = layouts[partial].id
         }
     }
     handlebars.registerHelper('date', (date, format) => {
@@ -44,7 +85,7 @@ export function load({ config, runtime, context }) {
     }
 }
 
-export async function render({ entity, runtime }) {
+export async function render({ entity, runtime, track }) {
     const source = entity.layout.content ?? ''
     const sandbox = {}
     for (let helper in runtime) {
@@ -53,6 +94,21 @@ export async function render({ entity, runtime }) {
         } else {
             sandbox[helper] = runtime[helper]
         }
+    }
+    // Report partial edges to the engine BEFORE running the template,
+    // so a runtime error inside a partial doesn't lose the dep info.
+    // Parse runs once cheap; compile happens again inside runtime.hbs.
+    if (track && runtime.hbsPartialIds) {
+        try {
+            const ast = handlebars.parse(source)
+            const seen = new Set()
+            for (const name of walkPartials(ast)) {
+                if (seen.has(name)) continue
+                seen.add(name)
+                const id = runtime.hbsPartialIds[name]
+                if (id) track.partial(id)
+            }
+        } catch { /* parse errors surface in the render call below */ }
     }
     try {
         return runtime.hbs(source, sandbox)

@@ -25,7 +25,7 @@ describe('createIndex', () => {
     it('starts empty', () => {
         const idx = createIndex()
         assert.deepEqual(idx.allRefs(), [])
-        assert.deepEqual(idx.size(), { refs: 0, sources: 0, edges: 0 })
+        assert.deepEqual(idx.size(), { refs: 0, sources: 0, edges: 0, dynamicSources: 0, dynamicEdges: 0 })
         assert.deepEqual(idx.inboundFor('/x'), [])
         assert.deepEqual(idx.outboundFor('/x'), [])
     })
@@ -129,7 +129,7 @@ describe('createIndex', () => {
         const idx = createIndex()
         idx.indexEntity({ id: '/a.md', meta: { $author: '/x' } })
         idx.rebuild([])
-        assert.deepEqual(idx.size(), { refs: 0, sources: 0, edges: 0 })
+        assert.deepEqual(idx.size(), { refs: 0, sources: 0, edges: 0, dynamicSources: 0, dynamicEdges: 0 })
     })
 
     it('size() counts refs, sources, and edges correctly', () => {
@@ -162,7 +162,7 @@ describe('createIndex', () => {
         idx.indexEntity({ meta: { $x: '/t' } })                // no id
         idx.indexEntity({ id: '/a.md' })                       // no meta
         idx.indexEntity({ id: '/b.md', meta: null })           // null meta
-        assert.deepEqual(idx.size(), { refs: 0, sources: 0, edges: 0 })
+        assert.deepEqual(idx.size(), { refs: 0, sources: 0, edges: 0, dynamicSources: 0, dynamicEdges: 0 })
     })
 
     it('ignores $-keys whose values are not strings or string arrays', () => {

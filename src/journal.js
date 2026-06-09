@@ -37,6 +37,11 @@ function makeEntry({ entity, operation, context, options }) {
         context:   context != null ? structuredClone(context) : context,
         options:   options != null ? structuredClone(options) : options,
         output:    null,
+        // `deps` carries render-time dependency edges (layout, partials,
+        // queries) collected via the engine's track API. Read by the
+        // manifest's onAfterRender to persist refClosure into snapshots
+        // for skip-decision invalidation.
+        deps:      null,
     }
 }
 
@@ -54,11 +59,12 @@ export async function addEntries(batch) {
     }
 }
 
-export async function updateEntry({ id, entity, output }) {
+export async function updateEntry({ id, entity, output, deps }) {
     const e = byId.get(id)
     if (!e) return
     if (entity !== undefined) e.entity = structuredClone(entity)
     if (output !== undefined) e.output = structuredClone(output)
+    if (deps   !== undefined) e.deps   = structuredClone(deps)
 }
 
 // Walk the journal yielding entries matching `operations` (or all if

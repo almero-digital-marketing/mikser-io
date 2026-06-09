@@ -17,6 +17,7 @@ import Queue from 'p-queue'
 import packageInfo from '../package.json' with { type: 'json' }
 import { attachServerCliOptions, setupServer } from './server.js'
 import { createMikserLogger } from './logger.js'
+import { inputHashOf } from './manifest.js'
 
 export async function setup(options) {
     runtime.options.threads = options?.threads !== undefined ? options.threads : 4
@@ -129,14 +130,28 @@ export async function setup(options) {
         }
 
         // Collect this cycle's mutated entity ids and hrefs so the
-        // manifest skip check can re-render anything whose `$`-ref
-        // targets changed even if the entity itself is byte-identical.
-        // The Set is built from CREATE/UPDATE/DELETE journal entries —
-        // RENDER entries are this cycle's work, not the trigger.
+        // manifest skip check can re-render anything whose dependencies
+        // (layout, partials, $-refs) changed even if the entity itself
+        // is byte-identical. The Set is built from CREATE/UPDATE/DELETE
+        // journal entries — RENDER entries are this cycle's work, not
+        // the trigger.
+        //
+        // The parallel `currentHashes` Map carries the current input
+        // hash for each mutated entity. Cold-start file discovery emits
+        // a CREATE/UPDATE for every file even when content didn't
+        // change; without the hash gate, every render whose layout or
+        // partial is in the journal would falsely invalidate. The hash
+        // comparison in manifest.shouldSkip distinguishes "re-discovered"
+        // from "actually changed."
         const mutatedRefs = new Set()
-        for await (let { entity } of useJournal('Manifest mutations', [OPERATION.CREATE, OPERATION.UPDATE, OPERATION.DELETE])) {
-            if (entity?.id) mutatedRefs.add(entity.id)
-            if (entity?.meta?.href) mutatedRefs.add(entity.meta.href)
+        const currentHashes = new Map()
+        for await (let { entity, operation } of useJournal('Manifest mutations', [OPERATION.CREATE, OPERATION.UPDATE, OPERATION.DELETE])) {
+            if (!entity?.id) continue
+            mutatedRefs.add(entity.id)
+            if (entity.meta?.href) mutatedRefs.add(entity.meta.href)
+            if (operation !== OPERATION.DELETE) {
+                currentHashes.set(entity.id, inputHashOf(entity))
+            }
         }
         let skipped = 0
 
@@ -154,7 +169,7 @@ export async function setup(options) {
                 // render leaves the postprocess input missing on the
                 // next run. The right fix is a postprocess manifest
                 // that also skips when its output is current — Phase 3.
-                if (!options.postprocessor && runtime.manifest?.shouldSkip(entity, mutatedRefs)) {
+                if (!options.postprocessor && runtime.manifest?.shouldSkip(entity, mutatedRefs, currentHashes)) {
                     skipped++
                     entry.output = { success: true, skipped: 'manifest' }
                     await updateEntry({ id, output: entry.output })
@@ -173,6 +188,20 @@ export async function setup(options) {
                 const renderEntity = entity?.meta
                     ? { ...entity, meta: projectMeta(entity.meta) }
                     : entity
+                // Per-render dep tracker. Renderers running INLINE/SERIAL
+                // populate this via track.partial(id) / track.query(filter)
+                // as they resolve partials and run catalog queries. The
+                // engine reads it after render to update refs and the
+                // manifest snapshot. Worker dispatch can't share this
+                // object across thread boundaries — those renders get
+                // layout-only deps (added automatically below) and rely
+                // on coarser invalidation. INLINE is the default mode.
+                const track = {
+                    partials: new Set(),
+                    queries:  [],
+                    partial(target) { if (target) this.partials.add(target) },
+                    query(filter)   { if (filter) this.queries.push(filter) },
+                }
                 const renderOptions = {
                     entity: renderEntity,
                     options: {
@@ -182,7 +211,8 @@ export async function setup(options) {
                     },
                     config: renderConfig,
                     context,
-                    state: runtime.state
+                    state: runtime.state,
+                    track,
                 }
                 try {
                     let result
@@ -222,8 +252,34 @@ export async function setup(options) {
                             success: true,
                             result,
                         }
+                        // Collect this render's dep edges + a hash for
+                        // each target. Hash is what lets the next cycle
+                        // distinguish "in journal" from "really changed."
+                        // Auto layout edge first (entity.layout is the
+                        // full layout entity, hash it directly); then
+                        // partials reported via track (INLINE/SERIAL
+                        // only). Queries (kind:'query') wire here in
+                        // Phase 3B.
+                        const edges = []
+                        if (entity.layout?.id) {
+                            edges.push({
+                                kind: 'layout',
+                                target: entity.layout.id,
+                                hash: inputHashOf(entity.layout),
+                            })
+                        }
+                        for (const target of track.partials) {
+                            const partial = runtime.catalog?.chain.get('entities').find({ id: target }).value()
+                            edges.push({
+                                kind: 'partial',
+                                target,
+                                hash: partial ? inputHashOf(partial) : undefined,
+                            })
+                        }
+                        entry.deps = edges
+                        runtime.refs?.replaceDynamic(entity.id, edges)
                         await runtime.complete(entry)
-                        await updateEntry({ id, output: entry.output })
+                        await updateEntry({ id, output: entry.output, deps: edges })
                     }
 
                     logger.debug('Rendered: [%s] %s → %s', options.renderer, entity.name || entity.id, entity.destination)

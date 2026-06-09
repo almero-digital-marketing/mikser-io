@@ -37,11 +37,23 @@ import { extractRefs, isRefKey, writeEntity } from './utils.js'
 import { findEntities, findEntity } from './catalog.js'
 
 export function createIndex() {
+    // Static edges — $-keyed refs from entity.meta (ADR-0007). Rebuilt
+    // from the catalog every cycle in onPersist.
     /** @type {Map<string, Map<string, string[]>>} */
     const inbound = new Map()
 
     /** @type {Map<string, Array<{ field: string, ref: string }>>} */
     const outbound = new Map()
+
+    // Dynamic edges — render-time dependencies (layout, partial, query)
+    // populated by the engine after each successful render. Survive
+    // rebuilds (which only clear static state); cleared per-source when
+    // that source re-renders or gets deleted.
+    /** @type {Map<string, Map<string, Set<string>>>} target → sourceId → Set<kind> */
+    const dynamicInbound = new Map()
+
+    /** @type {Map<string, Array<{ kind: string, target: string }>>} sourceId → edges */
+    const dynamicOutbound = new Map()
 
     function clear() {
         inbound.clear()
@@ -66,6 +78,8 @@ export function createIndex() {
     }
 
     function rebuild(entities) {
+        // Clear ONLY static state. Dynamic edges (render-time deps)
+        // are managed per-source by the engine and outlive a rebuild.
         clear()
         for (const entity of entities) indexEntity(entity)
     }
@@ -88,15 +102,67 @@ export function createIndex() {
         return [...inbound.keys()]
     }
 
+    // Replace the dynamic outbound edges from `sourceId` with `edges`,
+    // updating the inverse index atomically. Called by the engine after
+    // each successful render — edges represent everything the render
+    // read (the auto-added layout edge + whatever the renderer reported
+    // via the track API). Passing an empty array clears the source.
+    function replaceDynamic(sourceId, edges) {
+        // Remove the source from the inverse map of its previous targets.
+        const previous = dynamicOutbound.get(sourceId)
+        if (previous) {
+            for (const { target } of previous) {
+                const inMap = dynamicInbound.get(target)
+                if (inMap) {
+                    inMap.delete(sourceId)
+                    if (inMap.size === 0) dynamicInbound.delete(target)
+                }
+            }
+        }
+        if (!edges || edges.length === 0) {
+            dynamicOutbound.delete(sourceId)
+            return
+        }
+        dynamicOutbound.set(sourceId, edges.slice())
+        for (const { target, kind } of edges) {
+            if (!dynamicInbound.has(target)) dynamicInbound.set(target, new Map())
+            const inMap = dynamicInbound.get(target)
+            if (!inMap.has(sourceId)) inMap.set(sourceId, new Set())
+            inMap.get(sourceId).add(kind)
+        }
+    }
+
+    function clearDynamic(sourceId) {
+        replaceDynamic(sourceId, [])
+    }
+
+    function dynamicOutboundFor(sourceId) {
+        return dynamicOutbound.get(sourceId)?.slice() ?? []
+    }
+
+    function dynamicInboundFor(target) {
+        const inMap = dynamicInbound.get(target)
+        if (!inMap) return []
+        const out = []
+        for (const [id, kinds] of inMap) {
+            for (const kind of kinds) out.push({ id, kind })
+        }
+        return out
+    }
+
     function size() {
         let edges = 0
         for (const fields of inbound.values()) {
             for (const list of fields.values()) edges += list.length
         }
+        let dynamicEdges = 0
+        for (const list of dynamicOutbound.values()) dynamicEdges += list.length
         return {
             refs:     inbound.size,
             sources:  outbound.size,
             edges,
+            dynamicSources: dynamicOutbound.size,
+            dynamicEdges,
         }
     }
 
@@ -108,6 +174,10 @@ export function createIndex() {
         allRefs,
         size,
         clear,
+        replaceDynamic,
+        clearDynamic,
+        dynamicOutboundFor,
+        dynamicInboundFor,
     }
 }
 
@@ -274,10 +344,25 @@ export function createRefs() {
 
     return {
         // Index queries (synchronous; backed by in-memory Maps).
+        // Existing API returns $-ref edges only — kind='ref' implicit.
         inboundFor:  (ref) => index.inboundFor(ref),
         outboundFor: (id)  => index.outboundFor(id),
         allRefs:     ()    => index.allRefs(),
         size:        ()    => index.size(),
+
+        // Dynamic (render-time) edge queries — populated by the engine
+        // after each render via the track API. Returns `{kind, target}`
+        // tuples (outbound) or `{id, kind}` tuples (inbound). kind is
+        // one of 'layout', 'partial', 'query'.
+        dynamicOutboundFor: (id)     => index.dynamicOutboundFor(id),
+        dynamicInboundFor:  (target) => index.dynamicInboundFor(target),
+
+        // Replace an entity's dynamic outbound edges. Called by the
+        // engine after a successful render — the edges list comes from
+        // the track payload (auto layout edge + reported partials/queries).
+        // Passing an empty array clears all dynamic edges from this source.
+        replaceDynamic: (sourceId, edges) => index.replaceDynamic(sourceId, edges),
+        clearDynamic:   (sourceId)        => index.clearDynamic(sourceId),
 
         // Internal — for the engine's onPersist hook.
         _rebuildFrom: (entities) => index.rebuild(entities),
@@ -396,14 +481,21 @@ onPersist(async (signal) => {
             // for "the thing that went away" — they decide whether to
             // act.
             mutations.push(entity)
+            // Drop the deleted entity's dynamic (render-time) edges so
+            // a future entity reusing the same id doesn't inherit stale
+            // partial/layout deps.
+            if (entity?.id) runtime.refs.clearDynamic(entity.id)
         } else {
             mutations.push(entity)
         }
     }
 
-    // Rebuild the index from the post-mutation catalog. Cheap (O(n)
-    // walk over in-memory Maps); future versions can incrementalize
-    // if profiling demands it.
+    // Rebuild the static (catalog-derived) part of the index from the
+    // post-mutation catalog. Cheap (O(n) walk over in-memory Maps);
+    // future versions can incrementalize if profiling demands it.
+    // Dynamic edges (render-time partial/layout deps) are preserved
+    // across rebuilds — they're owned by the engine, refreshed per
+    // entity at render time.
     const entities = await findEntities()
     runtime.refs._rebuildFrom(entities)
 
