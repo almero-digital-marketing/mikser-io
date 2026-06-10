@@ -40,11 +40,21 @@
 import path from 'node:path'
 import { mkdir, readFile } from 'node:fs/promises'
 import { globby } from 'globby'
+import pMap from 'p-map'
 import runtime from './runtime.js'
 import { ACTION } from './constants.js'
 import { checksum as fileChecksum } from './utils.js'
 import { findById, findEntities, checksumsByCollection } from './catalog.js'
 import { useDatabase } from './database/index.js'
+
+// Per-source-scan registerFile concurrency. The work is dominated by
+// file reads + MD5 checksums (I/O-bound); per-file CPU is negligible.
+// 16 keeps the per-process file-descriptor count well below the
+// default ulimit (256 on macOS) while saturating the I/O lane on
+// typical SSDs. At 14k corpus the sequential register loop is ~1-2s;
+// parallel cuts that to ~150ms. At 1M it's the difference between
+// ~150s and ~10s.
+const SCAN_CONCURRENCY = 16
 
 // Three building blocks shared by useSource and the layouts plugin's
 // custom scan. Extracted so the gate + sweep + summary mechanics live
@@ -329,10 +339,16 @@ export function useSource(core, options) {
         // per-file instead of doing per-file SQL lookups. ~14× faster
         // at 14k entities (column projection vs full-entity JSON.parse).
         const priorChecksums = checksumsByCollection(collection)
-        for (const file of files) {
+        // Parallel register — file read + checksum is I/O-bound. Set
+        // additions, scanStats increments, and journal addEntry calls
+        // are all single-threaded-JS-atomic so no locking required;
+        // better-sqlite3 serializes concurrent INSERTs at the writer
+        // and INSERTs are ~10μs vs ~ms-per-file-read, so the journal
+        // is never the bottleneck.
+        await pMap(files, async (file) => {
             await registerFile(file, { logger, scanned, stats: scanStats, priorChecksums })
             if (phase === 'import') updateProgress()
-        }
+        }, { concurrency: SCAN_CONCURRENCY })
 
         scanStats.deleted = await sweepDeleted(collection, scanned, async (e) => {
             await deleteEntity({ id: e.id, type, collection })
