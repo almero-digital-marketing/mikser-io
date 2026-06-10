@@ -8,6 +8,7 @@ export default ({
     useLogger,
     runtime,
     useJournal,
+    updateEntry,
     normalize,
     findEntities,
     iterateEntities,
@@ -69,17 +70,35 @@ export default ({
             // `query` is a sift filter object; compiled once per
             // entitiesName, then tested per journal entry.
             const matchEntity = sift(query)
-            for await (let { operation, entity } of useJournal('Data entities', [OPERATION.CREATE, OPERATION.UPDATE, OPERATION.DELETE])) {
+            for await (let { id, operation, entity } of useJournal('Data entities', [OPERATION.CREATE, OPERATION.UPDATE, OPERATION.DELETE])) {
                 if (matchEntity(entity)) {
                     switch (operation) {
                         case OPERATION.CREATE:
                         case OPERATION.UPDATE:
                             logger.debug('Data export entity %s %s: %s', entity.collection, operation, entity.id)
+                            // mapEntity is a user-defined hook. Many configs use it
+                            // as a transform-for-export (return a derived shape)
+                            // and the picked result lands in saveEntity below.
+                            // Some configs use it as a MUTATION hook — enriching
+                            // entity.meta with computed fields, normalizing data,
+                            // etc. — and expect downstream phases (layouts
+                            // dispatch, render templates) to see the change.
+                            //
+                            // The post-sqlite journal stores its own JSON copy
+                            // per row, so in-place mutations to the yielded
+                            // entity don't survive without an explicit
+                            // updateEntry call. Calling it unconditionally here
+                            // is cheap (one UPDATE per mutated row) and
+                            // preserves both contracts: pure transforms see no
+                            // change to the row's stored copy; mutating
+                            // transforms are persisted.
+                            const mapped = await mapEntity(entity)
+                            await updateEntry({ id, entity })
                             await saveEntity(({
                                 refId: ('/' + entity.name.replaceAll('\\', '/')).replace(/\/index$/g, '/'),
                                 name: entity.name,
                                 date: new Date(entity.time),
-                                data: _.pick(await mapEntity(entity), pick || ['collection', 'format', 'type', 'destination', 'stamp', 'meta', 'id',])
+                                data: _.pick(mapped, pick || ['collection', 'format', 'type', 'destination', 'stamp', 'meta', 'id',])
                             }))
                             break
                         case OPERATION.DELETE:
