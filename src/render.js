@@ -3,8 +3,60 @@ import { createRequire } from 'node:module'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import _ from 'lodash'
+import Database from 'better-sqlite3'
 import { useLogger } from './engine.js'
 import { formatLogArgs } from './utils.js'
+
+// Worker-side sqlite handle. Opened lazily on first render task (we
+// only know the workingFolder/runtimeFolder once we receive a task —
+// Piscina workers don't have engine state at bootstrap). Read-only +
+// WAL means workers don't block the engine's writer; concurrent workers
+// don't block each other.
+//
+// One connection per worker thread. The whole engine catalog stays on
+// disk; workers query exactly what their render touches via prepared
+// statements. Replaces the prior "engine ships state.layouts.sitemap
+// over the wire per render task" path — that was reserializing the
+// entire sitemap (potentially 100MB+ at 14k entities) for every Piscina
+// dispatch.
+let workerDb = null
+let stmtHrefLookup = null
+
+function ensureWorkerDb(options) {
+    if (workerDb) return
+    const dbPath = path.join(options.runtimeFolder, 'mikser.sqlite')
+    workerDb = new Database(dbPath, { readonly: true, fileMustExist: true })
+    // No-op if the engine already set it; better-sqlite3 wants the
+    // setting once for WAL-mode consistency with the writer.
+    workerDb.pragma('journal_mode = WAL')
+    // Read-only consumers only need the JSON body. meta_href is
+    // indexed in catalog_entities; one row per (href, lang) tuple.
+    stmtHrefLookup = workerDb.prepare(
+        'SELECT data FROM catalog_entities WHERE meta_href = ?',
+    )
+}
+
+// Match the legacy `state.layouts.sitemap[href]` return shape:
+//   - 0 hits  → undefined
+//   - 1 hit, no lang → the entity directly (callers test for `.id`)
+//   - 1 hit, with lang → { [lang]: entity }
+//   - N hits → { lang: entity, ... } (lang variants)
+// href.js's runtime.href helper then unwraps either form.
+function lookupHrefViaDb(href) {
+    const rows = stmtHrefLookup.all(href)
+    if (rows.length === 0) return undefined
+    if (rows.length === 1) {
+        const entity = JSON.parse(rows[0].data)
+        if (!entity.meta?.lang) return entity
+        return { [entity.meta.lang]: entity }
+    }
+    const result = {}
+    for (const row of rows) {
+        const entity = JSON.parse(row.data)
+        result[entity.meta?.lang ?? 'default'] = entity
+    }
+    return result
+}
 
 export default async ({ entity, options, config, context, state, logger, port, track }) => {
     logger = logger || {
@@ -70,12 +122,19 @@ export default async ({ entity, options, config, context, state, logger, port, t
     pluginsToLoad.push(...options.plugins)
     pluginsToLoad = _.uniq(pluginsToLoad.filter(pluginName => pluginName && pluginName.indexOf('render-') == 0))
 
+    ensureWorkerDb(options)
+
     const runtime = {
         [entity.type]: entity,
         entity,
         plugins,
         config: config[`render-${renderer}`],
         data: context.data,
+        // Worker-side catalog lookup by href. Replaces the previous
+        // state.layouts.sitemap map that was serialized per render
+        // task. Goes through the same WAL-backed read-only handle
+        // every worker shares with the engine writer.
+        lookupHref: lookupHrefViaDb,
         content() {
             return readFileSync(entity.source, { encoding: 'utf8' })
         },

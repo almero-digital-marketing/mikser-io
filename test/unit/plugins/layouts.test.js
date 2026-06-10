@@ -38,7 +38,10 @@ describe('layouts plugin', () => {
             const h = createHarness({ options: { workingFolder, outputFolder: path.join(workingFolder, 'out') } })
             layoutsPlugin(h.core)
             await h.runHook('loaded')
-            assert.deepEqual(h.runtime.state.layouts, { layouts: {}, sitemap: {}, uriIndex: new Map() })
+            // sitemap + uriIndex retired — sitemap is now backed by
+            // the catalog's indexed meta_href column, queried via the
+            // worker-side read-only sqlite handle in src/render.js.
+            assert.deepEqual(h.runtime.state.layouts, { layouts: {} })
             assert.equal(h.runtime.options.layoutsFolder, path.join(workingFolder, 'layouts'))
         })
     })
@@ -86,7 +89,7 @@ describe('layouts plugin', () => {
         })
     })
 
-    it('onProcessed addToSitemap for entities with a matched layout', async () => {
+    it('onProcessed assigns a matched layout to the entity', async () => {
         await withTempWorking(async (workingFolder) => {
             const h = createHarness({
                 options: { workingFolder, outputFolder: path.join(workingFolder, 'out') },
@@ -111,8 +114,10 @@ describe('layouts plugin', () => {
 
             assert.ok(doc.layout, 'entity should have been assigned a layout')
             assert.equal(doc.layout.name, 'post')
-            const sitemap = h.runtime.state.layouts.sitemap
-            assert.ok(sitemap['/post'] || Object.keys(sitemap).length > 0)
+            // Sitemap presence is now equivalent to "the catalog has
+            // this entity with meta.href set" — verified end-to-end by
+            // the scenario tests against a real subprocess + sqlite.
+            // Unit-level we just check the entity got its layout.
         })
     })
 

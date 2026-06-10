@@ -122,137 +122,11 @@ export default ({
         }
     }
 
-    // Track an `href` against its source `uri` in the inverse index.
-    // Both args optional — entities without a uri (rare; mostly layouts
-    // themselves) just don't get indexed, which is fine because
-    // `removePagesFromSitemap` looks up by uri.
-    function indexHref(uri, href) {
-        if (!uri || !href) return
-        const { uriIndex } = runtime.state.layouts
-        let set = uriIndex.get(uri)
-        if (!set) {
-            set = new Set()
-            uriIndex.set(uri, set)
-        }
-        set.add(href)
-    }
-
-    function unindexHref(uri, href) {
-        if (!uri || !href) return
-        const { uriIndex } = runtime.state.layouts
-        const set = uriIndex.get(uri)
-        if (!set) return
-        set.delete(href)
-        if (set.size === 0) uriIndex.delete(uri)
-    }
-
-    function addToSitemap(entity) {
-        const logger = useLogger()
-        const { sitemap } = runtime.state.layouts
-        const { href = '/' + entity.name, lang } = entity.meta || {}
-        if (lang) {
-            sitemap[href] = sitemap[href] || {};
-            let previous = sitemap[href][lang];
-            if (previous && (previous.id != entity.id)) {
-                logger.warn('Entity with equal href: [%s] %s and %s', previous.collection, previous.id, entity.id);
-                unindexHref(previous.uri, href)
-            }
-            sitemap[href][lang] = entity
-        }
-        else {
-            let previous = sitemap[href];
-            if (previous && (previous.id != entity.id)) {
-                logger.warn('Entity with equal href: [%s] %s and %s', previous.collection, previous.id, entity.id);
-                unindexHref(previous.uri, href)
-            }
-            sitemap[href] = entity
-        }
-        indexHref(entity.uri, href)
-    }
-
-    // Remove every sitemap entry whose entity matches by id or parent.
-    // Still a full scan because the match predicate is by id, not by
-    // href — but called rarely (only on DELETE journal entries, and
-    // the inner cleanup branch of `removePagesFromSitemap`). For the
-    // hot per-entity cleanup, see `removePagesFromSitemap`.
-    function removeFromSitemap(entity) {
-        const { sitemap } = runtime.state.layouts
-        const matches = (current) =>
-            current.id === entity.id || current.parent === entity.id
-        for (let href in sitemap) {
-            let entry = sitemap[href]
-            if (entry.id) {
-                if (matches(entry)) {
-                    unindexHref(entry.uri, href)
-                    delete sitemap[href]
-                }
-            } else {
-                for (let lang in entry) {
-                    if (matches(entry[lang])) {
-                        unindexHref(entry[lang].uri, href)
-                        delete entry[lang]
-                    }
-                }
-            }
-        }
-    }
-
-    // Remove any sitemap entries previously emitted from the same source
-    // uri (the entity itself plus any paginated children). O(matches) via
-    // the inverse index — typically 0 hits on cold (the entity hasn't been
-    // added yet) and 1+ on warm restarts where the prior sitemap state
-    // was restored from the catalog.
-    //
-    // Direct delete by href — we already know the exact slot from
-    // `uriIndex`, no need to call `removeFromSitemap`'s id-based full
-    // scan. That id-based scan is for DELETE journal entries where the
-    // dispatcher only knows the entity id and has to find every sitemap
-    // entry referencing it.
-    function removePagesFromSitemap(entity) {
-        const uri = entity.uri
-        if (!uri) return
-        const { sitemap, uriIndex } = runtime.state.layouts
-        const hrefs = uriIndex.get(uri)
-        if (!hrefs || hrefs.size === 0) return
-        for (const href of hrefs) {
-            const entry = sitemap[href]
-            if (!entry) continue
-            if (entry.id) {
-                delete sitemap[href]
-            } else {
-                // Lang-grouped entry: drop only the variants from this
-                // uri. Keep other-lang siblings (they belong to other
-                // source files).
-                for (const lang in entry) {
-                    if (entry[lang].uri === uri) delete entry[lang]
-                }
-                // Collapse the group if every variant left.
-                if (Object.keys(entry).length === 0) delete sitemap[href]
-            }
-        }
-        // Single index reset for the whole uri — cheaper than per-href
-        // `unindexHref` and correct because every href we just deleted
-        // came from this uri.
-        uriIndex.delete(uri)
-    }
-
-    function* getSitemapEntities() {
-        const { sitemap } = runtime.state.layouts
-        for (let href in sitemap) {
-            let entry = sitemap[href]
-            if (entry.id) {
-                if (!entry.page || entry.page <= 1) {
-                    yield entry
-                }
-            } else {
-                for (let lang in entry) {
-                    if (!entry[lang].page || entry[lang].page <= 1) {
-                        yield entry[lang]
-                    }
-                }
-            }
-        }
-    }
+    // Sitemap lookups live in the catalog — `meta_href` is indexed,
+    // so any "find entity by href" query goes through findEntity or
+    // (in workers) the read-only sqlite handle they open at first task.
+    // The old `runtime.state.layouts.sitemap` in-memory map + `uriIndex`
+    // are gone: every entity's "sitemap presence" IS its catalog row.
 
     // Domain primitive: inspect a layout entity end-to-end. Returns the
     // layout meta, template source bytes, a regex-derived view of the
@@ -288,9 +162,10 @@ export default ({
 
         let sampleEntities = []
         if (samples > 0) {
-            const all = await findEntities()
-            sampleEntities = all
-                .filter(e => e.meta?.layout === layout.name)
+            // Indexed query on `meta_layout` — returns only the
+            // entities that name this layout, not the whole catalog.
+            const matching = await findEntities({ 'meta.layout': layout.name })
+            sampleEntities = matching
                 .slice(0, samples)
                 .map(e => ({ id: e.id, name: e.name, meta: e.meta }))
         }
@@ -372,18 +247,18 @@ export default ({
     onLoaded(async () => {
         const logger = useLogger()
 
+        // Only the layouts collection map lives in memory now. The
+        // sitemap was 14k+ entries at scale and got serialized to every
+        // worker via Piscina; it now lives in the catalog and workers
+        // query it directly through their read-only sqlite handle (see
+        // src/render.js's ensureWorkerDb / lookupHrefViaDb).
+        //
+        // `layouts.layouts` (name → layout entity) stays because it's
+        // small (typically 5-20 entries), referenced by template-engine
+        // partial registration at render-plugin load time, and cheap to
+        // both serialize and rebuild.
         runtime.state.layouts = {
             layouts: {},
-            sitemap: {},
-            // Inverse index for `removePagesFromSitemap`. Maps an
-            // entity.uri (source-file path) to the set of sitemap
-            // hrefs that came from that uri — typically the entity
-            // itself plus its paginated children. Without this,
-            // `removePagesFromSitemap` has to scan the whole sitemap
-            // on every CREATE/UPDATE and every render dispatch,
-            // which is O(N) per call → O(N²) per cycle. With it,
-            // lookup is O(matches) — usually 0 or 1.
-            uriIndex: new Map(),
         }
 
         // Folder name resolved here (config override or default to the
@@ -400,43 +275,14 @@ export default ({
 
         watch(collection, runtime.options.layoutsFolder)
 
-        // Rebuild the in-memory layouts map AND sitemap from the
-        // persisted catalog. Required because the gate (below) now
-        // suppresses CREATEs for unchanged layouts this cycle, so
-        // neither map can be built from journal walks alone. Source-
-        // of-truth is the catalog. Subsequent in-cycle mutations
-        // still flow through createEntity / addToSitemap / onProcessed.
-        //
-        // Two indexed queries instead of one full-catalog walk: the
-        // `collection` and `meta_href` / `meta_layout` columns are
-        // indexed in catalog_entities, so the rebuild touches only
-        // entities that actually contribute to the maps. For a typical
-        // mixed corpus (documents + resources + schemas + ...) this
-        // skips the bulk of the catalog. For a homogeneous one (a
-        // 14k-blog where every doc has meta.layout) the sitemap query
-        // still returns everyone, but the layouts-collection query
-        // is small.
-        //
-        // Sitemap candidate filter: `meta.layout` (string ref to a
-        // layout — the persisted intent) OR `meta.href` (explicit
-        // redirect-style entry). Equivalent to the old `e.layout ||
-        // e.meta?.href` check for entities whose layout resolution
-        // succeeded last cycle; entities whose meta.layout pointed
-        // at a missing layout now appear in the sitemap rebuild but
-        // are harmless (downstream consumers check `e.layout` or
-        // `e.meta?.href` anyway).
+        // Rebuild the in-memory layouts map from the catalog. Indexed
+        // on `collection`, returns the small layouts set — typically a
+        // few entries, not the full corpus. Subsequent in-cycle
+        // mutations to layouts flow through createEntity in onProcess
+        // below.
         const { layouts } = runtime.state.layouts
         for (const e of await findEntities({ collection })) {
             layouts[e.name] = e
-        }
-        for (const e of await findEntities({
-            $or: [
-                { 'meta.layout': { $exists: true } },
-                { 'meta.href':   { $exists: true } },
-            ],
-        })) {
-            if (e.collection === collection) continue   // skip layouts themselves
-            addToSitemap(e)
         }
     })
 
@@ -528,12 +374,22 @@ export default ({
             switch (operation) {
                 case OPERATION.CREATE:
                 case OPERATION.UPDATE:
-                    removePagesFromSitemap(entity)
                     if (!entity.meta?.layout) {
                         for (let pattern in runtime.config.layouts?.match || []) {
                             if (matchEntity(entity, pattern)) {
                                 const layoutName = runtime.config.layouts?.match[pattern]
                                 entity.layout = await resolveLayout(layoutName)
+                                // Mirror the resolved layout name into
+                                // meta.layout so the catalog's indexed
+                                // `meta_layout` column finds this entity
+                                // when downstream code queries "everything
+                                // with a layout." Author-declared cases
+                                // already have meta.layout set; this
+                                // covers config-pattern matches.
+                                if (entity.layout) {
+                                    entity.meta = entity.meta || {}
+                                    entity.meta.layout = layoutName
+                                }
                                 break
                             }
                         }
@@ -555,6 +411,14 @@ export default ({
                             const autoLayout = candidates.find(name => layouts[name])
                             if (autoLayout) {
                                 entity.layout = await resolveLayout(autoLayout)
+                                // Same mirror as the config-pattern
+                                // path above — stamp meta.layout so the
+                                // catalog's indexed query finds this
+                                // entity.
+                                if (entity.layout) {
+                                    entity.meta = entity.meta || {}
+                                    entity.meta.layout = autoLayout
+                                }
                                 logger.debug('Auto layout matched %s -> %s for %s', entity.name, autoLayout, entity.id)
                             } else {
                                 logger.trace('Auto layout no match for %s tried: %s', entity.id, candidates.join(', '))
@@ -586,19 +450,17 @@ export default ({
 
                     if (entity.layout) {
                         logger.debug('Layout matched for %s: %s', entity.collection, entity.id)
-                        addToSitemap(entity)
                     } else if (entity.meta?.href) {
                         logger.trace('Layout missing for %s: %s', entity.collection, entity.id)
-                        addToSitemap(entity)
                     }
                     break
                 case OPERATION.DELETE:
-                    // DELETE journal entries are sparse (id/collection/type only),
-                    // so the uri-based removePagesFromSitemap can't match. Walk
-                    // the sitemap by id first; keep the uri-based sweep for any
-                    // paginated children that match by uri.
-                    removeFromSitemap(entity)
-                    removePagesFromSitemap(entity)
+                    // Catalog DELETE is now the sole source of truth for
+                    // "this entity is no longer in the sitemap". The old
+                    // in-memory addToSitemap / removeFromSitemap
+                    // bookkeeping was a mirror; sitemap lives in the
+                    // catalog (queried via meta_href), so the DELETE
+                    // alone removes it.
                     break
             }
 
@@ -609,10 +471,16 @@ export default ({
         const logger = useLogger()
         const tasks = []
 
-        // Sitemap entities with a matched layout are the full universe of
-        // render candidates. `--force` (or a missing refs index) walks all
-        // of them — the old behaviour, kept as a safety net.
-        const allLayoutEntities = Array.from(getSitemapEntities()).filter(e => e.layout)
+        // Render candidates = entities the catalog records as having a
+        // resolved/declared layout. Query goes through the indexed
+        // `meta_layout` column; we still post-filter for `e.layout`
+        // because meta.layout being set doesn't guarantee resolution
+        // succeeded (a missing layout name persists meta.layout but
+        // not e.layout). `--force` (or a missing refs index) walks
+        // all of them — the old behaviour, kept as a safety net.
+        const allLayoutEntities = (await findEntities({
+            'meta.layout': { $exists: true },
+        })).filter(e => e.layout)
 
         let entities
         if (runtime.options.force || !runtime.refs?.inverseClosureOf) {
@@ -757,7 +625,6 @@ export default ({
                                 pageEntity.destination += page ? `.${pageEntity.page}.${entity.layout.format}` : `.${entity.layout.format}`
                             }
                         } else {
-                            removePagesFromSitemap(original)
                             pageEntity.page = 1
                             if (runtime.config.layouts?.cleanUrls && !_.endsWith(entity.name, 'index') && entity.layout.format == 'html') {
                                 pageEntity.destination = path.join(entity.destination, `index.${entity.layout.format}`)
@@ -765,7 +632,6 @@ export default ({
                                 pageEntity.destination += `.${entity.layout.format}`
                             }
                         }
-                        addToSitemap(pageEntity)
                         tasks.push({
                             entity: pageEntity,
                             options: {
@@ -778,7 +644,6 @@ export default ({
                     }
                 }
             } else {
-                removePagesFromSitemap(original)
                 if (!_.endsWith(entity.name, entity.format)) {
                     if (runtime.config.layouts?.cleanUrls && !_.endsWith(entity.name, 'index') && entity.layout.format == 'html') {
                         entity.destination = path.join(entity.destination, `index.${entity.layout.format}`)
@@ -786,7 +651,6 @@ export default ({
                         entity.destination += `.${entity.layout.format}`
                     }
                 }
-                addToSitemap(entity)
                 if (entity.destination) {
                     tasks.push({
                         entity,

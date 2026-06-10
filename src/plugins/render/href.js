@@ -1,16 +1,13 @@
 import path from 'node:path'
 
-export function load({ entity, runtime, state, options }) {
+export function load({ entity, runtime, options }) {
     const { clear } = options
 
-    runtime.hrefLang = (href) => {
-        const { sitemap } = state.layouts
-        return sitemap[href]
-    }
+    runtime.hrefLang = (href) => runtime.lookupHref(href)
 
     runtime.hrefLangPage = (href, page) => {
         if (page > 1) href += `.${page}`
-        return sitemap[href]
+        return runtime.lookupHref(href)
     }
 
     runtime.href = (href, lang) => {
