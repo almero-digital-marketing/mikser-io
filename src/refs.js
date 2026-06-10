@@ -1,188 +1,171 @@
-// Engine-level reverse-reference index. Maintains an in-memory inverse
-// graph over the `$`-keyed references declared by entities in the
-// catalog (per ADR-0007 A1). Rebuilt every cycle in onPersist (after
-// catalog.js has applied this cycle's CREATE / UPDATE / DELETE entries),
-// so plugins can rely on `runtime.refs.*` returning the post-mutation
-// view of the graph.
+// Engine-level reverse-reference index. Persisted in `catalog_refs`
+// alongside `catalog_entities` and maintained inside catalog.onPersist's
+// transaction (static `$`-keyed refs from entity.meta) plus per-render
+// `replaceDynamic` calls (layout/partial/query edges from the track
+// API).
 //
-// Two views over the same edges:
+// Two kinds of edges share the same table, distinguished by the `kind`
+// column:
 //
-//   inbound :: Map<refValue, Map<sourceEntityId, fieldPath[]>>
-//                "Which entities reference this href, and in which fields?"
+//   kind='ref'                — static `$`-keyed edge from entity meta
+//                               (ADR-0007 A1). field = dotted path.
+//   kind='layout' | 'partial'
+//   | 'query'                 — dynamic render-time edge populated by
+//                               the engine after each successful render
+//                               via the track API. field = '' (empty).
 //
-//   outbound :: Map<sourceEntityId, Array<{ field, ref }>>
-//                "Which refs does this entity emit, and in which fields?"
+// Lookups are indexed SELECTs over (target_ref, kind) and (source_id):
 //
-// Lookups in either direction are O(1) for the entity-list and
-// O(edges-per-entity) for the field list.
+//   inbound  :: "Which entities reference this target_ref?"
+//   outbound :: "Which target_refs does this source emit?"
 //
-// The index is NOT persisted. The catalog is the source of truth
-// (ADR-0002); this is a derived projection that reconstructs from the
-// catalog on every engine start. --clear / engine restart rebuilds it
-// with no data loss because there's no data to lose.
+// The catalog is the source of truth (ADR-0002); catalog_refs is a
+// projection maintained alongside it. ON DELETE CASCADE means
+// catalog_entities deletes cascade automatically — no orphaned refs.
 //
-// Lives in the engine (not as a plugin) per the analysis in ADR-0006's
-// five-test: substrate (not domain), strategic (it operationalises
-// ADR-0007 as a queryable graph), can't cleanly be a plugin without
-// every consumer paying soft-dependency cost, plugins compose against
-// `runtime.refs` independently, and the inverse-graph contract moves
-// on engine cadence (file/refs schema, not external spec).
+// Lives in the engine (not as a plugin) per ADR-0006's five-test:
+// substrate (not domain), strategic (operationalises ADR-0007 as a
+// queryable graph), can't cleanly be a plugin without every consumer
+// paying soft-dependency cost.
 
 import sift from 'sift'
 import runtime from './runtime.js'
 import { useLogger } from './engine.js'
-import { onInitialized, onPersist } from './lifecycle.js'
+import { onLoaded, onPersist } from './lifecycle.js'
 import { useJournal } from './journal.js'
 import { OPERATION } from './constants.js'
 import { extractRefs, isRefKey, writeEntity, lookupKeys, refFilter } from './utils.js'
-import { findEntities, findEntity, findById } from './catalog.js'
+import { findEntity, findById } from './catalog.js'
+import { registerSchema, useDatabase } from './database/index.js'
 
-export function createIndex() {
-    // Static edges — $-keyed refs from entity.meta (ADR-0007). Rebuilt
-    // from the catalog every cycle in onPersist.
-    /** @type {Map<string, Map<string, string[]>>} */
-    const inbound = new Map()
+// Schema registration. Applied idempotently at db.open(). FK to
+// catalog_entities means a catalog DELETE cascades to refs cleanup,
+// no orphans. WITHOUT ROWID makes (source_id, target_ref, kind, field)
+// the clustered key — smaller, faster prefix scans on source_id.
+//
+// Index on target_ref covers the inverse-direction lookup (everyone
+// who references X). The primary key's leading source_id column
+// already covers forward (everything X references) without a
+// separate index.
+registerSchema('catalog_refs', `
+    CREATE TABLE IF NOT EXISTS catalog_refs (
+        source_id   TEXT NOT NULL,
+        target_ref  TEXT NOT NULL,
+        kind        TEXT NOT NULL,
+        field       TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (source_id, target_ref, kind, field),
+        FOREIGN KEY (source_id) REFERENCES catalog_entities(id) ON DELETE CASCADE
+    ) WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS idx_catalog_refs_target ON catalog_refs(target_ref);
+`)
 
-    /** @type {Map<string, Array<{ field: string, ref: string }>>} */
-    const outbound = new Map()
+// Build the index handle over the provided sqlite database. Prepares
+// the SQL statements once at construction; subsequent reads/writes
+// reuse them.
+//
+// Exported so tests can build an index over an in-memory sqlite without
+// driving the full lifecycle. Production wiring lives in createRefs()
+// below.
+export function createIndex(db) {
+    if (!db) throw new Error('createIndex: db is required')
 
-    // Dynamic edges — render-time dependencies (layout, partial, query)
-    // populated by the engine after each successful render. Survive
-    // rebuilds (which only clear static state); cleared per-source when
-    // that source re-renders or gets deleted.
-    /** @type {Map<string, Map<string, Set<string>>>} target → sourceId → Set<kind> */
-    const dynamicInbound = new Map()
+    // Read statements
+    const stmtInboundStatic = db.prepare(`
+        SELECT source_id, field FROM catalog_refs
+        WHERE target_ref = ? AND kind = 'ref'
+    `)
+    const stmtOutboundStatic = db.prepare(`
+        SELECT field, target_ref FROM catalog_refs
+        WHERE source_id = ? AND kind = 'ref'
+    `)
+    const stmtInboundAny = db.prepare(`
+        SELECT DISTINCT source_id FROM catalog_refs
+        WHERE target_ref = ?
+    `)
+    const stmtInboundDynamic = db.prepare(`
+        SELECT source_id, kind FROM catalog_refs
+        WHERE target_ref = ? AND kind != 'ref'
+    `)
+    const stmtOutboundDynamic = db.prepare(`
+        SELECT kind, target_ref FROM catalog_refs
+        WHERE source_id = ? AND kind != 'ref'
+    `)
+    const stmtAllRefs = db.prepare(`
+        SELECT DISTINCT target_ref FROM catalog_refs WHERE kind = 'ref'
+    `)
+    const stmtCountStaticEdges = db.prepare(`
+        SELECT COUNT(*) AS c FROM catalog_refs WHERE kind = 'ref'
+    `)
+    const stmtCountStaticTargets = db.prepare(`
+        SELECT COUNT(DISTINCT target_ref) AS c FROM catalog_refs WHERE kind = 'ref'
+    `)
+    const stmtCountStaticSources = db.prepare(`
+        SELECT COUNT(DISTINCT source_id) AS c FROM catalog_refs WHERE kind = 'ref'
+    `)
+    const stmtCountDynamicEdges = db.prepare(`
+        SELECT COUNT(*) AS c FROM catalog_refs WHERE kind != 'ref'
+    `)
+    const stmtCountDynamicSources = db.prepare(`
+        SELECT COUNT(DISTINCT source_id) AS c FROM catalog_refs WHERE kind != 'ref'
+    `)
 
-    /** @type {Map<string, Array<{ kind: string, target: string }>>} sourceId → edges */
-    const dynamicOutbound = new Map()
+    // Write statements
+    const stmtClearStaticForSource = db.prepare(`
+        DELETE FROM catalog_refs WHERE source_id = ? AND kind = 'ref'
+    `)
+    const stmtClearDynamicForSource = db.prepare(`
+        DELETE FROM catalog_refs WHERE source_id = ? AND kind != 'ref'
+    `)
+    const stmtInsertEdge = db.prepare(`
+        INSERT OR IGNORE INTO catalog_refs (source_id, target_ref, kind, field)
+        VALUES (?, ?, ?, ?)
+    `)
 
-    function clear() {
-        inbound.clear()
-        outbound.clear()
-    }
-
-    function add(sourceId, field, ref) {
-        if (!inbound.has(ref)) inbound.set(ref, new Map())
-        const fieldsByEntity = inbound.get(ref)
-        if (!fieldsByEntity.has(sourceId)) fieldsByEntity.set(sourceId, [])
-        fieldsByEntity.get(sourceId).push(field)
-
-        if (!outbound.has(sourceId)) outbound.set(sourceId, [])
-        outbound.get(sourceId).push({ field, ref })
-    }
-
-    function indexEntity(entity) {
-        if (!entity?.id || !entity.meta) return
-        for (const { path, ref } of extractRefs(entity.meta)) {
-            add(entity.id, path, ref)
-        }
-    }
-
-    function rebuild(entities) {
-        // Clear ONLY static state. Dynamic edges (render-time deps)
-        // are managed per-source by the engine and outlive a rebuild.
-        clear()
-        for (const entity of entities) indexEntity(entity)
-    }
+    // -- Read API ------------------------------------------------------
 
     function inboundFor(ref) {
-        const fieldsByEntity = inbound.get(ref)
-        if (!fieldsByEntity) return []
-        const out = []
-        for (const [id, fields] of fieldsByEntity.entries()) {
-            for (const field of fields) out.push({ id, field })
-        }
-        return out
+        return stmtInboundStatic.all(ref)
+            .map(r => ({ id: r.source_id, field: r.field }))
     }
 
     function outboundFor(sourceId) {
-        return outbound.get(sourceId)?.slice() ?? []
+        return stmtOutboundStatic.all(sourceId)
+            .map(r => ({ field: r.field, ref: r.target_ref }))
     }
 
     function allRefs() {
-        return [...inbound.keys()]
-    }
-
-    // Replace the dynamic outbound edges from `sourceId` with `edges`,
-    // updating the inverse index atomically. Called by the engine after
-    // each successful render — edges represent everything the render
-    // read (the auto-added layout edge + whatever the renderer reported
-    // via the track API). Passing an empty array clears the source.
-    function replaceDynamic(sourceId, edges) {
-        // Remove the source from the inverse map of its previous targets.
-        const previous = dynamicOutbound.get(sourceId)
-        if (previous) {
-            for (const { target } of previous) {
-                const inMap = dynamicInbound.get(target)
-                if (inMap) {
-                    inMap.delete(sourceId)
-                    if (inMap.size === 0) dynamicInbound.delete(target)
-                }
-            }
-        }
-        if (!edges || edges.length === 0) {
-            dynamicOutbound.delete(sourceId)
-            return
-        }
-        dynamicOutbound.set(sourceId, edges.slice())
-        for (const { target, kind } of edges) {
-            if (!dynamicInbound.has(target)) dynamicInbound.set(target, new Map())
-            const inMap = dynamicInbound.get(target)
-            if (!inMap.has(sourceId)) inMap.set(sourceId, new Set())
-            inMap.get(sourceId).add(kind)
-        }
-    }
-
-    function clearDynamic(sourceId) {
-        replaceDynamic(sourceId, [])
-    }
-
-    function dynamicOutboundFor(sourceId) {
-        return dynamicOutbound.get(sourceId)?.slice() ?? []
-    }
-
-    function dynamicInboundFor(target) {
-        const inMap = dynamicInbound.get(target)
-        if (!inMap) return []
-        const out = []
-        for (const [id, kinds] of inMap) {
-            for (const kind of kinds) out.push({ id, kind })
-        }
-        return out
+        return stmtAllRefs.all().map(r => r.target_ref)
     }
 
     function size() {
-        let edges = 0
-        for (const fields of inbound.values()) {
-            for (const list of fields.values()) edges += list.length
-        }
-        let dynamicEdges = 0
-        for (const list of dynamicOutbound.values()) dynamicEdges += list.length
         return {
-            refs:     inbound.size,
-            sources:  outbound.size,
-            edges,
-            dynamicSources: dynamicOutbound.size,
-            dynamicEdges,
+            refs:           stmtCountStaticTargets.get().c,
+            sources:        stmtCountStaticSources.get().c,
+            edges:          stmtCountStaticEdges.get().c,
+            dynamicSources: stmtCountDynamicSources.get().c,
+            dynamicEdges:   stmtCountDynamicEdges.get().c,
         }
     }
 
+    function dynamicInboundFor(target) {
+        return stmtInboundDynamic.all(target)
+            .map(r => ({ id: r.source_id, kind: r.kind }))
+    }
+
+    function dynamicOutboundFor(sourceId) {
+        return stmtOutboundDynamic.all(sourceId)
+            .map(r => ({ kind: r.kind, target: r.target_ref }))
+    }
+
     // Transitive inverse-closure walk from a set of seed entities.
-    // Returns Set<entityId> — every entity that transitively depends
-    // on any seed, via either static $-ref edges or dynamic
-    // layout/partial edges. The seeds themselves are included.
+    // Crosses BOTH static $-ref edges AND dynamic (layout / partial /
+    // query) edges — `stmtInboundAny` selects every kind. Returns
+    // Set<entityId> of every entity that transitively depends on any
+    // seed, including the seeds themselves.
     //
     // Each seed contributes three lookup keys (id, meta.href, id with
-    // its extension stripped) — matching the canonical resolution the
-    // schemas plugin / findRef use, so authors who write
-    // `$author: /authors/jane` reach the entity at
-    // `/documents/authors/jane.yml` regardless of which form the
-    // referrer happens to use.
-    //
-    // Layouts dispatcher uses this to constrain its render queue to
-    // the change closure, instead of walking the full sitemap every
-    // cycle. Cycle-safe via the result Set (a node visited once is
-    // never revisited even when reached from multiple keys).
+    // its extension stripped) — matching the canonical resolution
+    // schemas / findRef use. Cycle-safe via the result Set.
     function inverseClosureOf(seeds, getEntityById) {
         const closure = new Set()
         const keysToWalk = []
@@ -198,9 +181,8 @@ export function createIndex() {
 
         while (keysToWalk.length > 0) {
             const key = keysToWalk.shift()
-            const inboundRefs = inboundFor(key)
-            const inboundDyn  = dynamicInboundFor(key)
-            for (const { id } of [...inboundRefs, ...inboundDyn]) {
+            const referrers = stmtInboundAny.all(key)
+            for (const { source_id: id } of referrers) {
                 if (closure.has(id)) continue
                 closure.add(id)
                 const entity = getEntityById?.(id)
@@ -211,21 +193,87 @@ export function createIndex() {
         return closure
     }
 
+    // -- Write API -----------------------------------------------------
+    //
+    // Catalog.onPersist calls `indexEntity` from inside its transaction
+    // for every CREATE / UPDATE journal entry. Engine.js calls
+    // `replaceDynamic` after each successful render. DELETEs cascade
+    // automatically via the FK — no explicit removeEntity needed.
+
+    // Replace this entity's static refs in catalog_refs. Idempotent:
+    // delete-then-insert wipes prior edges for the same source. Caller
+    // must be inside a transaction (catalog.onPersist provides one).
+    function indexEntity(entity) {
+        if (!entity?.id) return
+        stmtClearStaticForSource.run(entity.id)
+        if (!entity.meta) return
+        for (const { path, ref } of extractRefs(entity.meta)) {
+            stmtInsertEdge.run(entity.id, ref, 'ref', path)
+        }
+    }
+
+    // Replace this source's dynamic edges (layout / partial / query)
+    // with `edges`. Empty array clears them. Per-call transaction —
+    // multiple replaceDynamic invocations during one cycle are
+    // independently atomic.
+    function replaceDynamic(sourceId, edges) {
+        db.transaction(() => {
+            stmtClearDynamicForSource.run(sourceId)
+            if (!edges?.length) return
+            for (const { kind, target } of edges) {
+                if (!kind || !target) continue
+                stmtInsertEdge.run(sourceId, target, kind, '')
+            }
+        })
+    }
+
+    function clearDynamic(sourceId) {
+        replaceDynamic(sourceId, [])
+    }
+
+    const stmtClearAllStatic  = db.prepare(`DELETE FROM catalog_refs WHERE kind = 'ref'`)
+    const stmtClearAll        = db.prepare(`DELETE FROM catalog_refs`)
+
+    // One-shot rebuild — clears all static refs, then re-indexes the
+    // given entities. Not used on hot paths (catalog.onPersist maintains
+    // refs incrementally), but useful for tests and for a future
+    // operational "rebuild from scratch" command. Wrapped in a single
+    // transaction so the index is never observed mid-rebuild.
+    function rebuild(entities) {
+        db.transaction(() => {
+            stmtClearAllStatic.run()
+            if (!entities?.length) return
+            for (const e of entities) indexEntity(e)
+        })
+    }
+
+    function clear() {
+        stmtClearAll.run()
+    }
+
     return {
-        rebuild,
-        indexEntity,
+        // Read
         inboundFor,
         outboundFor,
         allRefs,
         size,
-        clear,
+        dynamicInboundFor,
+        dynamicOutboundFor,
+        inverseClosureOf,
+        // Write
+        indexEntity,
         replaceDynamic,
         clearDynamic,
-        dynamicOutboundFor,
-        dynamicInboundFor,
-        inverseClosureOf,
+        rebuild,
+        clear,
     }
 }
+
+// -- Subscribers -----------------------------------------------------
+//
+// Subscriber dispatch lives in this module (not in the index) so the
+// subscribe/dispatch logic stays portable — useful for tests that
+// don't want to spin up a DB.
 
 // Graph subscriptions. A subscriber registers `{filter, expand, onAffected}`
 // and gets called every cycle for each (root, mutatedEntity) pair where:
@@ -236,13 +284,9 @@ export function createIndex() {
 // each mutated entity up to `maxDepth(expand)` hops. At every visited
 // node, evaluate each subscriber's filter; on match, dispatch.
 //
-// The api plugin's live-expand and per-query cache invalidation both
-// drive their behaviour through this primitive.
-//
 // `getEntityById` is injected so tests can run the subscribe/dispatch
 // machinery without a full runtime/catalog harness. In production it's
-// wired to catalog.findById (synchronous, untracked) via createRefs()
-// below.
+// wired to catalog.findById via createRefs() below.
 export function createSubscribers(index, getEntityById) {
     if (typeof getEntityById !== 'function') {
         throw new Error('createSubscribers: getEntityById is required')
@@ -259,8 +303,6 @@ export function createSubscribers(index, getEntityById) {
         return { dispose }
     }
 
-    // Compute max path length across an expand spec. Each path is a
-    // dotted string; `*` segments don't reduce or extend the count.
     function maxDepthOf(expand) {
         if (!Array.isArray(expand) || expand.length === 0) return 0
         let max = 0
@@ -271,17 +313,6 @@ export function createSubscribers(index, getEntityById) {
         return max
     }
 
-    // BFS backwards through the inverse index from a starting entity,
-    // up to `depth` hops. Returns a Map<entityId, hopsFromStart> —
-    // entities at depth 0 (the start itself), 1 (direct referrers), 2
-    // (referrers of referrers), and so on, up to `depth`. Cycles in
-    // the inverse graph break naturally because `visited` is consulted
-    // before re-entering.
-    //
-    // The per-entity depth is what lets the dispatch loop honour each
-    // subscriber's own max-depth — a subscriber with `expand: ['a']`
-    // only sees entities within hop 1, even when a deeper subscriber
-    // forced the BFS to go further.
     function inverseReach(startEntity, depth) {
         const visited = new Map()
         if (!startEntity?.id) return visited
@@ -306,10 +337,6 @@ export function createSubscribers(index, getEntityById) {
     }
 
     function inverseReferrersOf(entity) {
-        // Look up by every form the source might have used to write a
-        // ref to this entity (id, meta.href, stripped-extension id)
-        // since the index keys are author-written values that may use
-        // any of those shapes.
         const seenIds = new Set()
         const out = []
         for (const ref of lookupKeys(entity)) {
@@ -323,18 +350,6 @@ export function createSubscribers(index, getEntityById) {
         return out
     }
 
-    // Dispatch this cycle's mutations to all relevant subscribers.
-    // For each mutated entity E:
-    //   1. Walk inverse from E up to the MAX expand depth across all
-    //      subscribers — one BFS per mutation, not per subscriber.
-    //   2. Track the per-entity hop-count from E (via inverseReach's
-    //      returned Map).
-    //   3. For each visited entity, fire subscribers whose own max
-    //      expand depth >= the hop-count AND whose filter matches.
-    //
-    // The per-entity hop check is what stops a subscriber with
-    // `expand: ['a']` from firing when the visited entity was reached
-    // at hop 2 (only because another subscriber needed depth 2).
     async function dispatch(mutations) {
         if (subscribers.size === 0 || mutations.length === 0) return
 
@@ -355,9 +370,6 @@ export function createSubscribers(index, getEntityById) {
                     try {
                         await sub.onAffected({ root: visitedEntity, mutated })
                     } catch (err) {
-                        // Logger may not be initialised in unit-test
-                        // contexts; failures from the helper itself are
-                        // not the subscriber's problem.
                         try {
                             useLogger().warn('runtime.refs subscriber threw: %s', err.message)
                         } catch { /* no logger — silent */ }
@@ -370,16 +382,8 @@ export function createSubscribers(index, getEntityById) {
     return { add, dispatch, inverseReach }
 }
 
-// Filter-based subscribers. A subscriber registers `{filter, onAffected}`
-// where `filter` is a sift expression (plain object). On each cycle the
-// dispatcher walks the mutated entities; for every (subscriber, mutation)
-// pair where `sift(filter)(mutation)` returns true, onAffected fires.
-//
-// Different intent from createSubscribers (which walks the inverse-ref
-// graph rooted at filter-matching entities). subscribeQuery answers
-// "tell me when any entity matching this filter mutates" — the
-// primitive that backs live-data dashboards and the preview plugin's
-// per-cache deps. No graph walk; pure per-mutation match.
+// Filter-based subscribers — sift-matched, no graph walk. See module
+// header for the intent split with createSubscribers.
 export function createQuerySubscribers() {
     const subscribers = new Set()
 
@@ -413,112 +417,64 @@ export function createQuerySubscribers() {
     return { add, dispatch }
 }
 
-// Build the public `runtime.refs.*` surface. Tests and direct callers
-// use this factory; the engine wires it in via the lifecycle hooks
-// registered at module level below.
-export function createRefs() {
-    const index = createIndex()
-    // Catalog lookup is injected so the subscribers can be tested
-    // without a runtime. Production binding is catalog.findById — sync,
-    // untracked (refs's hot-path inverse walks don't want to log a
-    // query dep per BFS hop).
+// Build the public `runtime.refs.*` surface. The caller (the onLoaded
+// hook below) builds the index separately so static-ref maintenance
+// in catalog.onPersist can share it via useRefsIndex(). For tests and
+// standalone use, pass null for `prebuiltIndex` and createRefs will
+// build its own.
+export function createRefs(db, prebuiltIndex = null) {
+    const index = prebuiltIndex ?? createIndex(db)
     const subscribers = createSubscribers(index, findById)
     const querySubscribers = createQuerySubscribers()
 
-    // Persist hook lives inside the factory so it closes over the
-    // internal state (index, subscribers, querySubscribers) directly.
-    // Previously these were exposed as `_rebuildFrom` / `_dispatch` /
-    // `_dispatchQueries` on the returned object so the module-level
-    // onPersist could reach them; closure capture is cleaner. catalog.js
-    // registers onPersist for journal-to-catalog writes earlier (it's
-    // imported earlier); our hook runs after, so by the time we rebuild
-    // the index, the catalog reflects this cycle's mutations.
+    // Per-cycle dispatch hook. No rebuild walk anymore — catalog.onPersist
+    // maintains catalog_refs incrementally inside its own transaction,
+    // so by the time our onPersist runs (after catalog's, by import
+    // order in index.js), every static ref edge for this cycle's
+    // mutations is already in the DB.
     onPersist(async (signal) => {
         const mutations = []
         for await (let { operation, entity } of useJournal(
-            'Refs index',
+            'Refs dispatch',
             [OPERATION.CREATE, OPERATION.UPDATE, OPERATION.DELETE],
             signal,
         )) {
             mutations.push(entity)
-            if (operation === OPERATION.DELETE && entity?.id) {
-                // Drop the deleted entity's dynamic (render-time) edges
-                // so a future entity reusing the same id doesn't inherit
-                // stale partial/layout deps.
-                index.clearDynamic(entity.id)
-            }
         }
 
-        // Rebuild the static (catalog-derived) part of the index from
-        // the post-mutation catalog. Cheap (O(n) walk over in-memory
-        // Maps); future versions can incrementalize if profiling
-        // demands it. Dynamic edges (render-time partial/layout deps)
-        // are preserved across rebuilds — they're owned by the engine,
-        // refreshed per entity at render time.
-        const entities = await findEntities()
-        index.rebuild(entities)
-
-        // Dispatch subscribers AFTER the rebuild so any inverse-walk
-        // uses the post-mutation graph. (A subscriber asking "who
-        // references this?" should see the world as it is after this
-        // cycle's writes.)
         await subscribers.dispatch(mutations)
-        // Query subscribers run on the same mutation set with sift
-        // matching — no graph walk. Same post-rebuild ordering applies
-        // for symmetry, though sift never reads the graph itself.
         await querySubscribers.dispatch(mutations)
     })
 
     return {
-        // Index queries (synchronous; backed by in-memory Maps).
-        // Existing API returns $-ref edges only — kind='ref' implicit.
+        // Static $-ref edges
         inboundFor:  (ref) => index.inboundFor(ref),
         outboundFor: (id)  => index.outboundFor(id),
         allRefs:     ()    => index.allRefs(),
         size:        ()    => index.size(),
 
-        // Dynamic (render-time) edge queries — populated by the engine
-        // after each render via the track API. Returns `{kind, target}`
-        // tuples (outbound) or `{id, kind}` tuples (inbound). kind is
-        // one of 'layout', 'partial', 'query'.
+        // Dynamic (render-time) edges
         dynamicOutboundFor: (id)     => index.dynamicOutboundFor(id),
         dynamicInboundFor:  (target) => index.dynamicInboundFor(target),
 
-        // Transitive inverse closure across both static $-ref edges and
-        // dynamic layout/partial edges. Seeds may be entities (preferred
-        // — get all lookup variants) or raw ids. Returns Set<id> of
-        // every entity that depends on any seed. Backs the layouts
-        // dispatcher's "render only what mutated and its dependents"
-        // path.
         inverseClosureOf: (seeds) => index.inverseClosureOf(seeds, findById),
 
-        // Replace an entity's dynamic outbound edges. Called by the
-        // engine after a successful render — the edges list comes from
-        // the track payload (auto layout edge + reported partials/queries).
-        // Passing an empty array clears all dynamic edges from this source.
+        // Replace dynamic edges for a source — called by the engine
+        // after a successful render via the track API.
         replaceDynamic: (sourceId, edges) => index.replaceDynamic(sourceId, edges),
         clearDynamic:   (sourceId)        => index.clearDynamic(sourceId),
 
         // Public subscribe API per ADR-0007 B9 / live-expand design.
         //
-        // Register interest in graph changes affecting a filter-matching
-        // set of roots and their expansion graphs. The callback fires
-        // ONCE per (root, mutated) pair affected by this cycle, with
-        // `root` being the entity matching the filter and `mutated`
-        // being the entity whose change triggered the affected status.
-        //
         //   const sub = runtime.refs.subscribeGraph({
-        //       filter: e => e.id === '/blog/launch.md',
-        //       expand: ['author.organization', 'hero'],
-        //       onAffected: ({ root, mutated }) => { ... },
-        //       signal,                          // optional AbortSignal
+        //       filter:     (entity) => entity.type === 'post',
+        //       expand:     ['author', 'tags.*'],     // depth-2 graph
+        //       onAffected: async ({ root, mutated }) => { ... },
+        //       signal,                              // optional AbortSignal
         //   })
-        //   sub.dispose()                        // explicit teardown
-        //
-        // Returns { dispose }. If `signal` is provided, abort also
-        // disposes (with no need to call dispose explicitly).
+        //   sub.dispose()
         subscribeGraph(opts = {}) {
-            const { filter, expand = [], onAffected, signal } = opts
+            const { filter, expand, onAffected, signal } = opts
             if (typeof filter !== 'function') {
                 throw new Error('runtime.refs.subscribeGraph: filter must be a function')
             }
@@ -528,21 +484,8 @@ export function createRefs() {
             return subscribers.add({ filter, expand, onAffected, signal })
         },
 
-        // Filter-based subscription. Fires onAffected({mutated}) once
-        // per mutated entity that matches `filter` (a sift expression,
-        // plain object). The complement of subscribeGraph: no graph
-        // walk, just per-mutation matching. Backs live-data dashboards
-        // and the preview plugin's per-cache invalidation.
-        //
-        //   const sub = runtime.refs.subscribeQuery({
-        //       filter: { collection: 'posts', 'meta.status': 'published' },
-        //       onAffected: ({ mutated }) => { ... },
-        //       signal,                          // optional AbortSignal
-        //   })
-        //   sub.dispose()                        // explicit teardown
-        //
-        // Returns { dispose }. If `signal` is provided, abort also
-        // disposes (with no need to call dispose explicitly).
+        // Filter-based subscriptions. Same teardown shape as
+        // subscribeGraph — `dispose()` or abort the signal.
         subscribeQuery(opts = {}) {
             const { filter, onAffected, signal } = opts
             if (!filter || typeof filter !== 'object' || Array.isArray(filter)) {
@@ -557,15 +500,6 @@ export function createRefs() {
         // Atomic rename cascade. Walks the inverse index for `from`,
         // opens each referencing source file, rewrites the `$`-keyed
         // value via writeEntity. Watcher resyncs on the next cycle.
-        //
-        //   await runtime.refs.rename({
-        //       from: '/authors/dick',
-        //       to:   '/authors/dick-marinov',
-        //   })
-        //   // → { updated: [{id, fields}], failures: [{id, error}] }
-        //
-        // Idempotent: second call with the same args returns empty
-        // updated because the first call drained the inbound list.
         async rename({ from, to } = {}) {
             if (!from || !to) {
                 throw new Error('runtime.refs.rename: both `from` and `to` are required')
@@ -577,10 +511,7 @@ export function createRefs() {
                 return { from, to, updated: [], failures: [] }
             }
 
-            // Group field updates by entity id so writeEntity is called
-            // once per file even when an entity references `from` from
-            // multiple fields.
-            const byEntity = new Map() // id → fields[]
+            const byEntity = new Map()
             for (const { id, field } of entries) {
                 if (!byEntity.has(id)) byEntity.set(id, [])
                 byEntity.get(id).push(field)
@@ -610,16 +541,34 @@ export function createRefs() {
     }
 }
 
-// Wire to the lifecycle. catalog.js registers onPersist (writes journal
-// mutations into the catalog) and onFinalized (catalog.save). We
-// register AFTER catalog by virtue of being imported later (engine.js
-// imports catalog first, then refs). The persist phase runs both
-// hooks; ours runs after catalog's, so by the time we rebuild the
-// index, the catalog reflects this cycle's mutations.
+// Module-level wiring. createRefs needs the DB; useDatabase() returns
+// null until database.js's onLoaded fires, so we defer wiring to that
+// phase. catalog.js is imported before refs.js in index.js, so its
+// onLoaded (which opens prepared statements over catalog_entities)
+// runs before ours. Static-ref maintenance happens in catalog.onPersist
+// via the index handle we expose on runtime; see catalog.js for the
+// hook integration.
 
-onInitialized(async () => {
-    runtime.refs = createRefs()
+let sharedIndex = null
+
+onLoaded(async () => {
+    const db = useDatabase()
+    if (!db) {
+        throw new Error('refs requires the database; useDatabase() returned null')
+    }
+    // Build the index once; createRefs receives the same instance so
+    // the public surface (runtime.refs.*) and catalog.onPersist's
+    // indexEntity calls share state.
+    sharedIndex = createIndex(db)
+    runtime.refs = createRefs(db, sharedIndex)
 })
+
+// Expose the index for catalog.js's onPersist hook so static refs can
+// be maintained inside the same transaction as catalog_entities
+// mutations. Returns null before onLoaded fires.
+export function useRefsIndex() {
+    return sharedIndex
+}
 
 // Resolve a ref to an entity using the same heuristic catalog.js's
 // findRef uses (id / meta.href / id-minus-ext) via the shared
@@ -627,7 +576,7 @@ onInitialized(async () => {
 // reuse the same matching rules.
 export async function refExists(ref) {
     if (!ref || typeof ref !== 'string') return false
-    const matches = await findEntities(refFilter(ref))
+    const matches = await import('./catalog.js').then(({ findEntities }) => findEntities(refFilter(ref)))
     return matches.length > 0
 }
 
@@ -638,50 +587,50 @@ export async function refExists(ref) {
 function buildRenamePatch(entity, fields, from, to) {
     const patch = {}
     for (const fieldPath of fields) {
+        if (!isRefKey(fieldPath.split('.').pop())) continue
         const parts = fieldPath.split('.')
-        const topKey = parts[0]
-        if (!Object.prototype.hasOwnProperty.call(entity.meta ?? {}, topKey)) continue
-
-        if (parts.length === 1) {
-            const value = entity.meta[topKey]
-            patch[topKey] = rewriteValue(value, from, to)
-        } else {
-            const cloned = structuredClone(entity.meta[topKey])
-            applyNested(cloned, parts.slice(1), from, to)
-            patch[topKey] = cloned
-        }
+        applyNested(patch, parts, rewriteValueIn(entity.meta, parts, from, to), null)
     }
     return patch
 }
 
+function rewriteValueIn(meta, parts, from, to) {
+    let node = meta
+    for (const part of parts) {
+        if (node == null) return undefined
+        const idx = Number(part)
+        if (!isNaN(idx) && Array.isArray(node)) {
+            node = node[idx]
+        } else {
+            node = node?.[part]
+        }
+    }
+    return rewriteValue(node, from, to)
+}
+
 function rewriteValue(value, from, to) {
     if (typeof value === 'string') return value === from ? to : value
-    if (Array.isArray(value)) return value.map(v => (v === from ? to : v))
+    if (Array.isArray(value)) return value.map(v => rewriteValue(v, from, to))
+    if (value && typeof value === 'object') {
+        const out = {}
+        for (const [k, v] of Object.entries(value)) out[k] = rewriteValue(v, from, to)
+        return out
+    }
     return value
 }
 
-function applyNested(node, parts, from, to) {
-    if (parts.length === 0) return
-    const [head, ...tail] = parts
-
-    if (Array.isArray(node)) {
-        const i = Number(head)
-        if (Number.isFinite(i) && i in node) {
-            if (tail.length === 0) {
-                if (node[i] === from) node[i] = to
-            } else {
-                applyNested(node[i], tail, from, to)
-            }
+function applyNested(node, parts, value, _from) {
+    let cursor = node
+    for (let i = 0; i < parts.length - 1; i++) {
+        const part = parts[i]
+        const idx = Number(part)
+        const isArrayIndex = !isNaN(idx)
+        if (isArrayIndex) {
+            if (!Array.isArray(cursor[parts[i - 1]])) cursor[parts[i - 1]] = []
+            cursor = cursor[idx] ??= {}
+        } else {
+            cursor = cursor[part] ??= {}
         }
-        return
     }
-
-    if (node === null || typeof node !== 'object') return
-    if (!Object.prototype.hasOwnProperty.call(node, head)) return
-
-    if (tail.length === 0) {
-        node[head] = rewriteValue(node[head], from, to)
-    } else {
-        applyNested(node[head], tail, from, to)
-    }
+    cursor[parts[parts.length - 1]] = value
 }

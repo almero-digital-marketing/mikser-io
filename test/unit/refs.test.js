@@ -1,29 +1,79 @@
 // Tests for the engine-level inverse-reference index (`runtime.refs`).
-// Covers the pure index data structure in isolation. The lifecycle
-// integration (onInitialized create, onPersist rebuild + dispatch),
-// subscribeGraph dispatch, and rename cascade are exercised end-to-end
-// via the mikser-io test fixture; this file covers the data-structure
-// invariants without needing the full engine harness.
+// Covers the DB-backed index data structure + subscriber dispatch in
+// isolation over an in-memory sqlite database. The lifecycle
+// integration (catalog.onPersist maintains catalog_refs inside its
+// transaction; engine.js calls replaceDynamic after each render) and
+// rename cascade are exercised end-to-end via the smoke test and
+// scenarios; this file covers the data-structure invariants without
+// driving the full engine harness.
 
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { createIndex, createSubscribers } from '../../src/refs.js'
+import { createSqliteDatabase } from '../../src/database/index.js'
 
-// Tiny helper that builds an index + a subscribers harness over an
-// in-memory catalog Map. Mirrors what runtime.catalog provides in
-// production but stays synchronous and standalone.
-function makeRig(entities) {
+// catalog_entities schema (parent of the FK). Bare-bones — refs
+// tests don't exercise catalog columns.
+const CATALOG_SCHEMA = `
+    CREATE TABLE IF NOT EXISTS catalog_entities (
+        id   TEXT PRIMARY KEY,
+        data TEXT NOT NULL
+    ) WITHOUT ROWID;
+`
+
+// catalog_refs schema. Mirrors the production registration in
+// src/refs.js — duplicated here so refs tests don't import side-
+// effecting modules just to grab a schema string.
+const REFS_SCHEMA = `
+    CREATE TABLE IF NOT EXISTS catalog_refs (
+        source_id   TEXT NOT NULL,
+        target_ref  TEXT NOT NULL,
+        kind        TEXT NOT NULL,
+        field       TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (source_id, target_ref, kind, field)
+    ) WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS idx_catalog_refs_target ON catalog_refs(target_ref);
+`
+
+// Open a fresh in-memory database with the two-table schema. Each
+// test gets its own DB so state doesn't bleed between tests.
+function makeTestDb() {
+    const db = createSqliteDatabase({
+        runtimeFolder: '/tmp',
+        version: 'test',
+        config: { filename: ':memory:' },
+        schemas: new Map([
+            ['catalog_entities', CATALOG_SCHEMA],
+            ['catalog_refs',     REFS_SCHEMA],
+        ]),
+    })
+    db.open()
+    return db
+}
+
+// Build a bare index over a fresh DB. Used by tests that exercise the
+// index data structure (indexEntity, rebuild, outboundFor, etc.)
+// without needing a subscriber rig.
+function makeIdx() {
+    return createIndex(makeTestDb())
+}
+
+// Build an index + subscribers harness over a fresh DB, pre-seeded
+// with the provided entities. Mirrors what catalog.onPersist does in
+// production (indexEntity per CREATE/UPDATE).
+function makeRig(entities = []) {
+    const db = makeTestDb()
     const byId = new Map(entities.map(e => [e.id, e]))
-    const index = createIndex()
-    index.rebuild(entities)
+    const index = createIndex(db)
+    for (const e of entities) index.indexEntity(e)
     const subs = createSubscribers(index, (id) => byId.get(id))
-    return { index, subs, byId }
+    return { index, subs, byId, db }
 }
 
 describe('createIndex', () => {
     it('starts empty', () => {
-        const idx = createIndex()
+        const idx = makeIdx()
         assert.deepEqual(idx.allRefs(), [])
         assert.deepEqual(idx.size(), { refs: 0, sources: 0, edges: 0, dynamicSources: 0, dynamicEdges: 0 })
         assert.deepEqual(idx.inboundFor('/x'), [])
@@ -31,7 +81,7 @@ describe('createIndex', () => {
     })
 
     it('indexes top-level $-keyed refs', () => {
-        const idx = createIndex()
+        const idx = makeIdx()
         idx.indexEntity({
             id: '/blog/launch.md',
             meta: {
@@ -53,7 +103,7 @@ describe('createIndex', () => {
     })
 
     it('indexes array-valued refs with index-bearing field paths', () => {
-        const idx = createIndex()
+        const idx = makeIdx()
         idx.indexEntity({
             id: '/blog/post.md',
             meta: { $related: ['/blog/a', '/blog/b'] },
@@ -68,7 +118,7 @@ describe('createIndex', () => {
     })
 
     it('handles nested $-keys', () => {
-        const idx = createIndex()
+        const idx = makeIdx()
         idx.indexEntity({
             id: '/landing.md',
             meta: {
@@ -89,7 +139,7 @@ describe('createIndex', () => {
     })
 
     it('aggregates multiple sources pointing at the same ref', () => {
-        const idx = createIndex()
+        const idx = makeIdx()
         idx.indexEntity({ id: '/post-a.md', meta: { $author: '/authors/dick' } })
         idx.indexEntity({ id: '/post-b.md', meta: { $author: '/authors/dick' } })
         idx.indexEntity({ id: '/post-c.md', meta: { $author: '/authors/other' } })
@@ -100,7 +150,7 @@ describe('createIndex', () => {
     })
 
     it('aggregates multiple fields on one source pointing at the same ref', () => {
-        const idx = createIndex()
+        const idx = makeIdx()
         idx.indexEntity({
             id: '/post.md',
             meta: { $author: '/authors/dick', $editor: '/authors/dick' },
@@ -112,7 +162,7 @@ describe('createIndex', () => {
     })
 
     it('rebuild() replaces the entire index atomically', () => {
-        const idx = createIndex()
+        const idx = makeIdx()
         idx.indexEntity({ id: '/a.md', meta: { $author: '/authors/dick' } })
         assert.equal(idx.inboundFor('/authors/dick').length, 1)
 
@@ -126,14 +176,14 @@ describe('createIndex', () => {
     })
 
     it('rebuild() with an empty list clears the index', () => {
-        const idx = createIndex()
+        const idx = makeIdx()
         idx.indexEntity({ id: '/a.md', meta: { $author: '/x' } })
         idx.rebuild([])
         assert.deepEqual(idx.size(), { refs: 0, sources: 0, edges: 0, dynamicSources: 0, dynamicEdges: 0 })
     })
 
     it('size() counts refs, sources, and edges correctly', () => {
-        const idx = createIndex()
+        const idx = makeIdx()
         idx.rebuild([
             { id: '/a.md', meta: { $x: '/t1', $y: '/t2' } },              // 2 edges from a
             { id: '/b.md', meta: { $x: '/t1' } },                          // 1 edge from b (same t1)
@@ -147,7 +197,7 @@ describe('createIndex', () => {
     })
 
     it('outboundFor() returns a fresh copy (caller can mutate without breaking the index)', () => {
-        const idx = createIndex()
+        const idx = makeIdx()
         idx.indexEntity({ id: '/a.md', meta: { $x: '/t1' } })
 
         const copy = idx.outboundFor('/a.md')
@@ -158,7 +208,7 @@ describe('createIndex', () => {
     })
 
     it('ignores entities with no id or no meta', () => {
-        const idx = createIndex()
+        const idx = makeIdx()
         idx.indexEntity({ meta: { $x: '/t' } })                // no id
         idx.indexEntity({ id: '/a.md' })                       // no meta
         idx.indexEntity({ id: '/b.md', meta: null })           // null meta
@@ -166,7 +216,7 @@ describe('createIndex', () => {
     })
 
     it('ignores $-keys whose values are not strings or string arrays', () => {
-        const idx = createIndex()
+        const idx = makeIdx()
         // extractRefs already filters out invalid shapes; this test
         // double-checks the index does not crash and produces no edges
         // for invalid entries.

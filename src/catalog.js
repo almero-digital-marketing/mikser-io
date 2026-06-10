@@ -33,6 +33,7 @@ import { normalizeFilter } from './track.js'
 import { useDatabase, registerSchema } from './database/index.js'
 import { translate as siftToSql, INDEXED_COLUMNS } from './database/sift-to-sql.js'
 import { queryContext } from './database/query-context.js'
+import { useRefsIndex } from './refs.js'
 
 export { queryContext }
 
@@ -141,18 +142,20 @@ function entityToRow(entity) {
 }
 
 // Apply per-cycle journal mutations inside one transaction (per the
-// migration plan's per-phase transaction granularity). better-sqlite3's
-// transaction wrapper is sync-only, so we drain the journal first and
-// then sync-apply in one call.
+// migration plan's per-phase transaction granularity). Maintains
+// `catalog_refs` alongside `catalog_entities` so refs and entities
+// commit atomically — neither view ever shows a partial mutation.
+//
+// better-sqlite3's transaction wrapper is sync-only, so we drain the
+// journal first and then sync-apply in one call.
 async function applyJournalMutations() {
     const logger = useLogger()
+    const refsIndex = useRefsIndex()
     const mutations = []
     for await (const { operation, entity } of useJournal('Catalog')) {
         mutations.push({ operation, entity })
     }
     if (!mutations.length) return
-    // db.transaction() (our wrapper) already invokes the inner
-    // function inside BEGIN/COMMIT. No trailing call.
     db.transaction(() => {
         for (const { operation, entity } of mutations) {
             switch (operation) {
@@ -160,11 +163,16 @@ async function applyJournalMutations() {
                 case OPERATION.UPDATE:
                     logger.trace('Database %s %s: %s', entity.collection, operation, entity.id)
                     stmtUpsert.run(entityToRow(entity))
+                    // Static $-ref edges from entity.meta. Refs index
+                    // does delete-then-insert internally so this is
+                    // idempotent across UPDATE.
+                    refsIndex?.indexEntity(entity)
                     cacheEvict(entity.id)   // next read returns fresh data
                     break
                 case OPERATION.DELETE:
                     logger.trace('Database %s %s: %s', entity.collection, operation, entity.id)
                     stmtDelete.run(entity.id)
+                    // FK ON DELETE CASCADE handles catalog_refs cleanup.
                     cacheEvict(entity.id)
                     break
             }
