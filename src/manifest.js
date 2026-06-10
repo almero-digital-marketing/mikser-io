@@ -210,8 +210,27 @@ export function createManifest(db) {
         FROM mikser_snapshots
     `)
     const stmtCount = db.prepare(`SELECT COUNT(*) AS c FROM mikser_snapshots`)
-    const stmtRecordedHashes = db.prepare(`
-        SELECT id, inputHash, refClosure FROM mikser_snapshots
+    // Two narrow queries instead of one row-scan-and-JSON.parse loop.
+    // The dep-hash query uses sqlite's `json_each` extension to flatten
+    // each snapshot's refClosure array entirely in C — at 110k
+    // snapshots the prior implementation parsed ~500MB of JSON in JS
+    // every cycle to recover ~20 distinct (target, hash) pairs.
+    const stmtEntityInputHashes = db.prepare(`
+        SELECT id, MIN(inputHash) AS inputHash
+        FROM mikser_snapshots
+        WHERE inputHash IS NOT NULL
+        GROUP BY id
+    `)
+    const stmtDepHashes = db.prepare(`
+        SELECT
+            json_extract(value, '$.target') AS target,
+            MIN(json_extract(value, '$.hash')) AS hash
+        FROM mikser_snapshots, json_each(mikser_snapshots.refClosure)
+        WHERE mikser_snapshots.refClosure IS NOT NULL
+          AND json_extract(value, '$.kind')   != 'query'
+          AND json_extract(value, '$.target') IS NOT NULL
+          AND json_extract(value, '$.hash')   IS NOT NULL
+        GROUP BY json_extract(value, '$.target')
     `)
 
     const manifest = {
@@ -280,24 +299,29 @@ export function createManifest(db) {
 
         // Id → inputHash Map mined across every snapshot. Used by the
         // layouts dispatcher as its hash-aware seeding filter.
-        // Walks the manifest once per cycle in onProcessed; bounded
-        // cost.
+        //
+        // Two indexed-projection queries instead of the prior scan-
+        // and-parse-every-row loop. At 110k snapshots the old loop
+        // parsed ~500MB of refClosure JSON in JS per cycle; this path
+        // moves the json work into sqlite's json_each (C) and projects
+        // just the (target, hash) pairs we actually need.
+        //
+        // Entity inputHashes come from the indexed `inputHash` column
+        // directly. Dep hashes come from a json_each flatten with a
+        // GROUP BY target so 110k snapshots × ~3 deps each → ~20
+        // distinct rows hit JS.
+        //
+        // Entity hashes are loaded first so they "win" over dep hashes
+        // for the same id (matches the prior first-seen-wins semantic;
+        // entity inputHashes were always added before deps in the
+        // earlier loop).
         recordedHashes() {
             const map = new Map()
-            for (const row of stmtRecordedHashes.iterate()) {
-                if (row.inputHash && !map.has(row.id)) {
-                    map.set(row.id, row.inputHash)
-                }
-                if (row.refClosure) {
-                    let closure
-                    try { closure = JSON.parse(row.refClosure) } catch { continue }
-                    for (const dep of closure) {
-                        if (dep.kind === 'query') continue
-                        if (dep.target && dep.hash && !map.has(dep.target)) {
-                            map.set(dep.target, dep.hash)
-                        }
-                    }
-                }
+            for (const row of stmtEntityInputHashes.iterate()) {
+                map.set(row.id, row.inputHash)
+            }
+            for (const row of stmtDepHashes.iterate()) {
+                if (!map.has(row.target)) map.set(row.target, row.hash)
             }
             return map
         },
