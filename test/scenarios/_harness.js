@@ -82,11 +82,30 @@ export async function cleanup(workdir) {
 // format (one snapshot per line) — parse line by line and skip empty
 // trailing lines.
 export async function readManifest(workdir) {
-    const file = path.join(workdir, 'runtime', 'manifest.ndjson')
+    const file = path.join(workdir, 'runtime', 'mikser.sqlite')
     if (!existsSync(file)) return null
-    const { readFile } = await import('node:fs/promises')
-    const text = await readFile(file, 'utf8')
-    return text.split('\n').filter(Boolean).map(line => JSON.parse(line))
+    const { default: Database } = await import('better-sqlite3')
+    const db = new Database(file, { readonly: true, fileMustExist: true })
+    try {
+        let rows = []
+        try {
+            rows = db.prepare(`
+                SELECT id, destination, inputHash, outputHash, refClosure, renderedAt, parent
+                FROM mikser_snapshots
+            `).all()
+        } catch { /* table not present yet — return [] */ }
+        return rows.map(row => ({
+            id:          row.id,
+            destination: row.destination,
+            inputHash:   row.inputHash ?? undefined,
+            outputHash:  row.outputHash ?? undefined,
+            refClosure:  row.refClosure ? JSON.parse(row.refClosure) : undefined,
+            renderedAt:  row.renderedAt ?? undefined,
+            parent:      row.parent ?? undefined,
+        }))
+    } finally {
+        db.close()
+    }
 }
 
 // Convenience: read the catalog directly from the engine's sqlite

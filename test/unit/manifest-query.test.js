@@ -17,26 +17,46 @@ import assert from 'node:assert/strict'
 
 import runtime from '../../src/runtime.js'
 import { createManifest } from '../../src/manifest.js'
+import { createSqliteDatabase } from '../../src/database/index.js'
+
+// Minimal schema needed for createManifest to prepare its statements.
+const MANIFEST_SCHEMA = `
+    CREATE TABLE IF NOT EXISTS mikser_snapshots (
+        id          TEXT NOT NULL,
+        destination TEXT NOT NULL,
+        inputHash   TEXT,
+        outputHash  TEXT,
+        refClosure  TEXT,
+        renderedAt  INTEGER,
+        parent      TEXT,
+        PRIMARY KEY (id, destination)
+    ) WITHOUT ROWID;
+`
+
+// Fresh in-memory database per test so state doesn't leak.
+function makeDb() {
+    const db = createSqliteDatabase({
+        runtimeFolder: '/tmp',
+        version: 'test',
+        config: { filename: ':memory:' },
+        schemas: new Map([['mikser_snapshots', MANIFEST_SCHEMA]]),
+    })
+    db.open()
+    return db
+}
 
 beforeEach(() => {
-    // Manifest stores hashes for $-ref targets via runtime.catalog
-    // lookup. Tests don't put $-refs in their entities, so the stub
-    // just needs the chain shape — get/find/value.
-    runtime.catalog = {
-        chain: {
-            get() {
-                return {
-                    find() { return { value: () => null } },
-                }
-            },
-        },
-    }
+    // findById is called by manifest.collectEdges + buildRefClosure
+    // to hash $-ref targets. These tests don't seed $-refs, so a stub
+    // that's just shaped right is enough — return undefined and the
+    // closure falls back to the conservative path.
+    runtime.catalog = { byId: new Map() }
 })
 
 describe('manifest.shouldSkip with query closure entries', () => {
 
     it('skips when no mutation matches the stored filter', () => {
-        const m = createManifest()
+        const m = createManifest(makeDb())
         const entity = { id: '/sitemap', destination: '/sitemap.xml', meta: {}, content: '' }
         m.record(entity, [
             { kind: 'query', filter: { 'meta.layout': 'post' } },
@@ -52,7 +72,7 @@ describe('manifest.shouldSkip with query closure entries', () => {
     })
 
     it('invalidates when a mutation matches the stored filter', () => {
-        const m = createManifest()
+        const m = createManifest(makeDb())
         const entity = { id: '/sitemap', destination: '/sitemap.xml', meta: {}, content: '' }
         m.record(entity, [
             { kind: 'query', filter: { 'meta.layout': 'post' } },
@@ -68,7 +88,7 @@ describe('manifest.shouldSkip with query closure entries', () => {
     })
 
     it('null filter (function-predicate sentinel) always invalidates', () => {
-        const m = createManifest()
+        const m = createManifest(makeDb())
         const entity = { id: '/sitemap', destination: '/sitemap.xml', meta: {}, content: '' }
         m.record(entity, [
             { kind: 'query', filter: null },
@@ -79,7 +99,7 @@ describe('manifest.shouldSkip with query closure entries', () => {
     })
 
     it('mixed closure: layout + query, only the query invalidates', () => {
-        const m = createManifest()
+        const m = createManifest(makeDb())
         const entity = {
             id: '/sitemap',
             destination: '/sitemap.xml',
@@ -108,7 +128,7 @@ describe('manifest.shouldSkip with query closure entries', () => {
     })
 
     it('sift operators (e.g. $in, $regex) work in stored filters', () => {
-        const m = createManifest()
+        const m = createManifest(makeDb())
         const entity = { id: '/featured', destination: '/featured.html', meta: {}, content: '' }
         m.record(entity, [
             { kind: 'query', filter: { 'meta.tags': { $in: ['featured', 'editor-pick'] } } },
@@ -134,7 +154,7 @@ describe('manifest.shouldSkip with query closure entries', () => {
     })
 
     it('empty mutations Set skips query renders regardless of filter', () => {
-        const m = createManifest()
+        const m = createManifest(makeDb())
         const entity = { id: '/sitemap', destination: '/sitemap.xml', meta: {}, content: '' }
         m.record(entity, [
             { kind: 'query', filter: { 'meta.layout': 'post' } },
@@ -145,7 +165,7 @@ describe('manifest.shouldSkip with query closure entries', () => {
     })
 
     it('refClosure dedupes query entries by serialized filter', () => {
-        const m = createManifest()
+        const m = createManifest(makeDb())
         const entity = { id: '/sitemap', destination: '/sitemap.xml', meta: {}, content: '' }
         // Same filter recorded twice (e.g. helper called repeatedly).
         m.record(entity, [
