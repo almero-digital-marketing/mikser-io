@@ -9,7 +9,7 @@ import { onInitialize, onInitialized, onRender, onCancel, onCancelled, onFinaliz
 import { useJournal, updateEntry } from './journal.js'
 import { globby } from 'globby'
 import { OPERATION, TASKS } from './constants.js'
-import { changeExtension, formatErrorContext, projectMeta } from './utils.js'
+import { changeExtension, formatErrorContext, projectMeta, lookupKeys } from './utils.js'
 import render from './render.js'
 import postprocess, { loadPlugin as loadPostPlugin } from './postprocess.js'
 import map from 'p-map'
@@ -236,21 +236,30 @@ export async function setup(options) {
         const mutatedEntities = new Map()
         for await (let { entity, operation } of useJournal('Manifest mutations', [OPERATION.CREATE, OPERATION.UPDATE, OPERATION.DELETE])) {
             if (!entity?.id) continue
-            mutatedRefs.add(entity.id)
-            if (entity.meta?.href) mutatedRefs.add(entity.meta.href)
             mutatedEntities.set(entity.id, entity)
+            const hash = operation === OPERATION.DELETE ? null : inputHashOf(entity)
+            // Expand the mutated entity into every form a refClosure
+            // entry might target — id, meta.href, AND id-minus-extension
+            // — via lookupKeys. Without the stripped form, a refClosure
+            // recorded against the natural author/blog-post pattern
+            // (`$author: /documents/authors/dick`) would never match
+            // the mutated `/documents/authors/dick.yml` here and
+            // manifest.shouldSkip would silently return true, pinning
+            // the post's output to bytes that reference stale author
+            // data. refs.inverseClosureOf and catalog.findEntity both
+            // use the same extension-tolerant resolution; the manifest
+            // layer has to match.
+            //
             // For DELETE we set `null` as the current hash so manifest.
             // shouldSkip can distinguish "target was deleted from the
             // catalog" from "target wasn't in this cycle's mutations
             // at all." Without this distinction, a consumer whose
             // refClosure points at a deleted partial/layout would
-            // silently skip re-rendering — leaving the disk output
-            // pinned to bytes that reference something no longer in
-            // the catalog.
-            currentHashes.set(
-                entity.id,
-                operation === OPERATION.DELETE ? null : inputHashOf(entity),
-            )
+            // silently skip re-rendering.
+            for (const key of lookupKeys(entity)) {
+                mutatedRefs.add(key)
+                currentHashes.set(key, hash)
+            }
         }
         let skipped = 0
 

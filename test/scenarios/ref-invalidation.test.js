@@ -51,18 +51,18 @@ describe('ref-based invalidation', () => {
     after(() => cleanup(workdir))
 
     before(async () => {
-        // Note: the documents plugin keeps file extensions in entity
-        // ids by default — `dick.yml` → `/documents/authors/dick.yml`.
-        // $-ref strings must match the full id (extension included) or
-        // findById returns undefined and the refClosure entry gets
-        // recorded without a hash, breaking manifest invalidation.
+        // Extension-stripped refs (the natural form users write —
+        // `$author: /documents/authors/dick` rather than `dick.yml`).
+        // refs/catalog/inverseClosureOf all use extension-tolerant
+        // resolution via `lookupKeys`/`refFilter`, so this is the
+        // intended write shape.
         await setupFixture(workdir, {
             'mikser.config.js': MINIMAL_CONFIG,
             'documents/authors/dick.yml': authorDoc('Dick'),
             'documents/authors/jane.yml': authorDoc('Jane'),
-            'documents/posts/post-1.html': postDoc('<p>post 1 body</p>', '/documents/authors/dick.yml'),
-            'documents/posts/post-2.html': postDoc('<p>post 2 body</p>', '/documents/authors/dick.yml'),
-            'documents/posts/post-3.html': postDoc('<p>post 3 body</p>', '/documents/authors/jane.yml'),
+            'documents/posts/post-1.html': postDoc('<p>post 1 body</p>', '/documents/authors/dick'),
+            'documents/posts/post-2.html': postDoc('<p>post 2 body</p>', '/documents/authors/dick'),
+            'documents/posts/post-3.html': postDoc('<p>post 3 body</p>', '/documents/authors/jane'),
             'layouts/post.hbs': POST_LAYOUT,
         })
     })
