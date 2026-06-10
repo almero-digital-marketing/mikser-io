@@ -1,8 +1,7 @@
 import path from 'path'
-import { mkdir, writeFile, unlink } from 'fs/promises'
+import { mkdir, writeFile, unlink, open } from 'fs/promises'
 import _ from 'lodash'
 import sift from 'sift'
-import pMap from 'p-map'
 
 export default ({
     onLoaded,
@@ -11,6 +10,7 @@ export default ({
     useJournal,
     normalize,
     findEntities,
+    iterateEntities,
     onAfterRender,
     onFinalize,
     onBeforeRender,
@@ -140,24 +140,56 @@ export default ({
             const targetFolder = token
                 ? path.join(runtime.options.dataFolder, token)
                 : runtime.options.dataFolder
-            const {
-                query: catalogFilter = { type: 'document' },
-                map: mapEntity = entity => entity,
-                pick,
-                save: saveEntities = async entities => {
-                    const entitiesFile = path.join(targetFolder, `${catalogName}.json`)
-                    await mkdir(path.dirname(entitiesFile), { recursive: true })
-                    logger.debug('Data export catalog %s %s: %s', catalogName, entities.length, entitiesFile)
-                    await writeFile(entitiesFile, JSON.stringify(entities), 'utf8')
+            const cfg = runtime.config.data?.catalog[catalogName]
+            const catalogFilter = cfg.query ?? { type: 'document' }
+            const mapEntity = cfg.map ?? (entity => entity)
+            const pick = cfg.pick
+            const saveEntities = cfg.save
+            const pickKeys = pick || ['collection', 'format', 'type', 'destination', 'stamp', 'meta', 'id']
+
+            async function transform(entity) {
+                return {
+                    refId: ('/' + entity.name.replaceAll('\\', '/')).replace(/\/index$/g, '/'),
+                    name: entity.name,
+                    date: new Date(entity.time),
+                    data: _.pick(await mapEntity(entity), pickKeys),
                 }
-            } = runtime.config.data?.catalog[catalogName]
-            const entities = await findEntities(catalogFilter)
-            await saveEntities(await pMap(entities, async entity => ({
-                refId: ('/' + entity.name.replaceAll('\\', '/')).replace(/\/index$/g, '/'),
-                name: entity.name,
-                date: new Date(entity.time),
-                data: _.pick(await mapEntity(entity), pick || ['collection', 'format', 'type', 'destination', 'stamp', 'meta', 'id',])
-            })))
+            }
+
+            if (saveEntities) {
+                // User-provided save() takes an array — preserve the
+                // contract by materializing. Operators who override this
+                // have signed up for the memory cost.
+                const entities = await findEntities(catalogFilter)
+                const transformed = []
+                for (const entity of entities) {
+                    transformed.push(await transform(entity))
+                }
+                await saveEntities(transformed)
+            } else {
+                // Default path — stream to a JSON array file without
+                // ever holding the full set in heap. iterateEntities
+                // chunks at the catalog layer; we hand-roll the JSON
+                // array framing so transformed rows go to disk as they
+                // come, bounded peak ≈ one entity at a time.
+                const entitiesFile = path.join(targetFolder, `${catalogName}.json`)
+                await mkdir(path.dirname(entitiesFile), { recursive: true })
+                const fh = await open(entitiesFile, 'w')
+                try {
+                    await fh.write('[')
+                    let count = 0
+                    for await (const entity of iterateEntities(catalogFilter)) {
+                        const row = await transform(entity)
+                        if (count > 0) await fh.write(',')
+                        await fh.write(JSON.stringify(row))
+                        count++
+                    }
+                    await fh.write(']')
+                    logger.debug('Data export catalog %s %s: %s', catalogName, count, entitiesFile)
+                } finally {
+                    await fh.close()
+                }
+            }
         }
     })
 }

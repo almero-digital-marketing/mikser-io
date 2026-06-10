@@ -165,6 +165,18 @@ export function createHarness({
             if (typeof query === 'function') return entities.filter(query)
             return entities.filter(e => Object.entries(query).every(([k, v]) => e[k] === v))
         },
+        iterateEntities: async function* (query) {
+            // Stub — yields the same set findEntities would return,
+            // one entity at a time. Real impl in catalog.js chunks via
+            // sqlite; the harness doesn't need that fidelity because
+            // unit-test corpora are tiny.
+            const filtered = !query
+                ? [...entities]
+                : (typeof query === 'function'
+                    ? entities.filter(query)
+                    : entities.filter(e => Object.entries(query).every(([k, v]) => e[k] === v)))
+            for (const e of filtered) yield e
+        },
 
         // Rendering & postprocessing — capture for assertions
         renderEntities: async (tasks) => renderTasks.push(...tasks),

@@ -8,6 +8,7 @@ import { createTrack } from '../track.js'
 import { queryContext } from '../catalog.js'
 import { gateChecksum, sweepDeleted, scanSummary } from '../source.js'
 import { checksumsByCollection } from '../catalog.js'
+import { useDatabase } from '../database/index.js'
 
 // Liquid / Handlebars / Eta keywords we don't want surfaced as
 // "variables this layout references." Anything that looks like a path
@@ -495,12 +496,31 @@ export default ({
         let entities
         if (runtime.options.force || !runtime.refs?.inverseClosureOf) {
             // --force (or missing refs index) — dispatch every render
-            // candidate. Materializes the full layout-bearing slice of
-            // the catalog. Operator opt-in; the memory cost is the
-            // cost of the work.
-            entities = (await findEntities({
-                'meta.layout': { $exists: true },
-            })).filter(e => e.layout)
+            // candidate. The prior implementation called
+            // findEntities({'meta.layout': {$exists:true}}) and then
+            // .filter(e => e.layout), materializing the full layout-
+            // bearing entity slice TWICE (once into the SQL result, once
+            // into the filtered array). At 1M corpus that doubled-up
+            // shape was ~14GB peak.
+            //
+            // Project ids only — `id` is ~50B vs ~7KB for a full entity
+            // body, ~140× smaller. SQL ORDER BY time DESC handles the
+            // sort we'd otherwise do client-side. Then hydrate each id
+            // via findById, dropping the rare meta_layout-set-but-no-
+            // resolved-layout entries on the JS side (layout name
+            // didn't match any layout file; layouts.onProcessed
+            // couldn't attach `.layout`).
+            const db = useDatabase()
+            const ids = db.prepare(`
+                SELECT id FROM mikser_entities
+                WHERE meta_layout IS NOT NULL
+                ORDER BY time DESC
+            `).all().map(r => r.id)
+            entities = []
+            for (const id of ids) {
+                const entity = findById(id)
+                if (entity?.layout) entities.push(entity)
+            }
             if (runtime.options.force) {
                 logger.debug('Force rebuild — dispatching all %d entities', entities.length)
             }

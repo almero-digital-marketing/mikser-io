@@ -121,6 +121,12 @@ function cacheClear() {
 // Prepared statements + lifecycle handle. Set at onLoaded; persists
 // across cycles (sqlite stays open).
 let db = null
+// Chunk size for paged iterateEntities walks. Bounds peak entity
+// memory at chunk × row regardless of corpus. 500 × ~7KB ≈ 3.5MB —
+// small enough that even 1M corpora stay flat on RSS, large enough
+// that the per-chunk SELECT overhead is negligible.
+const CHUNK_SIZE = 500
+
 let stmtGet = null
 let stmtUpsert = null
 let stmtDelete = null
@@ -415,6 +421,64 @@ export async function findEntities(query) {
     if (!query) return shim.all()
     const m = sift(query)
     return shim.all().filter(m)
+}
+
+// Streaming variant of findEntities. Same query shape, same sift→SQL
+// translation, but yields entities chunk-by-chunk so peak memory is
+// O(chunk × entity) instead of O(corpus × entity).
+//
+// Use when the caller can process entities one-at-a-time AND the result
+// set might be corpus-scale — big data plugin exports, force-rebuild
+// dispatch, anything that walks "everything matching this filter."
+//
+// Don't use when the caller needs the array shape (.length / .sort /
+// .filter chains, JSON.stringify of the whole set, etc.) — findEntities
+// stays faster and clearer for bounded result sets.
+//
+// Chunking strategy: pages CHUNK_SIZE rows ordered by id (PK, indexed),
+// each chunk seek-paginated by "id > lastId" so we don't pay OFFSET's
+// O(N) skip cost. Closing the SELECT between chunks lets `updateEntry`
+// / `runtime.update` and other writes run freely in the gap (same
+// pattern useJournal uses).
+//
+// Snapshot semantics: no explicit upper bound. Entities created
+// mid-walk with an id greater than the cursor land in a later chunk.
+// Practical impact is small — most catalog walks happen in onLoaded
+// (before mutations) or onRender (where mutations are journal-bound
+// and don't hit mikser_entities until onPersist).
+export async function* iterateEntities(query) {
+    recordQuery(query)
+
+    if (db?.isOpen) {
+        const t = query ? siftToSql(query) : { sql: '', params: [], jsFilter: null }
+        const where = t.sql
+            ? `${t.sql} AND id > ?`
+            : `WHERE id > ?`
+        const stmt = db.prepare(
+            `SELECT id, data FROM mikser_entities ${where} ORDER BY id LIMIT ?`,
+        )
+        const matcher = t.jsFilter ? sift(t.jsFilter) : null
+
+        let lastId = ''
+        while (true) {
+            const rows = stmt.all(...t.params, lastId, CHUNK_SIZE)
+            if (!rows.length) return
+            for (const row of rows) {
+                const entity = JSON.parse(row.data)
+                if (!matcher || matcher(entity)) yield entity
+            }
+            if (rows.length < CHUNK_SIZE) return
+            lastId = rows[rows.length - 1].id
+        }
+    }
+
+    // Stub path — for tests that don't bring up the database.
+    const shim = mapStub()
+    if (!shim) return
+    const m = query ? sift(query) : null
+    for (const entity of shim.all()) {
+        if (!m || m(entity)) yield entity
+    }
 }
 
 // Expand-and-project layer — sift filters with sort, pagination,
