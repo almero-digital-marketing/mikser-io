@@ -59,6 +59,13 @@ onInitialize(async () => {
     registerSchema('mikser_journal', JOURNAL_SCHEMA)
 })
 
+// Chunk size for paged useJournal walks. Bounds peak journal memory
+// at chunk_size × row_size regardless of corpus. 500 × ~7KB ≈ 3.5MB —
+// small enough that even 1M corpora stay flat on RSS, large enough
+// that the per-chunk SELECT overhead is negligible (one prepared
+// statement, .all() into a small array, GC the array between chunks).
+const CHUNK_SIZE = 500
+
 // Prepared statements + handle. Set in onLoaded after the database
 // substrate opens; persist across cycles (sqlite stays open for the
 // lifetime of the process).
@@ -67,30 +74,49 @@ let stmtInsert = null
 let stmtUpdateEntity = null
 let stmtUpdateOutput = null
 let stmtUpdateDeps = null
-let stmtSelectAll = null
+let stmtMaxSeq = null
 let stmtCount = null
 let stmtDelete = null
-// Cache prepared SELECTs by operation-tuple so hot paths don't re-prepare.
-const selectByOpsCache = new Map()
+// Cache prepared chunked-SELECTs by operation-tuple so hot paths don't
+// re-prepare. Keyed by the sorted operation list; one statement per
+// distinct filter shape we see in a process.
+const selectChunkCache = new Map()
+let stmtChunkAll = null   // chunked select for the "all operations" case
 
-function stmtSelectByOps(operations) {
+function stmtChunkByOps(operations) {
     const key = operations.slice().sort().join(',')
-    let stmt = selectByOpsCache.get(key)
+    let stmt = selectChunkCache.get(key)
     if (!stmt) {
         const placeholders = operations.map(() => '?').join(',')
-        stmt = db.prepare(`SELECT * FROM mikser_journal WHERE operation IN (${placeholders}) ORDER BY seq`)
-        selectByOpsCache.set(key, stmt)
+        // Paged SELECT: rows AFTER the last seen seq, UP TO the
+        // call-time snapshot maxSeq, in the requested operation set,
+        // ORDER BY seq for deterministic chunking, LIMIT CHUNK_SIZE.
+        stmt = db.prepare(`
+            SELECT * FROM mikser_journal
+            WHERE seq > ? AND seq <= ?
+              AND operation IN (${placeholders})
+            ORDER BY seq
+            LIMIT ?
+        `)
+        selectChunkCache.set(key, stmt)
     }
     return stmt
 }
 
-function countByOps(operations) {
+function countByOps(operations, maxSeq) {
     const placeholders = operations.map(() => '?').join(',')
     // Cheap query — prepare each time so we don't accumulate statements
-    // for ad-hoc operation-tuples we never see again.
+    // for ad-hoc operation-tuples we never see again. Counted against
+    // the snapshot maxSeq so progress bars match what useJournal will
+    // actually yield (rows inserted mid-walk don't bump the bar).
     return db.prepare(
-        `SELECT COUNT(*) AS n FROM mikser_journal WHERE operation IN (${placeholders})`,
-    ).get(...operations).n
+        `SELECT COUNT(*) AS n FROM mikser_journal
+         WHERE seq <= ? AND operation IN (${placeholders})`,
+    ).get(maxSeq, ...operations).n
+}
+
+function countAll(maxSeq) {
+    return db.prepare('SELECT COUNT(*) AS n FROM mikser_journal WHERE seq <= ?').get(maxSeq).n
 }
 
 function rowToEntry(row) {
@@ -141,37 +167,52 @@ export async function updateEntry({ id, entity, output, deps }) {
 // Walk the journal yielding entries matching `operations` (or all if
 // omitted).
 //
-// Materializes rows via `.all()` rather than streaming via `.iterate()`.
-// better-sqlite3 holds an open cursor across `.iterate()` and forbids
-// concurrent writes on the same connection — plugins routinely call
-// `updateEntry` inside `for await (const e of useJournal(...))` loops,
-// which would deadlock under cursor-based iteration. Materializing
-// gives us the same memory shape the prior in-memory journal had (it
-// also slice-copied the array at call time), and the snapshot semantic
-// stays: rows inserted during the walk are not in the materialized set.
+// Chunked read: pages CHUNK_SIZE rows at a time, closing the SELECT
+// cursor between chunks. better-sqlite3 forbids concurrent queries on
+// the same connection; an open `.iterate()` cursor would block the
+// `updateEntry` UPDATEs plugins routinely fire inside their useJournal
+// loops. Chunked .all() over LIMIT/seq cursors avoids the lock —
+// writes happen freely in the gap between chunks — while keeping peak
+// journal memory bounded at CHUNK_SIZE × row_size (~3.5MB regardless
+// of corpus).
 //
-// True bounded-memory streaming requires a second connection — a
-// reader for the iterator and the main connection for writes. Not done
-// here; the materialized-rows shape is fine through 100k scale and
-// matches the old behavior exactly. At 1M-corpus scale this is the
-// next thing to revisit.
+// Snapshot semantics: maxSeq is captured at call time and used as the
+// upper bound on every chunk. Rows inserted during iteration land
+// with seq > maxSeq and are not yielded by this walk. Same contract
+// the prior in-memory implementation gave (it slice-copied at call
+// time). Plugins that want to react to entries they added themselves
+// do it via a fresh useJournal in a later phase.
 export async function* useJournal(name, operations, signal) {
     if (!db?.isOpen) return
 
-    const stmt = operations?.length ? stmtSelectByOps(operations) : stmtSelectAll
-    const args = operations?.length ? operations : []
-    const rows = stmt.all(...args)
-    if (!rows.length) return
+    const maxSeq = stmtMaxSeq.get().maxSeq ?? 0
+    if (maxSeq === 0) return
 
-    trackProgress(name, rows.length)
+    const count = operations?.length
+        ? countByOps(operations, maxSeq)
+        : countAll(maxSeq)
+    if (count === 0) return
 
-    for (const row of rows) {
-        if (signal?.aborted) {
-            stopProgress()
-            throw new AbortError()
+    trackProgress(name, count)
+
+    let lastSeq = 0
+    while (true) {
+        const rows = operations?.length
+            ? stmtChunkByOps(operations).all(lastSeq, maxSeq, ...operations, CHUNK_SIZE)
+            : stmtChunkAll.all(lastSeq, maxSeq, CHUNK_SIZE)
+        if (!rows.length) return
+
+        for (const row of rows) {
+            if (signal?.aborted) {
+                stopProgress()
+                throw new AbortError()
+            }
+            updateProgress()
+            yield rowToEntry(row)
         }
-        updateProgress()
-        yield rowToEntry(row)
+
+        lastSeq = rows[rows.length - 1].seq
+        if (rows.length < CHUNK_SIZE) return // last chunk
     }
 }
 
@@ -201,14 +242,20 @@ onLoaded(async () => {
     stmtUpdateEntity = db.prepare(`UPDATE mikser_journal SET entity = @entity WHERE seq = @seq`)
     stmtUpdateOutput = db.prepare(`UPDATE mikser_journal SET output = @output WHERE seq = @seq`)
     stmtUpdateDeps   = db.prepare(`UPDATE mikser_journal SET deps   = @deps   WHERE seq = @seq`)
-    stmtSelectAll    = db.prepare(`SELECT * FROM mikser_journal ORDER BY seq`)
+    stmtMaxSeq       = db.prepare(`SELECT MAX(seq) AS maxSeq FROM mikser_journal`)
     stmtCount        = db.prepare(`SELECT COUNT(*) AS n FROM mikser_journal`)
     stmtDelete       = db.prepare(`DELETE FROM mikser_journal`)
+    stmtChunkAll     = db.prepare(`
+        SELECT * FROM mikser_journal
+        WHERE seq > ? AND seq <= ?
+        ORDER BY seq
+        LIMIT ?
+    `)
 
     // Reset the operation-tuple SELECT cache — prepared statements
     // from a prior cycle's handle are no longer valid if the database
     // was reopened (e.g., test harness reusing the module across runs).
-    selectByOpsCache.clear()
+    selectChunkCache.clear()
 
     // Leftover-journal bootstrap. Successful runs DELETE FROM
     // mikser_journal at onFinalized; a non-empty table at startup means
