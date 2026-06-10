@@ -259,9 +259,9 @@ out/
 ├── about/
 │   └── index.html      # Clean URLs produce folders
 runtime/
-├── catalog.ndjson      # Entity catalog (NDJSON snapshot)
-├── journal.db          # SQLite journal (temporary)
-└── render-details.json # Render results
+└── mikser.sqlite       # Engine database — catalog, refs, render
+                        # snapshots (mikser_entities, mikser_refs,
+                        # mikser_snapshots tables). See ADR-0009.
 ```
 
 ## Watch Mode

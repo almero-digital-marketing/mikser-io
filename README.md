@@ -36,7 +36,7 @@ Build mikser into the parts of your application that are content-shaped. Keep th
 
 **Incremental builds that scale.** Mikser tracks every entity in a journal. When a file changes, only the affected entities re-process — not the whole site graph. On 10k+ documents this dramatically outpaces tools that rebuild more on every change.
 
-**Concurrent rendering.** Renders fan out across a worker pool that keeps every CPU core hot. Multi-format outputs (HTML, PDF, MJML email, etc.) generate in parallel from the same source.
+**Concurrent rendering.** Renders run async by default and CPU-heavy layouts (MJML compile, image processing, custom transforms) opt into a Piscina worker pool per layout via `task: worker` in frontmatter. Multi-format outputs (HTML, PDF, MJML email, etc.) generate from the same source; the pool is lazy — no workers spawn until they're asked for.
 
 **Asset pipelines are whatever Node can do.** Most static frameworks (Astro, Next.js, Hugo) ship image optimization and stop there — video transcoding, AI upscaling, watermarking all need a separate service. Mikser runs user-written modules over binary inputs: ~10 lines around `sharp` resize an image, ~10 around `fluent-ffmpeg` transcode a video, ~30 around the Replicate API upscale with AI. Anything an npm package can do, your pipeline can do — including pulling uploads from a DAM or CDN through the same flow.
 
@@ -229,7 +229,7 @@ What you get from how this project is built:
 
 The earliest version of mikser was inspired by [DocPad](https://github.com/docpad/docpad) (Benjamin Lupton, with Michael Duane Mooring and Rob Loach). DocPad's "freeway, not a box" philosophy — files on disk, any pre-processor or template engine, plugin-by-convention extension — shaped how mikser started.
 
-Mikser itself has a previous chapter: the [legacy 7.x line](https://github.com/almero-digital-marketing/mikser) (last release 2022) introduced the real-time SSG model the current engine still carries forward. The redesign dropped MongoDB (the catalog lives in-process now, not in a database), modernized to Node ESM with a structured 20-phase lifecycle, added the live SSE channel that powers the framework SDKs, and replaced cluster-based rendering with an async worker pool. Same intent — content as files, real-time previews, multi-format output at scale — clearer foundations.
+Mikser itself has a previous chapter: the [legacy 7.x line](https://github.com/almero-digital-marketing/mikser) (last release 2022) introduced the real-time SSG model the current engine still carries forward. The redesign dropped MongoDB for a single in-process sqlite database, modernized to Node ESM with a structured 20-phase lifecycle, added the live SSE channel that powers the framework SDKs, and replaced cluster-based rendering with a lazy worker pool. Same intent — content as files, real-time previews, multi-format output at scale — clearer foundations.
 
 ## Documentation Index
 

@@ -265,8 +265,9 @@ export async function setup(options) {
                 // postprocessors typically consume the intermediate
                 // rendered file (post-pdf, post-mjml). Skipping the
                 // render leaves the postprocess input missing on the
-                // next run. The right fix is a postprocess manifest
-                // that also skips when its output is current — Phase 3.
+                // next run. A postprocess-aware manifest that also
+                // skips when the postprocess output is current would
+                // close the gap — not yet implemented.
                 if (!options.postprocessor && runtime.manifest?.shouldSkip(entity, mutatedRefs, currentHashes, mutatedEntities)) {
                     skipped++
                     entry.output = { success: true, skipped: 'manifest' }

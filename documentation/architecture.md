@@ -13,8 +13,11 @@ mikser-io/
     ├── runtime.js            Singleton object — global state and lifecycle coordination
     ├── engine.js             setup() function, CLI option parsing, useLogger()
     ├── lifecycle.js          Hook registration functions + entity write helpers
-    ├── journal.js            Ephemeral SQLite operation log
-    ├── catalog.js            Persistent entity registry (Map + NDJSON)
+    ├── journal.js            In-memory per-cycle operation queue
+    ├── catalog.js            Persistent entity registry (mikser_entities sqlite table + LRU)
+    ├── refs.js               Inverse-reference graph (mikser_refs sqlite table)
+    ├── manifest.js           Render snapshots (mikser_snapshots sqlite table)
+    ├── database/             Sqlite handle, registerSchema, sift→SQL translator, queryContext
     ├── config.js             Config file loading
     ├── plugins.js            Plugin resolution and loading
     ├── manager.js            File watching and cron scheduling

@@ -178,30 +178,30 @@ await updateEntry({ id: journalId, output: { success: true, result: '/out/page.h
 
 The catalog is a persistent registry of all entities across all runs. Unlike the journal (which is ephemeral), the catalog is kept between runs and used for incremental change detection.
 
-**Location:** `{runtimeFolder}/catalog.ndjson` (newline-delimited JSON; first line is a metadata header, one entity per line after that).
+**Location:** `mikser_entities` table inside `{runtimeFolder}/mikser.sqlite` (see [ADR-0009](./decisions/0009-database-engine-substrate.md) for the design rationale).
 
 ### Structure
 
-```
-{"__meta__":true,"version":"8.2.0"}
-{"id":"/documents/blog/post.md","collection":"documents","type":"document","format":"md","checksum":"abc123", ...}
-{"id":"/documents/blog/other.md","collection":"documents", ...}
-```
-
-In memory: `runtime.catalog.byId` is a `Map<id, entity>` — O(1) lookups for refs walks, manifest edges, and the source-scan gate.
+The table has indexed columns for the routinely-queried dimensions
+(`id` PK, `collection`, `type`, `format`, `name`, `meta_href`,
+`meta_layout`, `meta_lang`, `meta_cache`, `time`, `uri`) plus a `data`
+column holding the full entity body as JSON TEXT. `findEntities()`
+queries push predicates on the indexed columns down to SQL; the
+remainder runs as JS-side sift on the materialized subset.
 
 ### Querying the Catalog
 
 ```js
 import { findEntity, findEntities } from 'mikser-io'
 
-// Find one entity matching a lodash query
+// Find one entity matching a sift query
 const entity = await findEntity({ id: '/documents/blog/post.md' })
 
-// Find all entities matching a query
+// Find all entities matching a query — pushed to SQL because
+// `collection` and `format` are indexed columns
 const blogPosts = await findEntities({ collection: 'documents', format: 'md' })
 
-// Find with a function
+// Find with a function — runs JS-side against the full scan
 const recent = await findEntities(e => e.meta?.date > '2024-01-01')
 
 // Find all entities (no query = return all)
@@ -210,18 +210,15 @@ const everything = await findEntities()
 
 ### Catalog in Plugins / Render Templates
 
-The raw catalog instance is also available on the runtime:
+Use the public ops — they go through the AsyncLocalStorage query-context
+so refs can track dependencies and the sift→SQL translator pushes
+predicates down to indexed columns:
 
 ```js
-// In a plugin — iterate the Map directly when you need to scan
-for (const entity of runtime.catalog.byId.values()) {
-    if (entity.collection === 'documents') { /* ... */ }
-}
+import { findEntities, findEntity } from 'mikser-io'
 
-// Or use the public ops (preferred — they go through the AsyncLocalStorage
-// query-context so refs can track dependencies)
-import { findEntities } from 'mikser-io'
 const docs = await findEntities({ collection: 'documents' })
+const post = await findEntity({ id: '/documents/blog/post.md' })
 
 // Available as runtime.catalog in templates via the data render plugin
 ```
@@ -232,11 +229,11 @@ const docs = await findEntities({ collection: 'documents' })
 |--|---------|---------|
 | Lifetime | One run | Persistent |
 | Purpose | Track changes in current run | Entity registry across runs |
-| Format | SQLite | JSON |
-| Operations | CREATE, UPDATE, DELETE, RENDER | Stores current entity state |
-| Cleared | Yes, at finalization | No (updated incrementally) |
+| Format | In-memory queue | `mikser_entities` table in sqlite |
+| Operations | CREATE, UPDATE, DELETE, RENDER, POSTPROCESS | Stores current entity state |
+| Cleared | Yes, at `onFinalized` | No (updated incrementally) |
 
-The catalog is updated during the `persist` phase by reading CREATE/UPDATE/DELETE operations from the journal and applying them.
+The catalog is updated during the `persist` phase by reading CREATE/UPDATE/DELETE operations from the journal and applying them inside a single transaction.
 
 ---
 

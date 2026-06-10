@@ -238,7 +238,7 @@ Cross-directory auto-matching is intentionally not supported — pair `posts/art
 
 **Watch support:** Yes.
 
-**Sitemap:** Maintains `runtime.state.layouts.sitemap` — a mapping from entity href to entity, used by the `href` render plugin for link resolution.
+**Href lookups:** The href resolution path goes through `runtime.lookupHref(href)` — a sync function that hits the `meta_href` index on `mikser_entities`. Render workers open their own read-only sqlite handle on first task and call the same primitive; templates stay sync. The `href` render plugin uses this; layout-side code can call it directly.
 
 ---
 

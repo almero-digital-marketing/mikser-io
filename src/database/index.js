@@ -14,8 +14,9 @@
 //   - synchronous=NORMAL: small durability window, big write throughput
 //     win. Acceptable because the catalog is a derived cache; on crash
 //     we rebuild from source.
-//   - foreign_keys=ON: opt-in to the FK enforcement we'll lean on for
-//     the mikser_refs / mikser_entities cascade in Phase 4.
+//   - foreign_keys=ON: the mikser_refs → mikser_entities cascade
+//     relies on FK enforcement to drop refs when their source entity
+//     is deleted.
 //
 // Schema discipline: each subsystem registers an idempotent CREATE
 // script via `registerSchema(name, sql)`. The database applies every
@@ -35,10 +36,10 @@ const DEFAULT_FILENAME = 'mikser.sqlite'
 
 // Schemas registered by subsystems and plugins. Map<name, sqlScript>.
 // Idempotent `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`
-// scripts applied at db.open(). Naming convention:
-//   - `catalog_*`   — engine-owned (catalog tables)
-//   - `manifest_*`  — engine-owned (manifest tables, Phase 5)
-//   - `<plugin>_*`  — plugin-owned (e.g. vector_<store>)
+// scripts applied at db.open(). Naming convention: `mikser_*` for
+// engine-owned tables (mikser_entities, mikser_refs, mikser_snapshots,
+// mikser_meta); `<plugin>_*` for plugin-owned tables (e.g.
+// vector_documents in mikser-io-vector).
 const schemas = new Map()
 
 // Active database handle. Set during the first onLoaded; persists across

@@ -210,8 +210,8 @@ export function useSource(core, options) {
         return true
     })
 
-    // Phase 1: setup (always onLoaded — folder resolution, mkdir,
-    // chokidar wiring). The actual file scan happens in `phase`.
+    // Setup runs in onLoaded — folder resolution, mkdir, chokidar
+    // wiring. The actual file scan happens later in `phase` (below).
     onLoaded(async () => {
         const logger = useLogger()
 
@@ -230,10 +230,10 @@ export function useSource(core, options) {
         watch(collection, absFolder)
     })
 
-    // Phase 2: scan + register. 'loaded' for metadata sources (runs
-    // right after Phase 1 in the same hook chain). 'import' for content
-    // sources, so they show up under the import progress bar with the
-    // other content collections.
+    // Scan + register. 'loaded' for metadata sources (runs right after
+    // the setup hook above, in the same hook chain). 'import' for
+    // content sources, so they show up under the import progress bar
+    // with the other content collections.
     //
     // The scan also handles two cache concerns:
     //   - Checksum gate: if the catalog already has this entity with

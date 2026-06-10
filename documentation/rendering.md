@@ -255,15 +255,15 @@ These plugins extend the `runtime` object inside templates. They are loaded auto
 
 ### `render-href` — Link Resolution
 
-Resolves internal links using the layouts sitemap and computes relative URLs from the current document's output location.
+Resolves internal links via `runtime.lookupHref(path)` — a sync function backed by the `meta_href` index on `mikser_entities` — and computes relative URLs from the current document's output location.
 
 **Functions added to `runtime`:**
 
 #### `href(path, lang?)`
 
-Looks up an entity in the sitemap by its virtual path. Returns an object with the entity's metadata and a `url` property containing the relative URL from the current document's output location.
+Looks up an entity by its virtual path. Returns an object with the entity's metadata and a `url` property containing the relative URL from the current document's output location.
 
-When the path is not in the sitemap (e.g. a static file like a CSS or PDF), `href` still returns `{ url }` computed as a relative path — so it works for any output file, not just rendered entities.
+When the path resolves to nothing in the catalog (e.g. a static file like a CSS or PDF), `href` still returns `{ url }` computed as a relative path — so it works for any output file, not just rendered entities.
 
 ```handlebars
 {{! Look up an entity — returns { url, meta, ... } }}
@@ -293,7 +293,7 @@ When the path is not in the sitemap (e.g. a static file like a CSS or PDF), `hre
 
 #### `hrefLang(path)`
 
-Returns all language variants of a path from the sitemap, as `{ [lang]: entity }`. Useful for building language switchers.
+Returns all language variants of a path, as `{ [lang]: entity }`. Useful for building language switchers. Backed by the same `meta_href` index — all matching rows for the path, partitioned by their `meta.lang`.
 
 ```handlebars
 {{#each (hrefLang document.meta.href)}}
@@ -323,7 +323,7 @@ Extracts the `.url` property from the object returned by `href`, `resource`, or 
 {{/with}}
 ```
 
-The `href` plugin reads `runtime.state.layouts.sitemap` to resolve paths to output URLs. It understands clean URLs and pagination.
+The `href` plugin calls `runtime.lookupHref(path)` to resolve paths to entities — the same primitive INLINE renders and Piscina workers use. Worker contexts get the same sync API because each worker opens its own read-only sqlite handle on first task. The plugin understands clean URLs and pagination.
 
 ---
 
@@ -385,11 +385,13 @@ Layouts (`.js` files alongside `.hbs` templates) can export a `load` function th
 
 ```js
 // layouts/blog.js  (alongside layouts/blog.hbs)
+import { findEntities } from 'mikser-io'
+
 export async function load({ entity, options, config, context, runtime, state, logger }) {
   // Return data to be available as `data` in the template
   return {
     relatedPosts: await findRelated(entity),
-    navigation: buildNav(runtime.state.layouts.sitemap)
+    navigation: buildNav(await findEntities({ collection: 'documents', 'meta.layout': { $exists: true } }))
   }
 }
 

@@ -98,7 +98,7 @@ onLoad(async () => {
 
 onLoaded(async () => {
   // runtime.config is fully populated
-  // journal and catalog database connections are open
+  // The engine sqlite database is open at runtime/mikser.sqlite
   // All plugins have been loaded and their hooks registered
 })
 ```
@@ -106,8 +106,11 @@ onLoaded(async () => {
 **What Mikser does here:**
 - Loads and evaluates `mikser.config.js` (and `config/*.config.js` files)
 - Calls `loadPlugin()` for each plugin in `runtime.options.plugins`
-- Opens the SQLite journal database
-- Loads the catalog from `runtime/catalog.ndjson` (or starts empty)
+- Opens `runtime/mikser.sqlite` and applies every registered schema
+  (`mikser_entities`, `mikser_refs`, `mikser_snapshots`, plus any
+  plugin-registered tables)
+- Stamps `mikser_meta.schema_version` so subsequent runs can detect
+  schema drift
 
 ---
 
@@ -189,7 +192,10 @@ onPersisted(async () => {
 
 **What Mikser does here:**
 - Reads CREATE/UPDATE/DELETE operations from the journal
-- Applies them to `runtime.catalog.byId` (the in-memory Map)
+- Applies them to the `mikser_entities` table inside a single
+  transaction (10k-entry LRU is invalidated for affected ids)
+- Rebuilds the inverse-reference rows in `mikser_refs` for any
+  entities whose `$`-keyed refs changed
 
 ---
 
@@ -233,7 +239,8 @@ onFinalized(async () => {
 ```
 
 **What Mikser does here:**
-- `catalog.js` writes `catalog.ndjson` to disk (skipped if clean)
+- `catalog.js` / `refs.js` / `manifest.js` commit their per-cycle
+  transaction against `mikser.sqlite` (skipped if no changes)
 - `engine.js` cleans up broken symlinks in the output folder
 - `manager.js` starts scheduled cron tasks (if any)
 

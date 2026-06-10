@@ -445,7 +445,9 @@ onLoaded(async () => {
 onFinalize(async () => {
     const logger = useLogger()
 
-    // ---- Phase 1: Drain journal into mutation lists ----
+    // Drain journal entries into mutation lists. We can't apply yet —
+    // the file ops below need to be async, and the DB transaction
+    // below needs to be sync. Stage everything, then commit.
     const deletedIds = []          // entity ids to drop from manifest
     const renderedEntries = []     // RENDER entries to record
     const newDestinationsByParent = new Map()
@@ -470,7 +472,10 @@ onFinalize(async () => {
         }
     }
 
-    // ---- Phase 2: Async file ops ----
+    // File ops are async — unlink stale outputs from prior cycles,
+    // hash this cycle's rendered files. Has to happen before the DB
+    // transaction because better-sqlite3's transaction() callback is
+    // sync-only.
     const m = sharedManifest
 
     // 2a. Stage file unlinks for deleted entities + their children.
@@ -519,7 +524,7 @@ onFinalize(async () => {
         recordedSnapshots.push(buildSnapshot(entity, deps, outputHash))
     }
 
-    // ---- Phase 3: Single sync transaction for all DB mutations ----
+    // Apply all DB mutations atomically.
     sharedDb.transaction(() => {
         // 3a. Delete by entity id or parent (DELETE journal entries).
         for (const id of deletedIds) {

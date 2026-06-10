@@ -1,13 +1,13 @@
 // Engine-level entity store. Sqlite-backed via the engine's shared
-// database substrate (see src/database/). Phase 2 of the
-// engine/database migration.
+// database substrate (see src/database/) — ADR-0009.
 //
 // Schema (registered with the substrate at module load time):
 //   mikser_entities (id, collection, type, format, name, meta_href,
-//                     meta_layout, meta_lang, time, uri, data)
-// Denormalized indexed columns are the union of `id` + the engine
-// defaults — the fields engine code actually queries today, audited.
-// Plugin-config user-declared indexes land in a follow-up commit.
+//                     meta_layout, meta_lang, meta_cache, time, uri,
+//                     data)
+// Indexed columns are the fields engine code routinely filters on;
+// the JSON body sits in `data` for everything else. The sift→SQL
+// translator pushes predicates on indexed columns down to SQL.
 //
 // Hot-path `findById` goes through a small LRU cache wrapping the
 // prepared SELECT. Refs BFS, manifest collectEdges, and source's
@@ -301,15 +301,17 @@ function exportCatalog() {
     }
 }
 
-// Test-harness shim. Unit tests that stub `runtime.catalog.byId` with
-// a Map predate the database substrate; the public catalog functions
-// fall back to operating against that Map when the sqlite-backed
-// `db` handle isn't set.
-function shimFromRuntimeStub() {
+// In-memory fallback for unit tests that stub
+// `runtime.catalog = { byId: new Map() }` without bringing up the
+// sqlite database. The public catalog functions check for this stub
+// when `db` isn't open and operate against the Map directly. Lets
+// plugin-harness.js and a handful of unit tests run without a DB
+// connection.
+function mapStub() {
     const byId = runtime.catalog?.byId
     if (!(byId instanceof Map)) return null
     return {
-        kind: 'shim',
+        kind: 'stub',
         get(id) { return byId.get(id) ?? null },
         all() { return Array.from(byId.values()) },
     }
@@ -333,7 +335,7 @@ export function findById(id) {
         return entity
     }
 
-    const shim = shimFromRuntimeStub()
+    const shim = mapStub()
     return shim ? shim.get(id) : null
 }
 
@@ -370,7 +372,7 @@ export async function findEntity(query) {
         return
     }
 
-    const shim = shimFromRuntimeStub()
+    const shim = mapStub()
     if (!shim) return
     if (typeof query.id === 'string') {
         const entity = shim.get(query.id)
@@ -408,18 +410,17 @@ export async function findEntities(query) {
         return entities
     }
 
-    const shim = shimFromRuntimeStub()
+    const shim = mapStub()
     if (!shim) return []
     if (!query) return shim.all()
     const m = sift(query)
     return shim.all().filter(m)
 }
 
-// --- Expand-and-project layer (ADR-0007) ----------------------------
-// Sift-style filters with sort, pagination, dotted-path projection,
-// plus optional inline-expand of $-keyed references. Used by the api
-// plugin's HTTP handlers, mikser-io-mcp's tools, and any library-mode
-// caller.
+// Expand-and-project layer — sift filters with sort, pagination,
+// dotted-path projection, plus optional inline-expand of $-keyed
+// references (ADR-0007). Used by the api plugin's HTTP handlers,
+// mikser-io-mcp's tools, and any library-mode caller.
 
 async function findRef(ref) {
     if (!ref || typeof ref !== 'string') return null

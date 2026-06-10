@@ -83,12 +83,16 @@ import { runtime } from 'mikser-io'
 | `runtime.started` | boolean | `true` after the import phase completes |
 | `runtime.options` | object | Merged CLI + programmatic options |
 | `runtime.config` | object | Loaded from `mikser.config.js` |
-| `runtime.state` | object | Arbitrary state set by plugins (e.g. `state.manifest` is the in-memory render manifest, `state.layouts` holds layout index + sitemap) |
-| `runtime.catalog` | object | The entity catalog (`{ byId: Map<id, entity>, version, cacheInvalidated, save() }`) |
+| `runtime.state` | object | Arbitrary state set by plugins (e.g. `state.layouts` holds the layout index keyed by uri). Catalog, refs, and manifest are sqlite-backed — not in `runtime.state`. |
+| `runtime.catalog` | object | The entity catalog facade — call methods on it (`findEntity`, `findEntities`, `queryEntities`, …). Backed by `mikser_entities` in `runtime/mikser.sqlite` with a 10k-entry LRU in front of `findById`. |
+| `runtime.refs` | object | Inverse-reference graph facade — `inboundFor`, `outboundFor`, `allRefs`, `size`, `rename`, `subscribeGraph`, `inverseClosureOf`. Backed by `mikser_refs`. |
+| `runtime.manifest` | object | Render snapshot facade — `shouldSkip`, `record`, `recordedHashes`. Backed by `mikser_snapshots`. |
+| `runtime.lookupHref` | function | Sync href→entity lookup; available inside workers too (each worker opens its own read-only sqlite handle on first task). |
 | `runtime.validators` | function[] | Registered validation functions |
-| `runtime.engine` | object | Runtime services (logger, renderWorkers, queue, commander) |
+| `runtime.engine` | object | Runtime services (logger, renderWorkers, postprocessWorkers, queue, commander) |
 | `runtime.engine.logger` | object | pino logger |
-| `runtime.engine.renderWorkers` | object | Piscina thread pool for render jobs |
+| `runtime.engine.renderWorkers` | object | Lazy Piscina pool for render jobs (`minThreads: 0`, `idleTimeout: 30_000`) |
+| `runtime.engine.postprocessWorkers` | object | Lazy Piscina pool for postprocess jobs (same shape as renderWorkers) |
 | `runtime.engine.queue` | object | p-queue instance |
 | `runtime.engine.commander` | object | Commander CLI instance |
 | `runtime.hooks` | object | Hook arrays (read-only; use `onXxx()` to register) |

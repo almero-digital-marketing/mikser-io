@@ -35,8 +35,11 @@ brevity.
   sqlite). Drained at onFinalized. `addEntry`/`addEntries`/`updateEntry`/
   `useJournal`/`clearJournal`. Entries deep-cloned via `structuredClone`
   on insert for snapshot semantics.
-- `catalog.js` — entity persistence via `Map<id, entity>` + NDJSON at
-  `runtime/catalog.ndjson` (`runtime.catalog`). Public ops: `findEntity`,
+- `catalog.js` — entity persistence in the `mikser_entities` table of
+  `runtime/mikser.sqlite`. Indexed columns: id (PK), collection,
+  type, format, name, meta_href, meta_layout, meta_lang, meta_cache,
+  time, uri. Full entity body in `data` (JSON TEXT). 10k-entry LRU
+  cache in front of `findById`. Public ops: `findEntity`,
   `findEntities`, `queryEntities`, `readEntity`, `subscribe`,
   `assertExpand`. Expand internals (`expandLimits`, `expandAndProject`,
   `findRef`) are PRIVATE.
@@ -44,11 +47,29 @@ brevity.
   walk dispatch (default) and graph dispatch via
   `runtime.refs.subscribeGraph` (when `expand` is set).
 - `refs.js` — inverse-reference graph (`$`-keyed refs per ADR-0007).
-  Exposed at `runtime.refs.*`: `inboundFor`, `outboundFor`, `allRefs`,
-  `size`, `rename`, `subscribeGraph`. Plus `refExists` module-level.
-  Rebuilt every cycle in `onPersist`.
+  Persisted as `mikser_refs` rows with FK to `mikser_entities`
+  (`ON DELETE CASCADE`). Indexed on `target` and `source`. Exposed
+  at `runtime.refs.*`: `inboundFor`, `outboundFor`, `allRefs`,
+  `size`, `rename`, `subscribeGraph`, `inverseClosureOf`. Plus
+  `refExists` module-level. Prepared statements through the shared
+  sqlite handle.
 - `engine.js` — `setup()`, lifecycle wiring, render + postprocess
-  dispatchers, manifest tracking.
+  dispatchers, manifest tracking. Owns the Piscina worker pools
+  (`renderWorkers`, `postprocessWorkers`); both are lazy
+  (`minThreads: 0` + `idleTimeout: 30_000`) so INLINE-only workloads
+  pay no worker overhead. `workerSafeOptions(runtime.options)`
+  strips plugin-surface functions before TASKS.WORKER dispatch so
+  Piscina's structured clone doesn't choke.
+- `database/` — `createSqliteDatabase()`, `registerSchema()`,
+  `useDatabase()` (the `mikser_meta` table stamps schema_version).
+  `sift-to-sql.js` translates sift filters to SQL WHERE clauses
+  against `INDEXED_COLUMNS`; un-pushed clauses fall through to
+  JS-side sift. `query-context.js` is the AsyncLocalStorage that
+  lets catalog queries auto-report into the render-time `track`.
+- `manifest.js` — render snapshots in `mikser_snapshots` table
+  (PK `(id, destination)`, `refClosure` as JSON, partial index on
+  `parent`). `recordedHashes` aggregates dep hashes via
+  `json_each` in C rather than parsing every row in JS.
 - `server.js` — Express bring-up: CLI flags (`--server`, `--cors`,
   `--no-cors`), trust-proxy, CORS (with extensible header arrays for
   plugins to push onto), late-binding static mount + listen.
@@ -61,9 +82,14 @@ brevity.
   `isRefKey`, `writeEntity`, `matchEntity`, `getFormatInfo`,
   `changeExtension`, `checksum`, `normalize`, `formatErrorContext`,
   `formatLogArgs`, `ExpandError`, `AbortError`.
-- `render.js` / `postprocess.js` — Piscina worker entry points.
-  Receive entity + options + config + state via Piscina serialization;
-  return result. Never touch the journal directly.
+- `render.js` / `postprocess.js` — Piscina worker entry points AND the
+  default-export functions the INLINE/SERIAL dispatcher calls directly.
+  Each receives entity + options + config + state; the WORKER path also
+  receives a MessageChannel `port` that forwards pino records back to
+  the engine's logger. Each worker opens its own read-only sqlite
+  handle on first task (`ensureWorkerDb` in render.js) so template
+  helpers like `runtime.lookupHref` stay sync. Never touch the journal
+  directly.
 - `config.js` — loads `mikser.config.js` at `onLoad`.
 - `plugins.js` — loads user plugins at `onLoad`. Plugin factories
   receive the full `core` exports as their first argument.
@@ -149,6 +175,12 @@ brevity.
 - **0008** — MCP-UI rendering + action delivery. Lives in
   `mikser-io-mcp/documentation/decisions/` (not core — moved with
   MCP).
+- **0009** — Sqlite is the engine's persistence substrate. Single
+  `runtime/mikser.sqlite` holds `mikser_entities` / `mikser_refs` /
+  `mikser_snapshots`. Sift→SQL pushdown + LRU for findById;
+  worker-side read-only sqlite for sync template helpers.
+  `registerSchema(name, sql)` + `useDatabase()` is the plugin-side
+  persistence pattern.
 
 ## MCP
 
@@ -178,54 +210,42 @@ There is **no `--mcp` CLI flag**. Activation is plugin-presence only.
   `SIZE=realistic node test/perf/generate.js 10000` switches to fat
   entities (full SEO meta, hero/gallery image objects, $-refs to
   author/category/related, longer body — ~7KB per catalog entry
-  instead of ~3KB). Use `TASK=worker node test/perf/generate.js
-  10000` to dispatch through Piscina.
-- Current honest numbers (Apple Silicon, 4-thread default,
-  in-memory journal, INLINE dispatch):
-  - 1k docs light:      ~715/sec  (~1.4s)
-  - 10k docs light:     ~925/sec  (~10.8s)
-  - 10k docs realistic: ~775/sec  (~12.9s)
-  - 14k docs realistic: ~750/sec  (~18.6s, **catalog 94MB**)
-  - 50k docs realistic: ~565/sec  (~88.7s, catalog 352MB, RSS 1.16GB)
-- Throughput stays roughly flat from 1k to 10k now that the layouts
-  plugin's sitemap is indexed by uri (commit f1a978e). Previously the
-  bookkeeping was O(N²) — `removePagesFromSitemap` ran on every
-  CREATE/UPDATE and every render dispatch, each time scanning the full
-  sitemap. At 10k that was ~70% of cold wall-clock. Profile confirmed.
-- Remaining cold time is dominated by handlebars template compilation
-  in workers (~30%) and idle/GC. The dispatcher itself is a tiny
-  slice — earlier "dispatcher per-render bookkeeping" hypothesis
-  was wrong.
-- **Catalog scale ceiling: ~100MB on-disk file.** That's where the
-  full-file-rewrite save crosses the human-perception threshold for
-  watch-mode rebuilds (~200-300ms save → noticeably not-instant). At
-  50k realistic entities (~336MB catalog), Map+NDJSON pushes 1.17GB
-  peak RSS and 9s warm cycles — getting heavy.
-- **Sqlite is NOT the right swap-in at that scale.** We tried it
-  (one-shot driver using `node:sqlite`, prepared statements,
-  batched values()) and measured a regression on every metric at
-  both 14k and 50k realistic — warm cycles +59% slower, RSS +124%
-  to +170% larger. Reason: the engine iterates `findEntities()`
-  several times per cycle (layouts.onLoaded rebuild, source.sweep
-  Deleted, plugin lookups). Map's already-parsed in-memory walk is
-  ~100× faster than sqlite's all-rows + per-row JSON.parse. Sqlite
-  saves the catalog write cost (~1ms vs ~300ms at 100MB) but pays
-  it back many times over on every scan. A useful sqlite catalog
-  would need pushdown of common predicates (collection, type), an
-  LRU cache for hot findById, and possibly a separate hot-entity
-  in-memory partition — i.e. a different design, not a 1:1 storage
-  swap. Open question, not a planned commit.
-- What actually helps in the 100MB+ regime: trim entity weight
+  instead of ~3KB). Add `task: worker` to a layout's frontmatter to
+  dispatch its renders + postprocess through Piscina.
+- Current honest numbers (Apple Silicon, 4-thread default, INLINE
+  dispatch; see ADR-0009 for the substrate the numbers below run on):
+  - 14k realistic warm clean:       2.95s, RSS 520MB
+  - 14k realistic warm + 1 change:  2.93s, RSS 527MB
+  - 110k realistic cold (--clear):  5m 29s, RSS 4.18GB peak
+  - 110k realistic warm clean:      25.8s, RSS 3.20GB
+  - 110k realistic warm + 1 change: 24.3s, RSS 3.24GB
+- 14k matches the pre-migration Map+NDJSON RSS baseline within 1% on
+  warm cycles. 110k is a workload Map+NDJSON couldn't reach — process
+  OOMed before ADR-0009.
+- Catalog scan cost was the 2024-era objection to sqlite. The
+  resolution lives in `src/database/sift-to-sql.js`: indexed sift
+  clauses ($eq/$in/$lt/$exists/etc. on collection / type / format /
+  name / meta_href / meta_layout / meta_lang / meta_cache / time /
+  uri) push down to SQL, so layouts.onLoaded and source.sweep don't
+  materialize the table per cycle. `findById` is a 10k-entry LRU in
+  front of PK lookup. Without those two, sqlite is strictly slower
+  than the old Map (we measured it — see ADR-0009).
+- Piscina is lazy (`minThreads: 0` + `idleTimeout: 30_000`). INLINE
+  dispatch is the default for both render and postprocess; layouts
+  that opt into TASKS.WORKER (`task: worker` in frontmatter) get a
+  thread per first task. At 14k the lazy init dropped peak RSS
+  ~130MB on workloads that never use WORKER (which is most).
+- **Profile before optimizing.** `node --cpu-prof app.js
+  --working-folder test/perf --clear` produces `.cpuprofile` for
+  Chrome DevTools. Intuition has a real miss rate (multiple perf
+  hypotheses across this rewrite turned out wrong; the profile
+  caught them every time).
+- What actually helps when RSS is too high: trim entity weight
   (don't store source `content` in the catalog if the renderer
   re-reads it; don't keep computed fields you can recompute),
   filter your `data.entities` exports so the catalog isn't
-  carrying the rendered shape, or split into multiple smaller
-  mikser builds.
-- **Profile before optimizing.** `node --cpu-prof app.js
-  --working-folder test/perf --clear` produces `.cpuprofile` for
-  Chrome DevTools. Intuition has a real miss rate (we shipped 3
-  perf commits + reverted 1 write-queue attempt — would have caught
-  that with a profile).
+  carrying the rendered shape, or drop `--threads` to 1-2 if the
+  build is memory-bound and cold time is acceptable.
 
 ## When extending
 
@@ -243,11 +263,18 @@ There is **no `--mcp` CLI flag**. Activation is plugin-presence only.
 
 ## Test suites
 
-- `npm run test:unit` — 304 unit tests across plugins + utilities
+- `npm run test:unit` — 363 unit tests across plugins + utilities
+- `npm run test:scenarios` — 18 subprocess-spawned end-to-end runs
+  (manifest skip, refs replay, watch-mode change/delete). Spawns
+  mikser fresh per scenario so module-level catalog/refs/manifest
+  state can't leak between tests.
 - `npm run test:smoke` — full lifecycle build of `test/fixture/`
-  (with vector + decap + post-mjml + post-pdf if env supports)
+  (with vector + decap + post-mjml + post-pdf if env supports).
+  Exercises both INLINE postprocess (PDF) and WORKER postprocess
+  (MJML via `task: worker` on `welcome.yml`).
 - `npm run test:perf` — render-pipeline perf rig (corpus generation
-  + clean-build timing)
+  + clean-build timing). `SIZE=realistic` + entity count knobs
+  documented in **Perf**.
 
 ## Reference
 

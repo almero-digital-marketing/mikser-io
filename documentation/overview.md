@@ -8,8 +8,8 @@ Mikser does one thing: it takes **inputs** (files, external resources, API pulls
 
 Three things to hold in your head:
 
-1. **The catalog** — the persistent registry of every entity that exists. Think: *the truth*. `Map<id, entity>` in memory, NDJSON on disk.
-2. **The journal** — the ephemeral log of operations to apply. Think: *what changed since last cycle*. SQLite-backed.
+1. **The catalog** — the persistent registry of every entity that exists. Think: *the truth*. `mikser_entities` table in `runtime/mikser.sqlite`, with a 10k-entry LRU in front for hot `findById` lookups.
+2. **The journal** — the ephemeral log of operations to apply. Think: *what changed since last cycle*. In-memory queue, drained at `onFinalized`.
 3. **The lifecycle** — twenty-some named phases that fire in order. Plugins hook into phases. The engine doesn't decide what runs; the phases decide when.
 
 The journal feeds the catalog. The catalog feeds rendering. Rendering writes files. Plugins read from the journal at every phase to do their work. Everything else in this document follows from those three.
@@ -96,8 +96,10 @@ The most common confusion when starting out is *which artifact lives where, at w
 | Source content | `documents/` as files | `documents` plugin | `onImport` |
 | External media | `resources/` (downloaded) | `resources` plugin | `onImport` |
 | Asset variants | `assets/<preset>/` (preset outputs) | `assets` plugin | `onRender` |
-| Persistent entity registry | `catalog.ndjson` | `catalog.js` | `onPersist` |
-| Per-cycle operations | `journal.sqlite` | every plugin | every phase |
+| Persistent entity registry | `mikser_entities` table in `runtime/mikser.sqlite` | `catalog.js` | `onPersist` |
+| Inverse-reference graph | `mikser_refs` table in `runtime/mikser.sqlite` | `refs.js` | `onPersist` |
+| Render snapshots (manifest) | `mikser_snapshots` table in `runtime/mikser.sqlite` | `manifest.js` | `onPersist` / `onFinalize` |
+| Per-cycle operations | in-memory queue (`journal.js`) | every plugin | every phase |
 | Front-matter schemas | `schemas/` | `mikser-io-schemas` | `onValidate` |
 | Rendered HTML | `out/<route>.html` | post plugins + http server | `onRender` |
 | JSON snapshots | `out/api/*.json` (data plugin) | static serving / SDK build mode | `onFinalize` |

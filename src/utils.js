@@ -401,9 +401,9 @@ export function extractRefs(meta) {
 // Read-modify-write helper for entity source files. Reads the file at
 // `entity.uri`, parses front-matter (if any), merges `patch` into the
 // parsed attributes, re-serializes, writes back. Used by plugins that
-// mutate entities programmatically — the refs plugin's rename cascade
-// (Phase 2) is the first real consumer; future PATCH-style api and
-// auto-fix tooling will use it too.
+// mutate entities programmatically — refs.rename's cascade is the
+// primary consumer today; future PATCH-style api and auto-fix tooling
+// land on the same primitive.
 //
 // The patch is applied LITERALLY. Caller is responsible for using the
 // canonical key form they want on disk:
