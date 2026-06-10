@@ -162,6 +162,16 @@ Catalog moves to sqlite. Map driver retires (or becomes `:memory:` shim).
 - `runtime.catalog.export()` debug helper for tests
 - Update `test/unit/plugin-harness.js` and
   `test/scenarios/_harness.js` accordingly
+- **Identity semantics change (document for plugin authors).** With the
+  Map driver, `findEntity({id})` returned the same in-memory instance
+  each call: `findEntity(q) === findEntity(q)`. With sqlite each call
+  returns a freshly deserialized object: `findEntity(q) !== findEntity(q)`.
+  Same for nested entity references — `entity.layout` today is the
+  same instance that's in `byId`; with sqlite it's a snapshot at
+  document-write time. The codebase already mutates only through
+  `_.cloneDeep` or locally-constructed entities, and regenerates
+  `entity.layout` every cycle via `layouts.onProcess`, so this works
+  in practice. New plugin code should not assume identity holds.
 
 **Validation:**
 - All tests pass
