@@ -31,18 +31,30 @@ brevity.
   `onBeforePostprocess`/`onPostprocess`/`onComplete`/`onFinalize`/
   `onFinalized`/`onCancel`/`onCancelled`. Plus `runtime.create`/
   `.update`/`.delete` (journal helpers).
-- `journal.js` — per-cycle queue. In-memory array + id-Map (NOT
-  sqlite). Drained at onFinalized. `addEntry`/`addEntries`/`updateEntry`/
-  `useJournal`/`clearJournal`. Entries deep-cloned via `structuredClone`
-  on insert for snapshot semantics.
+- `journal.js` — per-cycle queue, persisted to `mikser_journal` rows in
+  `runtime/mikser.sqlite`. Drained at onFinalized; survives crashes so
+  `--resume` (`-R`) can pick up unfinalized entries on the next start.
+  Same public surface: `addEntry`/`addEntries`/`updateEntry`/
+  `useJournal`/`clearJournal`. Inserts `JSON.stringify` the row body for
+  snapshot isolation (replaces the prior `structuredClone`). Walks are
+  chunked (`CHUNK_SIZE=500`) so peak journal memory stays bounded
+  regardless of corpus.
+  **Auto-persist:** `useJournal` diffs the yielded entity after each
+  iteration and UPDATEs the row if it changed. Plugin authors mutate
+  the yielded entity and move on — no explicit `updateEntry({id,entity})`
+  required. `updateEntry` is still exported for engine-internal writes
+  (output, deps) and as a no-op safety valve for plugins that prefer to
+  call it; if the entity hasn't drifted, the auto-persist skips.
 - `catalog.js` — entity persistence in the `mikser_entities` table of
   `runtime/mikser.sqlite`. Indexed columns: id (PK), collection,
   type, format, name, meta_href, meta_layout, meta_lang, meta_cache,
   time, uri. Full entity body in `data` (JSON TEXT). 10k-entry LRU
   cache in front of `findById`. Public ops: `findEntity`,
-  `findEntities`, `queryEntities`, `readEntity`, `subscribe`,
-  `assertExpand`. Expand internals (`expandLimits`, `expandAndProject`,
-  `findRef`) are PRIVATE.
+  `findEntities`, `iterateEntities` (streaming async generator over the
+  same query shape, seek-paginated — use it when results may be
+  corpus-scale and the caller doesn't need an array), `queryEntities`,
+  `readEntity`, `subscribe`, `assertExpand`. Expand internals
+  (`expandLimits`, `expandAndProject`, `findRef`) are PRIVATE.
 - `subscriptions.js` — `subscribe()` primitive. Two modes: journal-
   walk dispatch (default) and graph dispatch via
   `runtime.refs.subscribeGraph` (when `expand` is set).
@@ -177,10 +189,13 @@ brevity.
   MCP).
 - **0009** — Sqlite is the engine's persistence substrate. Single
   `runtime/mikser.sqlite` holds `mikser_entities` / `mikser_refs` /
-  `mikser_snapshots`. Sift→SQL pushdown + LRU for findById;
+  `mikser_snapshots` / `mikser_journal` (+ `mikser_meta` for the
+  schema-version stamp). Sift→SQL pushdown + LRU for findById;
   worker-side read-only sqlite for sync template helpers.
   `registerSchema(name, sql)` + `useDatabase()` is the plugin-side
-  persistence pattern.
+  persistence pattern. Journal-on-sqlite (Phase 7) enables `--resume`;
+  auto-persist (Phase 9) means plugins mutate the yielded entity and
+  the journal writes back without an explicit `updateEntry` call.
 
 ## MCP
 
@@ -214,14 +229,14 @@ There is **no `--mcp` CLI flag**. Activation is plugin-presence only.
   dispatch its renders + postprocess through Piscina.
 - Current honest numbers (Apple Silicon, 4-thread default, INLINE
   dispatch; see ADR-0009 for the substrate the numbers below run on):
-  - 14k realistic warm clean:       2.95s, RSS 520MB
-  - 14k realistic warm + 1 change:  2.93s, RSS 527MB
-  - 110k realistic cold (--clear):  5m 29s, RSS 4.18GB peak
-  - 110k realistic warm clean:      25.8s, RSS 3.20GB
-  - 110k realistic warm + 1 change: 24.3s, RSS 3.24GB
-- 14k matches the pre-migration Map+NDJSON RSS baseline within 1% on
-  warm cycles. 110k is a workload Map+NDJSON couldn't reach — process
-  OOMed before ADR-0009.
+  - 14k realistic cold (--clear):   33s,    RSS 1.4GB peak
+  - 14k realistic warm clean:       2.6s,   RSS 156MB peak
+  - 14k realistic warm + 1 change:  3.0s,   RSS 156MB peak
+  - 110k realistic cold (--clear):  5.5 min
+  - 110k realistic warm clean:      25s,    RSS 3.2GB
+- vs the Map+NDJSON baseline (origin/main 6922b33) at 14k realistic:
+  cold ~4× faster, warm ~2× faster, warm RSS ~9× smaller. 110k is a
+  workload Map+NDJSON couldn't reach — process OOMed before ADR-0009.
 - Catalog scan cost was the 2024-era objection to sqlite. The
   resolution lives in `src/database/sift-to-sql.js`: indexed sift
   clauses ($eq/$in/$lt/$exists/etc. on collection / type / format /

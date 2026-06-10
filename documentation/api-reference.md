@@ -33,12 +33,15 @@ await runtime.start()
 |--------|------|---------|-------------|
 | `workingFolder` | string | `'./'` | Root folder of the project |
 | `outputFolder` | string | `'out'` | Output folder |
-| `runtimeFolder` | string | `'runtime'` | Temp files folder |
+| `runtimeFolder` | string | `'runtime'` | Temp files folder (engine sqlite lives here) |
 | `plugins` | string[] | `[]` | Plugin names to load |
 | `config` | string | `'./mikser.config.js'` | Config file path |
 | `mode` | string | `'development'` | Runtime mode |
 | `clear` | boolean | `false` | Clear output before run |
 | `watch` | boolean | `false` | Watch mode |
+| `force` | boolean | `false` | Rebuild everything; disable incremental dispatch |
+| `resume` | boolean | `false` | Continue from journal left by a previous interrupted run; skip the initial filesystem scan |
+| `verify` | boolean | `false` | Verify output folder against manifest; report drift instead of building |
 | `debug` | boolean | `false` | Debug logging |
 | `trace` | boolean | `false` | Trace logging |
 | `threads` | number | `4` | Worker thread count |
@@ -186,7 +189,7 @@ Runs after all render jobs complete.
 Runs before the postprocess phase. Use to queue postprocess jobs by calling `postprocessEntity()`. Receives `signal`.
 
 ### `onPostprocess(callback, once?)`
-Runs during the postprocess phase. Dispatches `POSTPROCESS` journal entries using the same POOL/QUEUE/WORKER concurrency model as render. Receives `signal`.
+Runs during the postprocess phase. Dispatches `POSTPROCESS` journal entries using the same INLINE/SERIAL/WORKER concurrency model as render. Receives `signal`.
 
 ### `onAfterPostprocess(callback, once?)`
 Runs after all postprocess jobs complete. Receives `signal`.
@@ -283,7 +286,7 @@ Adds a RENDER operation to the journal.
 ```js
 await renderEntity(
   entity,
-  { renderer: 'hbs', tasks: 'POOL' },
+  { renderer: 'hbs', tasks: TASKS.INLINE },
   { data: { nav: buildNav() } }
 )
 ```
@@ -331,7 +334,10 @@ import { addEntry, addEntries, updateEntry, useJournal, clearJournal } from 'mik
 
 ### `useJournal(name, operations?, signal?)`
 
-Async generator that yields journal entries with progress tracking.
+Async generator that yields journal entries with progress tracking. Walks the
+`mikser_journal` table chunk-by-chunk (chunk size 500) so peak memory stays
+bounded regardless of corpus size. Snapshot semantics: rows inserted during
+iteration are not visible to the walk that's already in progress.
 
 ```js
 for await (const { id, entity, operation, context, options, output } of useJournal(
@@ -341,8 +347,19 @@ for await (const { id, entity, operation, context, options, output } of useJourn
 )) {
   // id: journal row id
   // entity, context, options, output: parsed objects
+
+  // Auto-persist: mutate the yielded entity and move on — the diff is
+  // detected after each iteration and UPDATE'd back to the row.
+  entity.meta.slug = entity.name.split('/').pop()
 }
 ```
+
+**Auto-persist.** `useJournal` diffs the yielded entity after each iteration
+and UPDATEs the journal row if it changed. Plugin authors don't need to call
+`updateEntry({ id, entity })` after mutating — just mutate and the next loop
+turn writes back. `updateEntry` is still exported for engine-internal output /
+deps writes and as an explicit no-op safety valve for plugins that prefer to
+call it.
 
 ### `addEntry({ entity, operation, context, options })`
 
@@ -356,17 +373,30 @@ Low-level batch insert (chunks of 10).
 
 Update an existing journal entry's entity or output fields.
 
-### `clearJournal(aborted)`
+### `clearJournal()`
 
-Delete all journal entries. Closes the database connection if not in watch mode.
+`DELETE FROM mikser_journal` — clear all journal rows. Called at `onFinalized`.
+Anything still in the table when the process exits will be picked up by a
+later `--resume` run.
 
 ---
 
 ## Catalog
 
 ```js
-import { findEntity, findEntities } from 'mikser-io'
+import {
+  findEntity, findEntities, iterateEntities,
+  queryEntities, readEntity, subscribe
+} from 'mikser-io'
 ```
+
+The catalog is backed by the `mikser_entities` table inside
+`runtime/mikser.sqlite`. Sift filters that touch indexed columns
+(`id`, `collection`, `type`, `format`, `name`, `meta.href`, `meta.layout`,
+`meta.lang`, `meta.cache`, `time`, `uri`) push down to SQL WHERE clauses
+via `src/database/sift-to-sql.js`; un-pushed clauses fall through to
+JS-side sift on the materialized subset. `findById` is fronted by a
+10k-entry LRU + prepared statement.
 
 ### `findEntity(query?)`
 
@@ -379,7 +409,10 @@ const entity = await findEntity(e => e.meta?.featured === true)
 
 ### `findEntities(query?)`
 
-Returns all entities matching the query. Returns all entities if no query is provided.
+Returns an array of all entities matching the query. Returns all entities
+if no query is provided. Materializes the full result set — for
+corpus-scale walks where you don't need an array, prefer
+`iterateEntities`.
 
 ```js
 const posts = await findEntities({ collection: 'documents' })
@@ -387,7 +420,114 @@ const published = await findEntities(e => e.meta?.draft !== true)
 const all = await findEntities()
 ```
 
-Query types: function, lodash match object, or `undefined` for all.
+### `iterateEntities(query?)`
+
+Async generator over the same query shape as `findEntities`. Yields
+entities one at a time, seek-paginated chunk-by-chunk so memory stays
+bounded regardless of corpus size. Use it when results may be large and
+the caller doesn't need an array (no `.filter()` chains, no
+`JSON.stringify` of the whole set).
+
+```js
+for await (const entity of iterateEntities({ collection: 'documents' })) {
+  // process one at a time
+}
+```
+
+### `queryEntities(query, options?)`
+
+Sift filter with sort, pagination, projection, and `$`-ref expansion
+(see ADR-0007).
+
+```js
+const result = await queryEntities(
+  { collection: 'documents' },
+  {
+    sort: { 'meta.date': -1 },
+    skip: 0,
+    limit: 20,
+    project: ['id', 'name', 'meta.title'],
+    expand: ['$author', '$category'],
+  }
+)
+// result.entities — array
+// result.total — full match count before skip/limit
+```
+
+### `readEntity({ id, expand? })`
+
+Load a single entity by id, optionally with `$`-ref expansion.
+
+```js
+const post = await readEntity({
+  id: '/documents/blog/post.md',
+  expand: ['$author'],
+})
+```
+
+### `subscribe(filter, handler, options?)`
+
+Subscribe to catalog changes. Two dispatch modes (see
+`src/subscriptions.js`): journal-walk dispatch by default; graph
+dispatch via `runtime.refs.subscribeGraph` when `options.expand` is set
+so the handler fires whenever a referenced entity changes.
+
+```js
+const unsubscribe = subscribe(
+  { collection: 'documents' },
+  ({ operation, entity }) => { /* ... */ },
+)
+```
+
+Query types throughout: function, lodash match object, or `undefined` for all.
+
+---
+
+## Database
+
+```js
+import { registerSchema, useDatabase } from 'mikser-io'
+```
+
+The engine substrate is a single sqlite file at
+`{runtimeFolder}/mikser.sqlite` (filename overridable via
+`runtime.config.database.filename`, including `':memory:'`). Plugins
+that need their own persistence reach it through these two helpers —
+never by opening a second file.
+
+### `registerSchema(name, sqlScript)`
+
+Register a CREATE-TABLE-IF-NOT-EXISTS SQL block. All registered schemas
+are applied during `onLoaded`, after the engine's own tables
+(`mikser_entities`, `mikser_refs`, `mikser_snapshots`, `mikser_journal`,
+`mikser_meta`) and before any plugin's `onLoaded` runs.
+
+```js
+registerSchema('my_plugin_data', `
+  CREATE TABLE IF NOT EXISTS my_plugin_data (
+    id TEXT PRIMARY KEY,
+    payload TEXT
+  );
+  CREATE INDEX IF NOT EXISTS my_plugin_data_id ON my_plugin_data(id);
+`)
+```
+
+### `useDatabase()`
+
+Returns the shared `better-sqlite3` handle. Available from `onLoaded`
+onward. Use it to prepare statements once and reuse them.
+
+```js
+let stmtUpsert
+onLoaded(async () => {
+  const db = useDatabase()
+  stmtUpsert = db.prepare(`INSERT INTO my_plugin_data(id, payload) VALUES (?, ?)
+                           ON CONFLICT(id) DO UPDATE SET payload = excluded.payload`)
+})
+```
+
+`mikser_meta.schema_version` is stamped automatically so subsequent runs
+can detect schema drift.
 
 ---
 
@@ -549,8 +689,13 @@ const { OPERATION, ACTION, TASKS } = constants
 
 ### `TASKS`
 
+Dispatch modes for render and postprocess jobs.
+
 | Key | Value | Description |
 |-----|-------|-------------|
-| `TASKS.POOL` | `'POOL'` | Main process, concurrent via p-map |
-| `TASKS.QUEUE` | `'QUEUE'` | Sequential via p-queue |
-| `TASKS.WORKER` | `'WORKER'` | Piscina worker thread |
+| `TASKS.INLINE` | `'inline'` | Main-thread async, concurrent via p-map (default) |
+| `TASKS.SERIAL` | `'serial'` | Main-thread, sequential via p-queue (concurrency 1) |
+| `TASKS.WORKER` | `'worker'` | Piscina worker thread (lazy pool, `minThreads: 0`) |
+
+Layouts opt into worker dispatch via `task: worker` in frontmatter; the
+default is `INLINE` for both render and postprocess.

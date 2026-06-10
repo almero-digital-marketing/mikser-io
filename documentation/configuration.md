@@ -40,16 +40,56 @@ These options are part of `runtime.options` and apply to the engine itself.
 |--------|----------|------|---------|-------------|
 | `workingFolder` | `-i, --working-folder` | string | `./` | Root folder of the project. All other paths are relative to this. |
 | `outputFolder` | `-o, --output-folder` | string | `out` | Folder where rendered output is written. |
-| `runtimeFolder` | `-e, --runtime-folder` | string | `runtime` | Folder for temporary files (SQLite journal, catalog snapshot, render details). |
+| `runtimeFolder` | `-e, --runtime-folder` | string | `runtime` | Folder for temporary files. The engine's sqlite substrate lives at `runtime/mikser.sqlite` (entities, refs, snapshots, journal, schema-version meta all in one file). |
 | `plugins` | `-p, --plugins` | string[] | `[]` | List of plugins to load. |
 | `config` | `-c, --config` | string | `./mikser.config.js` | Path to the config file. |
 | `mode` | `-m, --mode` | string | `development` | Runtime mode, accessible as `runtime.options.mode`. |
 | `clear` | `-r, --clear` | boolean | `false` | Delete `outputFolder` and `runtimeFolder` before each run. |
 | `watch` | `-w, --watch` | boolean | `false` | Watch source folders for changes and rebuild incrementally. |
+| `force` | `-f, --force` | boolean | `false` | Rebuild everything; disable incremental dispatch. |
+| `resume` | `-R, --resume` | boolean | `false` | Continue from journal entries left by a previous interrupted run; skip the initial filesystem scan. The journal table survives crashes, so an interrupted cycle can be picked up by re-running with `--resume`. |
+| `verify` | `--verify` | boolean | `false` | Verify the output folder against the manifest snapshot — report drift instead of building. |
 | `debug` | `-d, --debug` | boolean | `false` | Enable debug-level logging. |
 | `trace` | `-t, --trace` | boolean | `false` | Enable trace-level logging (very verbose). |
-| `threads` | — | number | `4` | Number of worker threads for parallel rendering. |
+| `threads` | — | number | `4` | Worker thread count for the Piscina pools (`renderWorkers`, `postprocessWorkers`). Both pools are lazy (`minThreads: 0` + `idleTimeout: 30_000`) so INLINE-only workloads spin up zero workers. |
 | `server` | `-s, --server [port]` | number\|boolean | — | When set, the engine creates a shared Express app on `runtime.options.app` and listens on the given port (default `3001`) after all plugins have mounted their routes. Plugins like `api` attach to it instead of starting their own server. The `outputFolder` is also served as a static catch-all route at `/` (plugin routes match first; anything that doesn't match falls through to the rendered output). Requires `express` to be installed. |
+| `cors` / `no-cors` | `--cors` / `--no-cors` | boolean | — | Toggle CORS on the engine's shared Express app. See `src/server.js` for the extensible header arrays plugins push onto. |
+
+## Engine Substrate
+
+The catalog, inverse-ref graph, render snapshot manifest, and per-cycle
+journal all share one sqlite file at `{runtimeFolder}/mikser.sqlite` (see
+[ADR-0009](./decisions/0009-database-engine-substrate.md)).
+
+### `database`
+
+```js
+export default {
+  database: {
+    filename: 'mikser.sqlite',  // Default. Resolved under runtimeFolder
+                                // unless absolute.
+    // filename: ':memory:'     // In-process scratch substrate; no resume,
+                                // no cross-run persistence.
+  }
+}
+```
+
+### `catalog`
+
+```js
+export default {
+  catalog: {
+    cache: {
+      size: 10000  // findById LRU size. Default 10000.
+    },
+    expand: {       // Caps for $-ref expansion (ADR-0007)
+      maxDepth: 5,
+      maxPaths: 20,
+      maxResolved: 100
+    }
+  }
+}
+```
 
 ## Plugin Configuration
 

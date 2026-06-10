@@ -63,6 +63,7 @@ Every change to an entity is recorded as a journal operation:
 | `UPDATE` | `OPERATION.UPDATE` | Entity has changed |
 | `DELETE` | `OPERATION.DELETE` | Entity has been removed |
 | `RENDER` | `OPERATION.RENDER` | Entity needs to be rendered |
+| `POSTPROCESS` | `OPERATION.POSTPROCESS` | Entity needs to be postprocessed |
 
 ### Entity Match Patterns
 
@@ -87,20 +88,30 @@ match: { collection: 'documents', format: 'md' }
 
 ## Journal
 
-The journal is a temporary SQLite database that tracks all operations in the current run. It is created fresh at the start of each run and destroyed at finalization.
+The journal is the per-cycle producer/consumer queue every phase reads
+from and writes to. It lives as the `mikser_journal` table inside the
+engine's sqlite file (`{runtimeFolder}/mikser.sqlite`) — same substrate
+as the catalog, refs graph, and render snapshots (see
+[ADR-0009](./decisions/0009-database-engine-substrate.md)). Rows are
+written on `createEntity` / `updateEntity` / `deleteEntity` /
+`renderEntity` / `postprocessEntity`, drained on the matching phase,
+and cleared at `onFinalized` (`DELETE FROM mikser_journal`).
 
-**Location:** `{runtimeFolder}/journal.db`
+Because the table survives crashes, an interrupted run can be resumed
+with `mikser --resume`: the engine picks up the leftover rows and
+skips the initial filesystem scan.
 
 ### Journal Schema
 
 ```sql
-CREATE TABLE operations (
+CREATE TABLE mikser_journal (
   id        INTEGER PRIMARY KEY AUTOINCREMENT,
-  operation TEXT,    -- CREATE | UPDATE | DELETE | RENDER
-  entity    TEXT,    -- JSON-serialized entity object
-  context   TEXT,    -- JSON-serialized context object
-  options   TEXT,    -- JSON-serialized render options
-  output    TEXT     -- JSON-serialized render result
+  operation TEXT,    -- CREATE | UPDATE | DELETE | RENDER | POSTPROCESS
+  entity    TEXT,    -- JSON-serialized entity
+  context   TEXT,    -- JSON-serialized context
+  options   TEXT,    -- JSON-serialized render/postprocess options
+  output    TEXT,    -- JSON-serialized result (success, destination, etc.)
+  deps      TEXT     -- JSON-serialized dependency hashes
 )
 ```
 
@@ -126,7 +137,7 @@ await updateEntity({ ...existingEntity, checksum: newChecksum })
 await deleteEntity({ id: '/posts/hello', collection: 'posts', type: 'post' })
 
 // Queue a single render job
-await renderEntity(entity, { renderer: 'hbs', tasks: 'POOL' }, contextData)
+await renderEntity(entity, { renderer: 'hbs', tasks: TASKS.INLINE }, contextData)
 
 // Queue multiple render jobs (batched for efficiency)
 await renderEntities([
@@ -148,11 +159,23 @@ for await (const { id, entity, operation, context, options, output } of useJourn
   ['CREATE', 'UPDATE'],          // Filter by operation types (omit for all)
   signal                         // AbortSignal for cancellation
 )) {
-  console.log(entity.id, operation)
+  // Mutate the yielded entity and move on — auto-persist diffs after each
+  // iteration and UPDATEs the journal row if it changed.
+  entity.meta.slug = entity.name.split('/').pop()
 }
 ```
 
-`useJournal` shows a progress bar automatically. Results are paginated internally (1000 rows per page) to keep memory usage bounded.
+`useJournal` shows a progress bar automatically. The walk is paged in
+chunks of 500 (`CHUNK_SIZE`) so peak memory stays bounded regardless of
+corpus size. Snapshot semantics: rows inserted during iteration are not
+visible to the walk that's already in progress — if you need to react to
+new rows, kick off a fresh `useJournal` in a later phase.
+
+**Auto-persist.** Whatever you mutate on the yielded entity is detected
+post-yield and written back. `updateEntry` is still exported for
+engine-internal output / deps writes (and as an explicit no-op safety
+valve), but plugin code that just mutates the entity doesn't need to
+call it.
 
 ### Low-level Journal Access
 
@@ -192,7 +215,7 @@ remainder runs as JS-side sift on the materialized subset.
 ### Querying the Catalog
 
 ```js
-import { findEntity, findEntities } from 'mikser-io'
+import { findEntity, findEntities, iterateEntities, queryEntities } from 'mikser-io'
 
 // Find one entity matching a sift query
 const entity = await findEntity({ id: '/documents/blog/post.md' })
@@ -206,6 +229,18 @@ const recent = await findEntities(e => e.meta?.date > '2024-01-01')
 
 // Find all entities (no query = return all)
 const everything = await findEntities()
+
+// Streaming variant — yields entities one at a time, seek-paginated.
+// Use it when results may be corpus-scale and you don't need an array.
+for await (const post of iterateEntities({ collection: 'documents' })) {
+  // process one at a time, no full materialization
+}
+
+// Sort / paginate / project / expand $-refs (ADR-0007)
+const { entities, total } = await queryEntities(
+  { collection: 'documents' },
+  { sort: { 'meta.date': -1 }, limit: 20, expand: ['$author'] }
+)
 ```
 
 ### Catalog in Plugins / Render Templates
@@ -215,23 +250,27 @@ so refs can track dependencies and the sift→SQL translator pushes
 predicates down to indexed columns:
 
 ```js
-import { findEntities, findEntity } from 'mikser-io'
+import { findEntities, findEntity, iterateEntities } from 'mikser-io'
 
 const docs = await findEntities({ collection: 'documents' })
 const post = await findEntity({ id: '/documents/blog/post.md' })
 
-// Available as runtime.catalog in templates via the data render plugin
+// The facade also lives on the runtime singleton:
+//   runtime.catalog.findEntities(...) etc.
 ```
 
 ### Catalog vs Journal
 
+Both live in the same sqlite file (`runtime/mikser.sqlite`), different
+tables.
+
 | | Journal | Catalog |
 |--|---------|---------|
-| Lifetime | One run | Persistent |
-| Purpose | Track changes in current run | Entity registry across runs |
-| Format | In-memory queue | `mikser_entities` table in sqlite |
-| Operations | CREATE, UPDATE, DELETE, RENDER, POSTPROCESS | Stores current entity state |
-| Cleared | Yes, at `onFinalized` | No (updated incrementally) |
+| Lifetime | One cycle (per-`process()` invocation in watch mode) | Persistent across runs |
+| Purpose | Per-cycle producer/consumer queue between phases | Entity registry, queryable substrate |
+| Storage | `mikser_journal` table | `mikser_entities` table |
+| Rows | CREATE / UPDATE / DELETE / RENDER / POSTPROCESS | Current entity state, indexed for sift→SQL pushdown |
+| Cleared | Yes, at `onFinalized` (`DELETE FROM mikser_journal`). Leftover rows survive crashes for `--resume`. | No — updated incrementally during persist |
 
 The catalog is updated during the `persist` phase by reading CREATE/UPDATE/DELETE operations from the journal and applying them inside a single transaction.
 

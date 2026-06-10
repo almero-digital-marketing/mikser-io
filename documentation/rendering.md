@@ -34,20 +34,28 @@ Controlled by `options.tasks`:
 
 | Mode | Constant | Description |
 |------|----------|-------------|
-| Pool | `TASKS.POOL` | Runs in main process. Fast for small jobs. Default. |
-| Queue | `TASKS.QUEUE` | Sequential queue (p-queue). Useful when renders must not overlap. |
-| Worker | `TASKS.WORKER` | Runs in a Piscina worker thread. Best for CPU-heavy transforms (images). |
+| Inline | `TASKS.INLINE` | Runs in the main event loop via `await`. The outer dispatcher iterates with concurrency = `runtime.options.threads`. Right default for cheap renders (HTML / md / yaml templating) where IPC overhead would dominate. |
+| Serial | `TASKS.SERIAL` | Runs in the main event loop too, but via p-queue with concurrency 1. One at a time, no interleaving. Right choice for tasks that touch a shared, non-reentrant resource. |
+| Worker | `TASKS.WORKER` | Runs on a real OS thread via the Piscina pool sized to `runtime.options.threads`. True parallelism. Right choice for expensive CPU-bound renders (PDF, MJML, image compose). The pool is lazy (`minThreads: 0`), so INLINE-only workloads pay no worker overhead. |
 
-Set via render options:
+Set per-entity in frontmatter:
+
+```yaml
+---
+task: worker
+---
+```
+
+Both the render and the postprocess for that entity then route through the Piscina pool. Or set programmatically:
 
 ```js
-await renderEntity(entity, { renderer: 'hbs', tasks: 'POOL' })
+await renderEntity(entity, { renderer: 'hbs', tasks: 'INLINE' })
 await renderEntity(entity, { renderer: 'preset', tasks: 'WORKER' })
 ```
 
-## Queue Concurrency
+## Inline Concurrency
 
-The number of parallel renders (pool mode) is controlled by `options.threads` (default: 4):
+The number of parallel renders (inline mode) is controlled by `options.threads` (default: 4):
 
 ```js
 const runtime = await setup({ threads: 8 })
@@ -415,8 +423,10 @@ The layouts plugin handles pagination automatically when a layout's `load()` ret
 
 ```js
 // layouts/blog-list.js
+import { findEntities } from 'mikser-io'
+
 export async function load({ entity, runtime }) {
-  const posts = runtime.state.posts ?? []
+  const posts = await findEntities({ collection: 'documents', type: 'post' })
   const perPage = 10
 
   // Return pages array — each item becomes one render job
@@ -430,6 +440,8 @@ export async function load({ entity, runtime }) {
 }
 ```
 
+For corpus-scale lists where you don't actually need an in-memory array — say, you're piping through a transform that produces one render per entity — use `iterateEntities(query)` instead. It's an async generator over the same sift query shape with internal seek-pagination, so memory stays bounded regardless of how many entities match.
+
 Each item in `pages` triggers a separate render call. The entity gets `entity.page` (1-based index) and `entity.pages` (total count) set. The destination URL includes the page number for pages > 1 (e.g. `/blog/page/2`).
 
 ---
@@ -440,7 +452,7 @@ After rendering completes:
 
 - The rendered content is written to `entity.destination`.
 - The journal entry is updated with `output: { success: true, result: '...' }`.
-- `render-details.json` in the runtime folder is a **cumulative manifest** of every rendered output. It loads at startup, is merged with each cycle's renders, and on DELETE entries (e.g. in watch mode) the corresponding output files are unlinked and pruned. Paginated children are tracked via `entity.parent` so a single source delete sweeps all pages.
+- The render manifest (`mikser_snapshots` table in `runtime/mikser.sqlite`) records the snapshot for the rendered output: `inputHash`, `outputHash`, `refClosure`. On the next cycle `manifest.shouldSkip()` short-circuits renders whose inputs and refs haven't drifted. On DELETE entries (e.g. in watch mode) the corresponding output files are unlinked and the snapshot rows dropped. Paginated children are tracked via `entity.parent` (partial index on the column) so a single source delete sweeps all pages.
 - Failed renders are logged and marked `output: { success: false }` but do not abort the run.
 
 ### Error output

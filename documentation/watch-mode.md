@@ -44,6 +44,30 @@ startup
 
 The import phase runs **only once** at startup. Subsequent cycles start from `process()`, which re-reads whatever was changed in the journal by the sync handlers.
 
+The journal is the `mikser_journal` table in `runtime/mikser.sqlite` — so a crash mid-cycle leaves an inspectable record of what hadn't finalized yet, and `--resume` (below) picks up where the prior run left off.
+
+## Resuming an interrupted run
+
+```bash
+mikser --watch --resume
+# or short:
+mikser -w -R
+```
+
+`--resume` does two things at startup:
+
+1. **Keeps the leftover journal entries.** Without `--resume`, mikser warns and discards any rows the prior run wrote but never finalized. With `--resume`, those rows stay and the next cycle picks them up.
+2. **Skips the initial filesystem scan.** The startup `source.sweep` is bypassed, so a 110k-entity corpus doesn't pay another minute of scan time just to confirm everything's the same as it was.
+
+This is the right shape for two scenarios in particular:
+
+- **PM2 / systemd / container restart loops.** Process gets killed mid-cycle by a deploy or an OOM-kill; the restart picks up the in-flight work and continues without re-scanning every source folder.
+- **CI checkpoint resume.** A timed-out CI job that wrote partial render output reattaches to its leftover journal on the retry instead of starting from scratch.
+
+The chokidar watcher attaches normally after a `--resume` start, so any source change between the kill and the restart flows through the sync hook as a fresh journal entry.
+
+If you're not in watch mode and not interrupted, you don't need `--resume`. The default warning + discard behaviour is the safe path for one-shot builds.
+
 ## File Watching
 
 Plugins register folder watchers using the `watch()` function:
@@ -128,8 +152,8 @@ Chokidar reports a file rename as `unlink(old)` followed by `add(new)`. The `unl
 
 After the next render cycle Mikser reconciles state:
 
-- `render-details.json` (the cumulative render manifest) is consulted. Every entry whose `id` or `parent` matches a deleted source is unlinked from disk and pruned from the manifest. Paginated children are caught via `parent`.
-- The layouts sitemap drops entries whose `id` or `parent` matches the deleted source.
+- The render manifest (`mikser_snapshots` table) is consulted. Every snapshot whose `id` or `parent` matches a deleted source is unlinked from disk and dropped from the table. Paginated children are caught via `parent`.
+- `mikser_entities` rows for the deleted ids are removed. `mikser_refs` cascades on the FK. There's no separate sitemap to maintain — the catalog itself is the sitemap, queried via the `meta_href` index.
 
 The net effect: renaming `documents/foo.md` to `documents/bar.md` in watch mode unlinks `out/foo.html` and any `out/foo.<n>.html` pages on its own. One-shot builds (no watch) don't generate DELETE events — use `--clear` to start from a clean output tree.
 

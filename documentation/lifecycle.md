@@ -7,30 +7,42 @@ Mikser processes content through a fixed sequence of phases. Each phase is imple
 ```
 runtime.start()
 │
-├── [INITIALIZE]   Parse CLI options, set logger levels
+├── [INITIALIZE]   Parse CLI options, set logger levels, register journal schema
 ├── [INITIALIZED]  Resolve folder paths, create directories, clear if requested
 ├── [LOAD]         Load config file and plugins
-├── [LOADED]       Plugins have loaded, journal and catalog are ready
-├── [IMPORT]       Scan source folders, populate journal with CREATE/UPDATE/DELETE entries
+├── [LOADED]       Plugins have loaded; runtime/mikser.sqlite is open and every
+│                  registered schema applied (mikser_entities, mikser_refs,
+│                  mikser_snapshots, mikser_journal, mikser_meta, plus any
+│                  plugin schemas). Catalog/refs/manifest/journal have their
+│                  prepared statements ready.
+├── [IMPORT]       Scan source folders, populate journal with CREATE/UPDATE/DELETE rows
+│                  (skipped on --resume — picks up leftover journal rows instead)
 ├── [IMPORTED]     All source entities are in the journal
 │
 └── runtime.process()   ← repeated on every change in watch mode
     │
     ├── [PROCESS]    Transform entities (map, validate, front-matter, json, yaml)
     ├── [PROCESSED]  Match layouts, provision resources
-    ├── [PERSIST]    Write journal changes to the catalog
-    ├── [PERSISTED]  Catalog is up to date
+    ├── [PERSIST]    Drain CREATE/UPDATE/DELETE journal rows into mikser_entities;
+    │                rebuild mikser_refs inverse rows for any entity whose
+    │                $-keyed refs changed
+    ├── [PERSISTED]  Catalog and refs graph are up to date
     │
     └── runtime.render(signal)
         │
-        ├── [BEFORE_RENDER]  Expand paginated entities, queue render tasks
-        ├── [RENDER]         Execute render jobs (via workers/queue/pool)
-        ├── [AFTER_RENDER]   Write render-details.json
+        ├── [BEFORE_RENDER]      Expand paginated entities, queue render rows
+        ├── [RENDER]             Execute render rows (INLINE / SERIAL / WORKER)
+        ├── [AFTER_RENDER]       Render snapshots recorded in mikser_snapshots
+        │
+        ├── [BEFORE_POSTPROCESS] Queue postprocess rows
+        ├── [POSTPROCESS]        Execute postprocess rows (same dispatch model)
+        ├── [AFTER_POSTPROCESS]
         │
         └── runtime.finalize(signal)
             │
-            ├── [FINALIZE]   Write catalog to disk, clean broken symlinks
-            └── [FINALIZED]  Log completion, start cron tasks
+            ├── [FINALIZE]   catalog/refs/manifest commit their per-cycle
+            │                transaction against mikser.sqlite; clean broken symlinks
+            └── [FINALIZED]  DELETE FROM mikser_journal; log completion; start cron tasks
 ```
 
 After `finalize`, if `--watch` is enabled, Mikser waits for file system events and calls `runtime.process()` again when a change is detected.
@@ -49,6 +61,7 @@ import {
   onProcess, onProcessed,
   onPersist, onPersisted,
   onBeforeRender, onRender, onAfterRender,
+  onBeforePostprocess, onPostprocess, onAfterPostprocess,
   onCancel, onCancelled,
   onFinalize, onFinalized,
   onSync, onValidate, onComplete
@@ -153,11 +166,12 @@ Entities in the journal are transformed. This is where mappers, validators, fron
 
 ```js
 onProcess(async (signal) => {
-  // Transform entities in the journal
+  // Transform entities in the journal — mutate the yielded entity and move on.
+  // useJournal auto-persists drift after each yield; no explicit updateEntry
+  // call required.
   for await (const { entity, operation } of useJournal('My transform', ['CREATE', 'UPDATE'], signal)) {
     if (entity.collection !== 'posts') continue
     entity.meta.slug = entity.name.split('/').pop()
-    await updateEntity(entity)
   }
 })
 
@@ -217,7 +231,34 @@ onRender(async (signal) => {
 
 onAfterRender(async () => {
   // All render jobs finished
-  // render-details.json has been written
+})
+```
+
+---
+
+### BeforePostprocess / Postprocess / AfterPostprocess
+
+Mirrors the render phase. Queue postprocess jobs in `onBeforePostprocess`
+by calling `postprocessEntity()`; `onPostprocess` dispatches the
+`POSTPROCESS` journal rows using the same INLINE/SERIAL/WORKER dispatch
+model as render. The engine owns a separate lazy Piscina pool
+(`runtime.engine.postprocessWorkers`) so worker-routed postprocessors
+(layouts that opt in via `task: worker` in frontmatter) don't share the
+render pool.
+
+```js
+onBeforePostprocess(async (signal) => {
+  for await (const { entity } of useJournal('Queue PDFs', ['CREATE', 'UPDATE'], signal)) {
+    if (entity.format !== 'html') continue
+    await postprocessEntity(
+      { ...entity, destination: changeExtension(entity.destination, 'pdf') },
+      { postprocessor: 'puppeteer-pdf', tasks: TASKS.WORKER }
+    )
+  }
+})
+
+onAfterPostprocess(async () => {
+  // All postprocess jobs finished
 })
 ```
 
@@ -242,6 +283,9 @@ onFinalized(async () => {
 - `catalog.js` / `refs.js` / `manifest.js` commit their per-cycle
   transaction against `mikser.sqlite` (skipped if no changes)
 - `engine.js` cleans up broken symlinks in the output folder
+- `journal.js` clears the per-cycle queue: `DELETE FROM mikser_journal`.
+  Anything still in the table when the process exits is left for the
+  next `--resume` run.
 - `manager.js` starts scheduled cron tasks (if any)
 
 ---

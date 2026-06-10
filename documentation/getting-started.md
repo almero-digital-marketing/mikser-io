@@ -110,10 +110,17 @@ mikser [options]
   -r, --clear                      Clear output before run
   -o, --output-folder <folder>     Output folder (default: out)
   -w, --watch                      Watch for file changes
+  -f, --force                      Rebuild everything; disable incremental dispatch
+  -R, --resume                     Continue from journal entries left by a previous
+                                   interrupted run; skip the initial filesystem scan
+      --verify                     Verify output folder against manifest; report
+                                   drift instead of building
   -d, --debug                      Show debug log statements
   -t, --trace                      Show trace log statements
   -e, --runtime-folder <folder>    Runtime/temp folder (default: runtime)
 ```
+
+`--resume` is the flag for picking up where an interrupted run left off — PM2 auto-restart, CI checkpoint, anything that killed mikser mid-cycle. Without `--resume`, leftover journal entries from the prior run are discarded at startup with a warning. Pair `--resume` with `--watch` to also catch filesystem changes that happened after the restart.
 
 ## Using Mikser Programmatically
 
@@ -271,6 +278,14 @@ mikser --watch
 ```
 
 In watch mode Mikser watches all source folders. When a file changes, it runs only the process → render → finalize cycle (not the full import), making incremental rebuilds fast.
+
+For long-running watch processes managed by PM2 / systemd / a container restart loop, add `--resume`:
+
+```bash
+mikser --watch --resume
+```
+
+A restart picks up any journal entries the prior run didn't finalize and resumes from there, skipping the initial filesystem scan. The chokidar watcher still attaches, so any source change between the kill and the restart flows through normally.
 
 ## Next Steps
 

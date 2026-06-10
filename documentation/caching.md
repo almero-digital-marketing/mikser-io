@@ -26,7 +26,7 @@ The rest of this document is about the second row.
 
 **Outage survival.** When mikser is unreachable — process down, deploy in flight, network glitch, container restart — the live API stops responding. Without a cache, every list/read request 5xxs at the proxy and falls through to the client. The page either freezes on its loading state or surfaces a generic "backend unavailable." With the cache, the proxy reads from disk and serves the last-known-good response. SSE updates pause (you can't fake a live stream from a static file), but list reads — which dominate page-load traffic for things like `useDocument(id)` — survive transparently.
 
-**Repeat-query savings.** Multiple tabs issuing the same `GET /api/public/entities?...` for a popular document otherwise re-run sift over the in-memory catalog every time. With the cache the proxy can serve from disk, and only the first request after an invalidation actually hits mikser. For small-to-medium catalogs that's a measurable drop in engine CPU.
+**Repeat-query savings.** Multiple tabs issuing the same `GET /api/public/entities?...` for a popular document otherwise re-run sift against the catalog every time (indexed clauses push down to SQL, the rest fall through to JS-side sift on the result rows). With the cache the proxy can serve from disk, and only the first request after an invalidation actually hits mikser. For small-to-medium catalogs that's a measurable drop in engine CPU.
 
 ## Configure it
 

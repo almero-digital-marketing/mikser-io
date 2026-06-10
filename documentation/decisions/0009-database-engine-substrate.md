@@ -80,6 +80,10 @@ vector plugin's convention):
 - **`mikser_snapshots`** — manifest. PK `(id, destination)`,
   `refClosure` as JSON, partial index on `parent` for two-stage
   rebuild dispatch.
+- **`mikser_journal`** — per-cycle queue. Append-only writes during
+  the cycle, drained at `onFinalize`. Survives a crash so `--resume`
+  can resume from leftover entries on the next start. See Phase 7
+  under "Followup work that landed alongside" below.
 
 Plugins reach the same primitives — `mikser-io-vector`'s sqlite-vec
 mode writes to a *separate* file but follows the identical
@@ -132,12 +136,12 @@ or none of it did.
 ### What got easier
 
 - **Memory ceiling shifted from "what fits in heap" to "what fits in
-  page cache."** At 14k realistic, peak RSS dropped from 656MB (initial
-  catalog-only sqlite swap) to 520MB after Phase 5.5's allLayoutEntities
-  fix and Phase 5.6's Piscina lazy init — within 1% of the old
-  Map+NDJSON baseline (516MB). At 110k realistic — a workload the
-  Map+NDJSON branch couldn't reach — the database branch runs at
-  3.2GB RSS warm.
+  page cache."** At 14k realistic, warm-cycle peak RSS sits at 156MB —
+  ~9× smaller than the Map+NDJSON baseline (516MB) once the journal,
+  catalog, refs, and manifest stopped duplicating each other in heap
+  and Phase 8's chunked walks bounded the journal-iteration footprint.
+  At 110k realistic — a workload the Map+NDJSON branch couldn't reach
+  — the database branch runs at 3.2GB RSS warm.
 - **Persistent state across restarts.** No NDJSON replay on startup;
   open the file, schema is current, refs and manifest are already
   there.
@@ -158,9 +162,11 @@ or none of it did.
 - **Schema migrations are now a concern.** Currently mitigated by
   ADR posture #1 ("until v10, no users") — we rewrite in place
   whenever schemas change. Post-v10 this becomes real work.
-- **Watch-mode warm cycle +18% slower at 14k** compared to
-  Map+NDJSON baseline (2.94s vs 2.5s). The architectural win is at
-  scale and at restart; the per-cycle overhead is the cost.
+- **First-cycle (cold) is a single SQL transaction, not a memory
+  fill.** A `--clear` rebuild at 14k realistic peaks at 1.4GB RSS
+  while the import phase batches into `mikser_entities`. The number
+  is honest, not pretty — cold builds are heavier than warm cycles
+  by design.
 
 ### Followup work that landed alongside
 
@@ -177,6 +183,33 @@ or none of it did.
   surface functions (`runtime.options.layouts.inspect`) and the
   per-render `track` closure, causing `DataCloneError`. Both worker
   dispatch paths now strip non-cloneable values before transferring.
+- **Journal moved onto sqlite (Phase 7).** Same public surface
+  (`addEntry` / `addEntries` / `updateEntry` / `useJournal` /
+  `clearJournal`), but entries now live in `mikser_journal` rows
+  instead of an in-memory array. Two things this unlocks: a new
+  `--resume` (`-R`) CLI flag that continues from leftover entries
+  and skips the initial source scan (useful for PM2 auto-restart
+  and CI checkpoint resume); and a "leftover journal at startup"
+  bootstrap that warns and discards by default with a "use --resume
+  to keep" message.
+- **Chunked journal walks + streaming iterators (Phase 8).** Journal
+  walks page through the rows in `CHUNK_SIZE=500` batches so peak
+  journal memory stays bounded regardless of corpus. `sweepDeleted`
+  uses a SQL temp table + LEFT JOIN. `iterateEntities(query)` is the
+  streaming sibling of `findEntities` — same query shape, async
+  generator, seek-paginated — for corpus-scale walks that don't need
+  the array materialized. Layouts `--force` dispatch streams via SQL
+  id projection + batched journal flush.
+- **Auto-persist in `useJournal` (Phase 9).** Each iteration
+  `JSON.stringify`s the yielded entity, compares to the original on
+  the row, and UPDATEs if it changed. Plugin authors stopped passing
+  `updateEntry({id, entity})` after mutation; the built-in plugins
+  (front-matter, yaml, json, mapper, data, resources, layouts
+  onProcessed) were swept of those calls and now demonstrate the
+  "just mutate" pattern by example. `updateEntry` is still exported
+  and is still what the engine uses for output/deps writes that
+  auto-persist doesn't track; plugins that prefer the explicit form
+  can still call it — the diff check sees no drift and skips.
 
 ## Examples
 
@@ -189,6 +222,8 @@ or none of it did.
   inboundFor / outboundFor / inverseClosureOf.
 - `src/manifest.js` — `mikser_snapshots` schema, two-query
   recordedHashes via `json_each`.
+- `src/journal.js` — `mikser_journal` schema, chunked walks,
+  auto-persist diff in `useJournal`, `--resume` bootstrap.
 - `src/render.js` — worker-side `ensureWorkerDb` + `lookupHrefViaDb`
   for sync template helpers.
 - `test/scenarios/_harness.js` — `readCatalog` / `readManifest`

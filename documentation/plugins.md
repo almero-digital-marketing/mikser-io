@@ -118,11 +118,14 @@ The factory function receives the complete Mikser API as a single destructured o
 | `deleteEntity` | function | Add a DELETE journal entry |
 | `renderEntity` | function | Add a RENDER journal entry |
 | `renderEntities` | function | Add multiple RENDER journal entries |
-| `useJournal` | async generator | Iterate journal entries |
+| `useJournal` | async generator | Iterate journal entries. Mutations to the yielded `entity` are auto-persisted (diff-detected after each yield) — no explicit `updateEntry` call required. |
 | `findEntity` | function | Find one entity from catalog |
-| `findEntities` | function | Find multiple entities from catalog |
+| `findEntities` | function | Find multiple entities from catalog (returns an array — materializes the full result set) |
+| `iterateEntities` | async generator | Stream entities from catalog (same query shape as `findEntities`, pages CHUNK_SIZE rows at a time). Use for corpus-scale walks where the caller processes one entity at a time. |
 | `addEntry` | function | Low-level journal insert |
-| `updateEntry` | function | Low-level journal update |
+| `updateEntry` | function | Low-level journal update. Not needed for entity mutations inside a `useJournal` walk (the auto-persist handles those); useful for engine-internal writes (`output`, `deps`) and explicit re-writes from outside a walk. |
+| `registerSchema` | function | Register a sqlite schema for plugin-owned tables. Call at module-eval (or `onInitialize` if you hit a circular import). Convention: prefix tables with `<plugin>_` (e.g., `vector_<store>`). |
+| `useDatabase` | function | Return the shared sqlite handle. Available from `onLoaded` onward — the engine opens the database before user plugins load. |
 | `useLogger` | function | Get the pino logger instance |
 | `watch` | function | Watch a folder for file changes |
 | `schedule` | function | Schedule a recurring task |
@@ -500,7 +503,7 @@ With this config:
 ```js
 // mikser.config.js
 export default {
-    plugins: ['files', 'resources', 'assets', 'catalog', 'render', 'api'],
+    plugins: ['files', 'resources', 'assets', 'api'],
 
     resources: {
         libraries: {
@@ -528,8 +531,8 @@ files       → loads the markdown, surfaces meta.hero as a URL string
 resources   → matches media.acme.internal, downloads hero.mp4 → resources/company-media/campaigns/spring-2026/hero.mp4
 assets      → matches /resources/.../hero.mp4 against the video-web preset → transcodes via ffmpeg
               → matches the same input against the poster preset → extracts a JPEG frame via a sharp/ffmpeg preset
-catalog     → registers the transcoded mp4 and the poster jpg as asset entities
-render      → page templates pull the asset URL via the SDK or runtime.urlFor
+engine      → registers the transcoded mp4 and the poster jpg as asset entities in mikser_entities;
+              page templates pull the asset URL via the SDK or runtime.urlFor at render time
 api / data  → ships everything to clients via SSE + JSON
 ```
 
