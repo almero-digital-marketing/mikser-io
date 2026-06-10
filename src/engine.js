@@ -32,9 +32,19 @@ export async function setup(options) {
         // transports); progress-bar coordination is then their problem.
         logger: options?.logger || createMikserLogger('info'),
         commander: new Command(),
+        // Lazily-allocated worker pool. Render dispatch is INLINE by
+        // default; Piscina only matters when a layout opts into
+        // TASKS.WORKER (`task: 'worker'`) or a postprocessor declares
+        // worker mode. minThreads: 0 prevents Piscina from pre-spawning
+        // workers at construction time — INLINE-only workloads pay zero
+        // worker cost. idleTimeout unspawns workers that have sat idle,
+        // so transient bursts of WORKER tasks don't leave threads alive
+        // for the rest of the build.
         renderWorkers: new Piscina({
             filename: new URL('./render.js', import.meta.url).href,
-            maxThreads: runtime.options.threads
+            maxThreads: runtime.options.threads,
+            minThreads: 0,
+            idleTimeout: 30_000,
         }),
         queue: new Queue({ concurrency: 1 })
     }
