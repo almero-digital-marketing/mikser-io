@@ -225,6 +225,20 @@ What you get from how this project is built:
 - **Builds are deterministic; no async middleware layer.** The journal is the only synchronization primitive — no event bus, no IoC container, no orchestrator running plugins in surprising order. The lifecycle is a list of named phases; "what ran when?" has an answer you can read off the source.
 - **The whole engine is one read.** The [Architecture Overview](./documentation/overview.md) walks the full pipeline top to bottom. Onboarding a new engineer is an afternoon, not a tour through fifteen reference docs.
 
+## Mikser among static site generators
+
+**The only SSG that's both fast enough for daily use and deep enough for AI agents to drive.**
+
+| SSG | Speed | Feature surface | The tradeoff |
+|---|---|---|---|
+| Hugo | Fastest full rebuild | Minimal | Fast but limited; rebuilds everything every run |
+| Eleventy | OK | Broad, no introspection | Flexible but slow at corpus scale |
+| Astro | OK | Modern, framework-coupled | Tied to a frontend framework |
+| Next.js SSG | Slower | Full framework | Framework first, content second |
+| **Mikser** | Incremental beats Hugo's full rebuild | Broad, deeply observable, AI-native | None of the speed-vs-features kind |
+
+Every other SSG asks you to trade something — raw speed for features (Hugo), features for framework lock-in (Astro, Next), introspection for any of the above (Eleventy). Mikser stopped making that trade once the database substrate landed. Hugo still wins a full cold rebuild — and that's worth knowing — but most cycles aren't full cold rebuilds. CI deploys, watch-mode edits, "ran mikser, nothing changed" — these are the daily case, and Mikser's persistent manifest skips what's still current while Hugo rebuilds everything from scratch. The rest of the feature surface (MCP introspection on every lifecycle phase, files-as-source-of-truth, 22-phase composability, multi-format outputs from one corpus) is what no other "fast" SSG carries, and now you don't give up speed to get it.
+
 ## Acknowledgments
 
 The earliest version of mikser was inspired by [DocPad](https://github.com/docpad/docpad) (Benjamin Lupton, with Michael Duane Mooring and Rob Loach). DocPad's "freeway, not a box" philosophy — files on disk, any pre-processor or template engine, plugin-by-convention extension — shaped how mikser started.
