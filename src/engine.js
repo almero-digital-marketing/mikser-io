@@ -19,7 +19,7 @@ import { attachServerCliOptions, setupServer } from './server.js'
 import { createMikserLogger } from './logger.js'
 import { inputHashOf } from './utils.js'
 import { createTrack } from './track.js'
-import { queryContext } from './catalog.js'
+import { queryContext } from './query-context.js'
 
 export async function setup(options) {
     runtime.options.threads = options?.threads !== undefined ? options.threads : 4

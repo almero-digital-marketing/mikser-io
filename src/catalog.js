@@ -1,51 +1,69 @@
-// Engine-level entity store. Map<id, entity> in memory, NDJSON on disk
-// at `runtime/catalog.ndjson`. Public ops: findEntity, findEntities,
-// findById, queryEntities, readEntity, assertExpand.
+// Engine-level entity store. Sqlite-backed via the engine's shared
+// database substrate (see src/database.js). Phase 2 of the
+// engine/database migration.
 //
-// Map<id, entity> for the lookups that matter on the hot path:
-// refs's BFS calls findById per edge, manifest's collectEdges resolves
-// partials by id, source.js's gate looks up each scanned file. O(1) hash
-// vs O(N) linear scan adds up at 10k+ entities.
+// Schema (registered with the substrate at module load time):
+//   catalog_entities (id, collection, type, format, name, meta_href,
+//                     meta_layout, meta_lang, time, uri, data)
+// Denormalized indexed columns are the union of `id` + the engine
+// defaults — the fields engine code actually queries today, audited.
+// Plugin-config user-declared indexes land in a follow-up commit.
 //
-// Persistence shape mirrors manifest.js: NDJSON (first line metadata
-// `{__meta__, version}`, one entity per line), atomic write via tmp +
-// rename, dirty-flag skip-on-clean, streaming line read. Versioned —
-// reading a file with a mismatched version flips `cacheInvalidated` so
-// the cycle re-emits.
+// Hot-path `findById` goes through a small LRU cache wrapping the
+// prepared SELECT. Refs BFS, manifest collectEdges, and source's
+// gate all hit findById in tight loops; without caching, the
+// per-call cost (~10-30μs) would compound badly.
 //
-// Fully in-memory at runtime — scale ceiling is heap. A truly lazy
-// storage layer (sqlite or similar) is a separate conversation that
-// would also need to push findEntities/queryEntities down to the store.
-
-import path from 'node:path'
-import { writeFile, rename } from 'node:fs/promises'
-import { createReadStream, existsSync } from 'node:fs'
-import { createInterface } from 'node:readline'
-import _ from 'lodash'
-import sift from 'sift'
-import { AsyncLocalStorage } from 'node:async_hooks'
+// Identity semantics: each `findEntity({id})` call returns a freshly
+// JSON.parsed entity, NOT the same instance as the previous call
+// (unlike the prior Map driver). The codebase already mutates only
+// through `_.cloneDeep` or locally-constructed entities, so this
+// works in practice. New plugin code should not assume identity
+// across calls.
 
 import runtime from './runtime.js'
 import { useLogger } from './engine.js'
-import { onInitialized, onPersist, onFinalized } from './lifecycle.js'
+import { onLoaded, onPersist, onFinalize } from './lifecycle.js'
 import { useJournal } from './journal.js'
 import { OPERATION } from './constants.js'
+import _ from 'lodash'
+import sift from 'sift'
 import { expandEntity, projectMeta, refFilter } from './utils.js'
 import { normalizeFilter } from './track.js'
-import packageInfo from '../package.json' with { type: 'json' }
+import { useDatabase, registerSchema } from './database.js'
+import { translate as siftToSql, INDEXED_COLUMNS } from './catalog-sift-to-sql.js'
+import { queryContext } from './query-context.js'
 
-const CATALOG_FILE = 'catalog.ndjson'
+export { queryContext }
 
-// Context propagated through async boundaries via Node's AsyncLocalStorage.
-// Consumers (engine's render dispatch, api plugin's per-query cache,
-// preview plugin's in-memory cache) wrap a slice of work in
-// `queryContext.run({track}, …)`; catalog query methods below read the
-// store and report which filters the work consulted.
-//
-// Called from outside any `.run(...)` (plugin lifecycle, raw MCP
-// handlers, anywhere without a context): `getStore()` returns
-// undefined, no tracking. Same query methods serve all callers.
-export const queryContext = new AsyncLocalStorage()
+// Register the catalog schema with the database substrate. The
+// driver applies this at open(), idempotent via CREATE IF NOT EXISTS.
+// `WITHOUT ROWID` makes the primary key clustered — smaller file,
+// faster id lookups.
+registerSchema('catalog', `
+    CREATE TABLE IF NOT EXISTS catalog_entities (
+        id           TEXT PRIMARY KEY,
+        collection   TEXT,
+        type         TEXT,
+        format       TEXT,
+        name         TEXT,
+        meta_href    TEXT,
+        meta_layout  TEXT,
+        meta_lang    TEXT,
+        time         INTEGER,
+        uri          TEXT,
+        data         TEXT NOT NULL
+    ) WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS idx_catalog_collection  ON catalog_entities(collection);
+    CREATE INDEX IF NOT EXISTS idx_catalog_type        ON catalog_entities(type);
+    CREATE INDEX IF NOT EXISTS idx_catalog_format      ON catalog_entities(format);
+    CREATE INDEX IF NOT EXISTS idx_catalog_name        ON catalog_entities(name);
+    CREATE INDEX IF NOT EXISTS idx_catalog_meta_href   ON catalog_entities(meta_href)   WHERE meta_href   IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_catalog_meta_layout ON catalog_entities(meta_layout) WHERE meta_layout IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_catalog_meta_lang   ON catalog_entities(meta_lang)   WHERE meta_lang   IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_catalog_time        ON catalog_entities(time);
+    CREATE INDEX IF NOT EXISTS idx_catalog_uri         ON catalog_entities(uri);
+`)
 
 function recordQuery(filter) {
     const ctx = queryContext.getStore()
@@ -53,144 +71,281 @@ function recordQuery(filter) {
     ctx.track.query(normalizeFilter(filter))
 }
 
-// Module-level state. Single Map<id, entity> is the source of truth.
-// Streaming-loaded at onInitialized; dirty-tracked across mutations so
-// onFinalized can skip the write when nothing changed.
-const byId = new Map()
-let dirty = false
+// LRU cache for findById hot path. Bounded; evicts oldest on overflow.
+// Invalidates per-id on entity mutation.
+//
+// Sized to comfortably cover small-to-mid corpora and the hot working
+// set of larger ones. At 10k corpus: full cache, 100% hit rate. At
+// 100k corpus: ~10% holds the hot working set (refs BFS revisits,
+// manifest collectEdges hashing). Memory cost is bounded — 10k
+// entries × ~7KB average = ~70MB cache footprint, still much less
+// than the prior Map driver that held the entire catalog in heap.
+//
+// Bigger workloads can tune via `runtime.config.catalog.cache.size`
+// (handled at onLoaded).
+const DEFAULT_LRU_SIZE = 10000
+let lruSize = DEFAULT_LRU_SIZE
+const findByIdCache = new Map()
 
-onInitialized(async () => {
-    byId.clear()
-    dirty = false
-    let loadedVersion = null
-    let cacheInvalidated = false
+function cacheGet(id) {
+    if (!findByIdCache.has(id)) return undefined
+    // Touch — move to end so LRU eviction picks the oldest.
+    const v = findByIdCache.get(id)
+    findByIdCache.delete(id)
+    findByIdCache.set(id, v)
+    return v
+}
 
-    const catalogPath = path.join(runtime.options.runtimeFolder, CATALOG_FILE)
-    if (existsSync(catalogPath)) {
-        try {
-            // NDJSON: one snapshot per line. First line is a metadata
-            // header carrying the engine version that wrote the file;
-            // subsequent lines are entities. Streaming via readline so
-            // memory stays bounded as the catalog grows.
-            const stream = createReadStream(catalogPath)
-            const rl = createInterface({ input: stream, crlfDelay: Infinity })
-            for await (const line of rl) {
-                if (!line.trim()) continue
-                try {
-                    const obj = JSON.parse(line)
-                    if (obj.__meta__) {
-                        loadedVersion = obj.version
-                    } else if (obj.id) {
-                        byId.set(obj.id, obj)
-                    }
-                } catch (err) {
-                    useLogger().warn('Skipping malformed catalog line: %s', err.message)
-                }
+function cacheSet(id, entity) {
+    if (findByIdCache.size >= lruSize && !findByIdCache.has(id)) {
+        const oldest = findByIdCache.keys().next().value
+        findByIdCache.delete(oldest)
+    }
+    findByIdCache.set(id, entity)
+}
+
+function cacheEvict(id) {
+    findByIdCache.delete(id)
+}
+
+function cacheClear() {
+    findByIdCache.clear()
+}
+
+// Prepared statements + lifecycle handle. Set at onLoaded; persists
+// across cycles (sqlite stays open).
+let db = null
+let stmtGet = null
+let stmtUpsert = null
+let stmtDelete = null
+let stmtAllData = null
+let stmtCount = null
+
+// Extract denormalized index columns from an entity body. Null for
+// missing fields — sqlite IS NULL handling treats those correctly.
+function entityToRow(entity) {
+    return {
+        id:           entity.id,
+        collection:   entity.collection   ?? null,
+        type:         entity.type         ?? null,
+        format:       entity.format       ?? null,
+        name:         entity.name         ?? null,
+        meta_href:    entity.meta?.href   ?? null,
+        meta_layout:  entity.meta?.layout ?? null,
+        meta_lang:    entity.meta?.lang   ?? null,
+        time:         entity.time         ?? null,
+        uri:          entity.uri          ?? null,
+        data:         JSON.stringify(entity),
+    }
+}
+
+// Apply per-cycle journal mutations inside one transaction (per the
+// migration plan's per-phase transaction granularity). better-sqlite3's
+// transaction wrapper is sync-only, so we drain the journal first and
+// then sync-apply in one call.
+async function applyJournalMutations() {
+    const logger = useLogger()
+    const mutations = []
+    for await (const { operation, entity } of useJournal('Catalog')) {
+        mutations.push({ operation, entity })
+    }
+    if (!mutations.length) return
+    // db.transaction() (our wrapper) already invokes the inner
+    // function inside BEGIN/COMMIT. No trailing call.
+    db.transaction(() => {
+        for (const { operation, entity } of mutations) {
+            switch (operation) {
+                case OPERATION.CREATE:
+                case OPERATION.UPDATE:
+                    logger.trace('Database %s %s: %s', entity.collection, operation, entity.id)
+                    stmtUpsert.run(entityToRow(entity))
+                    cacheEvict(entity.id)   // next read returns fresh data
+                    break
+                case OPERATION.DELETE:
+                    logger.trace('Database %s %s: %s', entity.collection, operation, entity.id)
+                    stmtDelete.run(entity.id)
+                    cacheEvict(entity.id)
+                    break
             }
-        } catch (err) {
-            // Malformed file (truncated by a crash, hand-edited badly,
-            // partially-written on disk-full) would otherwise blow up
-            // the whole startup. Fall back to empty + cacheInvalidated
-            // so the rest of the cycle re-processes from scratch.
-            useLogger().error('Catalog read failed (%s) — starting with empty catalog', err.message)
-            byId.clear()
-            cacheInvalidated = true
         }
-    }
+    })
+}
 
-    if (loadedVersion && loadedVersion !== packageInfo.version) {
-        cacheInvalidated = true
+onLoaded(async () => {
+    const driver = useDatabase()
+    if (!driver) {
+        // Shouldn't happen — database.js's onLoaded runs first (it's
+        // imported earlier in index.js). Treat as a misconfiguration.
+        throw new Error('Catalog requires the database substrate; none was opened.')
     }
+    db = driver
 
+    // Register a REGEXP user function so the sift→SQL translator can
+    // push $regex predicates down. Null-safe: null column never
+    // matches. Matches sift semantics.
+    db.handle.function('REGEXP', { deterministic: true }, (pattern, value) => {
+        if (value == null) return 0
+        try {
+            return new RegExp(pattern).test(String(value)) ? 1 : 0
+        } catch {
+            return 0
+        }
+    })
+
+    stmtGet = db.prepare('SELECT data FROM catalog_entities WHERE id = ?')
+    stmtUpsert = db.prepare(`
+        INSERT INTO catalog_entities
+            (id, collection, type, format, name, meta_href, meta_layout, meta_lang, time, uri, data)
+        VALUES
+            (@id, @collection, @type, @format, @name, @meta_href, @meta_layout, @meta_lang, @time, @uri, @data)
+        ON CONFLICT(id) DO UPDATE SET
+            collection  = @collection,
+            type        = @type,
+            format      = @format,
+            name        = @name,
+            meta_href   = @meta_href,
+            meta_layout = @meta_layout,
+            meta_lang   = @meta_lang,
+            time        = @time,
+            uri         = @uri,
+            data        = @data
+    `)
+    stmtDelete = db.prepare('DELETE FROM catalog_entities WHERE id = ?')
+    stmtAllData = db.prepare('SELECT data FROM catalog_entities')
+    stmtCount = db.prepare('SELECT COUNT(*) AS c FROM catalog_entities')
+
+    const configured = runtime.config?.catalog?.cache?.size
+    lruSize = Number.isInteger(configured) && configured > 0
+        ? configured
+        : DEFAULT_LRU_SIZE
+    cacheClear()
+
+    // Expose the engine-side handle plugins might want. Matches the
+    // runtime.refs / runtime.catalog shape: a small surface for
+    // diagnostic / debug / test inspection. Plugin code should still
+    // call findEntity / findEntities / queryEntities for queries —
+    // those go through the sift→SQL translator and the LRU cache.
     runtime.catalog = {
-        byId,
-        version: packageInfo.version,
-        cacheInvalidated,
-        save,
-    }
-
-    if (cacheInvalidated) {
-        useLogger().notice(
-            'Catalog cache invalidated: prior=%s current=%s — re-processing this cycle',
-            loadedVersion ?? '(none)',
-            packageInfo.version,
-        )
+        driver: 'sqlite',
+        // No persistent state version mismatch handling here — the
+        // database substrate's schema_version stamp catches that at
+        // driver.open() and throws with "run mikser --clear". For
+        // source.js's gate we keep cacheInvalidated as a stable false
+        // (the source-side semantics now follow from journal + db
+        // state, not from a separate flag).
+        cacheInvalidated: false,
+        // Snapshot the catalog for tests / debug. Iterates every row;
+        // O(N) — not for hot paths. Returns the legacy shape so
+        // existing test/scenarios harnesses can assert on it.
+        export: exportCatalog,
+        // Compatibility — some legacy callers expected this. Now a
+        // no-op (writes happen per-cycle via onPersist transactions).
+        save: async () => {},
     }
 })
-
-// Persist if anything has changed since the last successful save. NDJSON
-// write — one entity per line, with a metadata header line carrying the
-// engine version. Atomic via write-tmp + rename so a crash mid-write
-// leaves the previous file intact.
-async function save() {
-    if (!dirty) return
-    const catalogPath = path.join(runtime.options.runtimeFolder, CATALOG_FILE)
-    const tmpPath = catalogPath + '.tmp'
-    const lines = [JSON.stringify({ __meta__: true, version: packageInfo.version })]
-    for (const entity of byId.values()) {
-        lines.push(JSON.stringify(entity))
-    }
-    await writeFile(tmpPath, lines.join('\n') + '\n', 'utf8')
-    await rename(tmpPath, catalogPath)
-    dirty = false
-}
 
 onPersist(async () => {
-    const logger = useLogger()
-    for await (let { operation, entity } of useJournal('Catalog')) {
-        switch (operation) {
-            case OPERATION.CREATE:
-            case OPERATION.UPDATE:
-                logger.trace('Database %s %s: %s', entity.collection, operation, entity.id)
-                // Upsert. CREATE and UPDATE collapse to the same operation
-                // here: source plugins re-emit CREATE on every scan, and
-                // plugins that "ensure an entity is in the catalog" call
-                // runtime.update without a findEntity-then-branch dance.
-                byId.set(entity.id, entity)
-                dirty = true
-                break
-            case OPERATION.DELETE:
-                logger.trace('Database %s %s: %s', entity.collection, operation, entity.id)
-                if (byId.delete(entity.id)) dirty = true
-                break
-        }
+    await applyJournalMutations()
+})
+
+onFinalize(async () => {
+    // Checkpoint the WAL so the main file size stays representative
+    // and external tools (mikser --verify on a separate run, debug
+    // scripts) see committed state. PASSIVE never blocks readers or
+    // writers; it only catches up what it can.
+    if (!db?.isOpen) return
+    try {
+        db.exec('PRAGMA wal_checkpoint(PASSIVE)')
+    } catch (err) {
+        useLogger().warn('Catalog WAL checkpoint failed (%s) — data is durable, file size may lag', err.message)
     }
 })
 
-onFinalized(async () => {
-    await save()
-})
-
-// Synchronous by-id lookup. Untracked — does NOT record a query
-// dependency in queryContext, because the consumers are hot-path
-// internal modules (manifest snapshot construction, refs inverse walk,
-// catalog's own upsert check) that read the catalog for engine
-// bookkeeping, not as a render-time data dep. Returns the entity or
-// null. O(1) Map lookup.
-export function findById(id) {
-    if (!id) return null
-    return runtime.catalog?.byId.get(id) ?? null
+// Snapshot the catalog as `{ version, entities: [...] }`. Same shape
+// the NDJSON test harness used to read off disk. O(N) — debug only.
+function exportCatalog() {
+    if (!db?.isOpen) return { version: null, entities: [] }
+    const rows = stmtAllData.all()
+    const meta = db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version')
+    return {
+        version: meta?.value ?? null,
+        entities: rows.map(r => JSON.parse(r.data)),
+    }
 }
 
-// Find one entity by sift filter. Two shapes:
-//   - `{id: 'foo', ...rest}` — fast O(1) path: lookup by id, then
-//     run the remaining keys as a sift filter against the result.
-//   - any other sift filter — `sift(filter)` predicate, iterates
-//     `byId.values()`.
+// Test-harness shim. Unit tests that stub `runtime.catalog.byId` with
+// a Map predate the database substrate; the public catalog functions
+// fall back to operating against that Map when the sqlite-backed
+// `db` handle isn't set.
+function shimFromRuntimeStub() {
+    const byId = runtime.catalog?.byId
+    if (!(byId instanceof Map)) return null
+    return {
+        kind: 'shim',
+        get(id) { return byId.get(id) ?? null },
+        all() { return Array.from(byId.values()) },
+    }
+}
+
+// Synchronous by-id lookup. Hot path: refs BFS, manifest collectEdges,
+// source.js gate. Backed by an LRU cache; first miss goes to sqlite,
+// subsequent hits return from memory.
 //
-// Function predicates aren't accepted — sift covers `$or`, `$in`,
-// `$nin`, `$gt`/`$lt`, `$regex`, dotted-path keys, etc. The structured
-// shape is the only shape so the catalog's eventual indexed backend
-// can push the filter down to storage. For inline per-entity tests
-// without going through the catalog, use a plain `if` (or `sift(...)`
-// on the filter you already have).
+// Untracked — doesn't record a query dependency, because the consumers
+// are engine bookkeeping not render-time deps.
+export function findById(id) {
+    if (!id) return null
+
+    if (db?.isOpen) {
+        const cached = cacheGet(id)
+        if (cached !== undefined) return cached
+        const row = stmtGet.get(id)
+        const entity = row ? JSON.parse(row.data) : null
+        cacheSet(id, entity)
+        return entity
+    }
+
+    const shim = shimFromRuntimeStub()
+    return shim ? shim.get(id) : null
+}
+
+// Find one entity by sift filter. Fast path for `{id, ...}` queries
+// (hit the LRU and validate remaining clauses inline). For other
+// filters, translate to SQL + JS fallback.
 export async function findEntity(query) {
     if (!query || typeof query !== 'object') return
     recordQuery(query)
-    if (!runtime.catalog) return
 
-    if (query.id && typeof query.id === 'string') {
-        const entity = runtime.catalog.byId.get(query.id)
+    if (db?.isOpen) {
+        if (typeof query.id === 'string') {
+            const entity = findById(query.id)
+            if (!entity) return
+            const rest = Object.fromEntries(
+                Object.entries(query).filter(([k]) => k !== 'id'),
+            )
+            if (Object.keys(rest).length === 0) return entity
+            return sift(rest)(entity) ? entity : undefined
+        }
+
+        const t = siftToSql(query)
+        const sql = `SELECT data FROM catalog_entities ${t.sql} LIMIT ${t.jsFilter ? '' : '1'}`
+        // With a jsFilter we may need to scan multiple rows before
+        // finding a match; without one, LIMIT 1 short-circuits.
+        const stmt = db.prepare(t.jsFilter
+            ? `SELECT data FROM catalog_entities ${t.sql}`
+            : `SELECT data FROM catalog_entities ${t.sql} LIMIT 1`)
+        const matcher = t.jsFilter ? sift(t.jsFilter) : null
+        for (const row of stmt.iterate(...t.params)) {
+            const entity = JSON.parse(row.data)
+            if (!matcher || matcher(entity)) return entity
+        }
+        return
+    }
+
+    const shim = shimFromRuntimeStub()
+    if (!shim) return
+    if (typeof query.id === 'string') {
+        const entity = shim.get(query.id)
         if (!entity) return
         const rest = Object.fromEntries(
             Object.entries(query).filter(([k]) => k !== 'id'),
@@ -198,53 +353,52 @@ export async function findEntity(query) {
         if (Object.keys(rest).length === 0) return entity
         return sift(rest)(entity) ? entity : undefined
     }
-
-    const match = sift(query)
-    for (const entity of runtime.catalog.byId.values()) {
-        if (match(entity)) return entity
+    const m = sift(query)
+    for (const entity of shim.all()) {
+        if (m(entity)) return entity
     }
-    return
 }
 
-// All entities (no arg) or those matching `query` (sift filter). For
-// sift filters with pagination, sort, and expand, use `queryEntities`
-// below.
+// All entities (no arg) or those matching `query`. Indexed clauses
+// push down to SQL; un-indexed clauses run as a sift filter over the
+// pushdown result set.
 export async function findEntities(query) {
     recordQuery(query)
-    if (!runtime.catalog) return []
-    if (!query) return Array.from(runtime.catalog.byId.values())
-    if (typeof query !== 'object') return []
-    const match = sift(query)
-    const out = []
-    for (const entity of runtime.catalog.byId.values()) {
-        if (match(entity)) out.push(entity)
+
+    if (db?.isOpen) {
+        if (!query) {
+            return stmtAllData.all().map(r => JSON.parse(r.data))
+        }
+        const t = siftToSql(query)
+        const stmt = db.prepare(`SELECT data FROM catalog_entities ${t.sql}`)
+        const rows = stmt.all(...t.params)
+        const entities = rows.map(r => JSON.parse(r.data))
+        if (t.jsFilter) {
+            const matcher = sift(t.jsFilter)
+            return entities.filter(matcher)
+        }
+        return entities
     }
-    return out
+
+    const shim = shimFromRuntimeStub()
+    if (!shim) return []
+    if (!query) return shim.all()
+    const m = sift(query)
+    return shim.all().filter(m)
 }
 
-// High-level CRUD-with-query surface — sift filters, sort, pagination,
-// dotted-path projection, plus optional inline-expand of $-keyed
-// references (ADR-0007). Used by the api plugin's HTTP handlers, the
-// mikser-io-mcp plugin's tools, and any library-mode caller.
+// --- Expand-and-project layer (ADR-0007) ----------------------------
+// Sift-style filters with sort, pagination, dotted-path projection,
+// plus optional inline-expand of $-keyed references. Used by the api
+// plugin's HTTP handlers, mikser-io-mcp's tools, and any library-mode
+// caller.
 
-// Resolve a ref string to an entity. Uses the same id / meta.href /
-// stripped-extension heuristic as `matchesRef`, expressed as the sift
-// filter from `refFilter` so the storage layer can index it the same
-// way as any other findEntity call. Untracked: expand-driven ref
-// resolution is an implementation detail of queryEntities and
-// shouldn't surface as a separate query dep.
 async function findRef(ref) {
-    if (!ref || typeof ref !== 'string' || !runtime.catalog) return null
-    const match = sift(refFilter(ref))
-    for (const entity of runtime.catalog.byId.values()) {
-        if (match(entity)) return entity
-    }
-    return null
+    if (!ref || typeof ref !== 'string') return null
+    const matches = await findEntities(refFilter(ref))
+    return matches[0] ?? null
 }
 
-// Per-call expansion caps. Plumbed from mikser.config.js:
-//   catalog: { expand: { maxDepth, maxPaths, maxResolved } }
-// Defaults match ADR-0007 B7.
 function expandLimits() {
     const cfg = runtime?.config?.catalog?.expand ?? {}
     return {
@@ -254,10 +408,6 @@ function expandLimits() {
     }
 }
 
-// Validate an `expand` spec against the configured caps. Throws on
-// violation; returns nothing on success. Used by `subscribe()` at
-// registration time to reject bad expand before opening any transport
-// channels.
 export function assertExpand(expand) {
     if (!expand?.length) return
     const { maxPaths, maxDepth } = expandLimits()
@@ -276,12 +426,6 @@ export function assertExpand(expand) {
     }
 }
 
-// Apply expand-then-project to one entity. When `expand` has entries
-// the walker inlines resolved refs first; in all cases the final meta
-// is normalized (`$`-keys stripped) so the wire shape matches what the
-// SDK consumers and templates expect per ADR-0007 A3. Private — the
-// only callers are queryEntities (per-item) and readEntity (via
-// queryEntities). External code expands by going through one of those.
 async function expandAndProject(entity, expand) {
     let result = entity
     if (expand?.length) {
@@ -294,10 +438,6 @@ async function expandAndProject(entity, expand) {
     return { ...result, meta: projectMeta(result.meta) }
 }
 
-// Paginated, sorted, filtered, projected query over the catalog. The
-// `scope` arg is an optional pre-filter predicate (used by the api
-// plugin's per-endpoint allowedEntities lambda); library callers
-// usually pass nothing. Returns `{ items, total, skip, limit, hasNext }`.
 export async function queryEntities({
     filter, sort, fields, skip, limit, expand, scope,
 } = {}) {
@@ -306,13 +446,11 @@ export async function queryEntities({
 
     recordQuery(filter)
 
-    let all = runtime.catalog ? Array.from(runtime.catalog.byId.values()) : []
+    // Materialize via findEntities (which handles sqlite + shim
+    // dispatch + js fallback). scope is a JS predicate applied
+    // post-fetch.
+    let all = await findEntities(filter)
     if (scope) all = all.filter(scope)
-
-    if (filter && Object.keys(filter).length) {
-        const match = sift(filter)
-        all = all.filter(match)
-    }
 
     const total = all.length
 
@@ -345,11 +483,6 @@ export async function queryEntities({
     }
 }
 
-// Read a single entity by catalog id. Returns the entity (post-expand,
-// post-project) or null when not found. Throws on missing id.
-// Source-file content loading is a separate concern — compose with
-// `readEntityContent` from utils.js if you want `entity.content`
-// populated, or call `readFile(entity.uri)` directly for raw bytes.
 export async function readEntity({ id, expand } = {}) {
     if (!id) throw new Error('id is required')
     const result = await queryEntities({

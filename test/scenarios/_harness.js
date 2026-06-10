@@ -89,21 +89,29 @@ export async function readManifest(workdir) {
     return text.split('\n').filter(Boolean).map(line => JSON.parse(line))
 }
 
-// Convenience: read the catalog directly. NDJSON format — first line
-// is a metadata header, subsequent lines are entities. Return a shape
-// compatible with what tests expect from the old JSON-array catalog:
-// `{ version, entities: [...] }`.
+// Convenience: read the catalog directly from the engine's sqlite
+// database. Mikser must have exited before this is called (scenarios
+// run mikser as a subprocess and assert after exit). Returns the
+// legacy `{ version, entities: [...] }` shape so existing scenario
+// assertions don't need to change.
 export async function readCatalog(workdir) {
-    const file = path.join(workdir, 'runtime', 'catalog.ndjson')
+    const file = path.join(workdir, 'runtime', 'mikser.sqlite')
     if (!existsSync(file)) return null
-    const { readFile } = await import('node:fs/promises')
-    const text = await readFile(file, 'utf8')
-    const result = { version: null, entities: [] }
-    for (const line of text.split('\n')) {
-        if (!line.trim()) continue
-        const obj = JSON.parse(line)
-        if (obj.__meta__) result.version = obj.version
-        else result.entities.push(obj)
+    const { default: Database } = await import('better-sqlite3')
+    const db = new Database(file, { readonly: true, fileMustExist: true })
+    try {
+        const version = db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version')?.value ?? null
+        // catalog_entities only exists after the catalog schema has
+        // been registered + applied. If a fresh mikser run never
+        // touched the catalog (e.g. config-error exit), this query
+        // raises — return empty entities then.
+        let entities = []
+        try {
+            entities = db.prepare('SELECT data FROM catalog_entities ORDER BY id').all()
+                .map(r => JSON.parse(r.data))
+        } catch { /* table not yet present */ }
+        return { version, entities }
+    } finally {
+        db.close()
     }
-    return result
 }

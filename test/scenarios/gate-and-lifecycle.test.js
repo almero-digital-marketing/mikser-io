@@ -152,45 +152,34 @@ describe('catalog cache invalidation', () => {
         await runMikser(workdir) // populate catalog + manifest
     })
 
-    it('version-stamp mismatch invalidates cache, re-emits everything', async () => {
-        // NDJSON: rewrite the file with a bogus metadata-header version.
-        // Just the metadata + the existing entity lines, but the meta
-        // claims a different engine version.
-        const catalog = await readCatalog(workdir)
-        const lines = [
-            JSON.stringify({ __meta__: true, version: '0.0.0-test' }),
-            ...catalog.entities.map(e => JSON.stringify(e)),
-        ]
-        await writeFile(
-            path.join(workdir, 'runtime/catalog.ndjson'),
-            lines.join('\n') + '\n',
-        )
+    it('schema-version mismatch — mikser exits with a clear "run --clear" message', async () => {
+        // Tweak the persisted schema version stamp directly. The
+        // database substrate refuses to open with a mismatched
+        // version — by design, no silent recovery — and the engine
+        // exits non-zero with a message the user can act on.
+        const { default: Database } = await import('better-sqlite3')
+        const db = new Database(path.join(workdir, 'runtime/mikser.sqlite'))
+        db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run('schema_version', '0.0.0-test')
+        db.close()
+
+        const { code, combined } = await runMikser(workdir)
+        assert.notEqual(code, 0, 'mikser should exit non-zero on version mismatch')
+        assert.match(combined, /Database schema is 0\.0\.0-test/)
+        assert.match(combined, /mikser --clear/)
+    })
+
+    it('missing database — mikser rebuilds from sources cleanly', async () => {
+        // After `mikser --clear` (or just deleting the runtime/
+        // folder), the next run sees no database. The substrate
+        // creates a fresh one; the catalog re-emits everything.
+        for (const f of ['mikser.sqlite', 'mikser.sqlite-wal', 'mikser.sqlite-shm']) {
+            try { await rm(path.join(workdir, 'runtime', f)) } catch { /* may not exist */ }
+        }
 
         const { code, combined } = await runMikser(workdir)
         assert.equal(code, 0)
-        assert.match(combined, /Catalog cache invalidated/)
-        summaryLine(combined, { loaded: 1, emitted: 1, invalidated: true })
-    })
-
-    it('corrupt catalog.ndjson — falls back gracefully and re-processes', async () => {
-        // Write a malformed half-line — readline will yield it, JSON.parse
-        // will throw inside the per-line try/catch. With enough garbage
-        // the outer catch fires and the whole catalog is reset.
-        await writeFile(
-            path.join(workdir, 'runtime/catalog.ndjson'),
-            '{"__meta__":true,"version":"8.2.0"\n{not-valid-json',
-        )
-
-        const { code, combined } = await runMikser(workdir)
-        assert.equal(code, 0, 'mikser should not crash on corrupt catalog')
-        // The outer file-level read or the per-line parse warnings —
-        // either path produces a recovery message and the rest of the
-        // cycle proceeds with an empty catalog (so the source.js scan
-        // re-emits every file as new).
-        assert.match(combined, /catalog/i)
         summaryLine(combined, { loaded: 1, emitted: 1 })
 
-        // Catalog rewritten as a fresh, valid file
         const reborn = await readCatalog(workdir)
         assert.ok(Array.isArray(reborn.entities))
         assert.equal(reborn.entities.filter(e => e.collection === 'documents').length, 1)
