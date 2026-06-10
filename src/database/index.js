@@ -47,9 +47,18 @@ const schemas = new Map()
 // readers see null only before the first onLoaded fires.
 let db = null
 
-// Register an idempotent schema script. Subsystems call this at module-
-// import time (top-level side effect) or during onInitialize. The
-// database applies all registered scripts at open().
+// Register an idempotent schema script. Two timings, same call shape:
+//
+//  - Early (module-import / onInitialize / onLoad): script lands in the
+//    `schemas` Map and is applied when the database opens at engine
+//    onLoaded. This is the path catalog / refs / manifest use.
+//  - Late (after the database is already open): script is applied
+//    immediately on the live handle, AND recorded in the `schemas` Map
+//    so the next open replays it idempotently. This is the path plugins
+//    use when they need to initialize something on the shared connection
+//    first — e.g. mikser-io-vector loads sqlite-vec and then registers
+//    its `mikser_vector_*` virtual tables; the vec0 module wouldn't
+//    exist if registration happened before the load.
 //
 // `name` is the schema's identifier — used in debug logs and for
 // duplicate detection. Same name twice = the later registration wins
@@ -70,6 +79,20 @@ export function registerSchema(name, sqlScript) {
         } catch { /* logger may not exist yet at module-import time */ }
     }
     schemas.set(name, sqlScript)
+
+    // Lazy-apply: if the database is already open, run the script
+    // against the live handle. Idempotent CREATE statements make this
+    // safe to re-execute on the next open() too.
+    if (db?.isOpen) {
+        try {
+            db.exec(sqlScript)
+            try {
+                useLogger()?.debug('Database schema applied (lazy): %s', name)
+            } catch { /* logger optional */ }
+        } catch (err) {
+            throw new Error(`Schema "${name}" failed to apply: ${err.message}`)
+        }
+    }
 }
 
 // Return the active database handle. Hot-path callers (catalog, refs,

@@ -27,10 +27,6 @@ export default async ({ options }) => ({
 		'schemas',
 	],
     vector: {
-        // Flip to pg automatically when PGHOST is set; otherwise sqlite.
-        // For pg, omit `connection` — pg reads libpq env vars (PGHOST,
-        // PGUSER, PGPASSWORD, PGDATABASE, PGSSLMODE...).
-        client: process.env.PGHOST ? 'pg' : 'better-sqlite3',
         openai: {
             apiKey: process.env.OPENAI_API_KEY,
         },
