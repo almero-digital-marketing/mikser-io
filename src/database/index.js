@@ -9,11 +9,11 @@
 // can `registerSchema(name, sql)` + `useDatabase()`, but no subsystem
 // uses it yet. Catalog/refs/manifest migrations land in Phase 2-5.
 
-import runtime from './runtime.js'
-import { useLogger } from './engine.js'
-import { onLoaded } from './lifecycle.js'
-import { createSqliteDriver } from './database-driver-sqlite.js'
-import packageInfo from '../package.json' with { type: 'json' }
+import runtime from '../runtime.js'
+import { useLogger } from '../engine.js'
+import { onLoaded } from '../lifecycle.js'
+import { createSqliteDriver } from './sqlite.js'
+import packageInfo from '../../package.json' with { type: 'json' }
 
 // Schemas registered by subsystems and plugins. Map<name, sqlScript>.
 // Idempotent `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`

@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { translate } from '../../src/catalog-sift-to-sql.js'
+import { translate } from '../../../src/database/sift-to-sql.js'
 
 describe('translate — basic equality', () => {
     it('empty filter → no WHERE clause', () => {

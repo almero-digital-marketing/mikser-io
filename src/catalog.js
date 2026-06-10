@@ -1,5 +1,5 @@
 // Engine-level entity store. Sqlite-backed via the engine's shared
-// database substrate (see src/database.js). Phase 2 of the
+// database substrate (see src/database/). Phase 2 of the
 // engine/database migration.
 //
 // Schema (registered with the substrate at module load time):
@@ -30,8 +30,8 @@ import _ from 'lodash'
 import sift from 'sift'
 import { expandEntity, projectMeta, refFilter } from './utils.js'
 import { normalizeFilter } from './track.js'
-import { useDatabase, registerSchema } from './database.js'
-import { translate as siftToSql, INDEXED_COLUMNS } from './catalog-sift-to-sql.js'
+import { useDatabase, registerSchema } from './database/index.js'
+import { translate as siftToSql, INDEXED_COLUMNS } from './database/sift-to-sql.js'
 import { queryContext } from './query-context.js'
 
 export { queryContext }

@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import { createSqliteDriver } from '../../src/database-driver-sqlite.js'
+import { createSqliteDriver } from '../../../src/database/sqlite.js'
 
 function tmpdirFor(label) {
     return mkdtempSync(path.join(tmpdir(), `mikser-db-${label}-`))
@@ -261,21 +261,21 @@ describe('createSqliteDriver — transactions', () => {
 
 describe('registerSchema validation', () => {
     it('rejects empty/non-string name', async () => {
-        const { registerSchema } = await import('../../src/database.js')
+        const { registerSchema } = await import('../../../src/database/index.js')
         assert.throws(() => registerSchema('', 'CREATE TABLE x;'), /non-empty string/)
         assert.throws(() => registerSchema(null, 'CREATE TABLE x;'), /non-empty string/)
         assert.throws(() => registerSchema(123, 'CREATE TABLE x;'), /non-empty string/)
     })
 
     it('rejects empty/non-string sqlScript', async () => {
-        const { registerSchema } = await import('../../src/database.js')
+        const { registerSchema } = await import('../../../src/database/index.js')
         assert.throws(() => registerSchema('myplugin', ''), /non-empty string/)
         assert.throws(() => registerSchema('myplugin', null), /non-empty string/)
         assert.throws(() => registerSchema('myplugin', 42), /non-empty string/)
     })
 
     it('accepts a valid (name, sqlScript) pair', async () => {
-        const { registerSchema } = await import('../../src/database.js')
+        const { registerSchema } = await import('../../../src/database/index.js')
         assert.doesNotThrow(() => registerSchema('test_unit_db', `
             CREATE TABLE IF NOT EXISTS test_unit_db_data (id TEXT PRIMARY KEY);
         `))
