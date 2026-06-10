@@ -1,5 +1,5 @@
 // Translate a sift filter object to an SQL WHERE clause for the
-// `catalog_entities` table. Pushes down what we can; the caller falls
+// `mikser_entities` table. Pushes down what we can; the caller falls
 // back to JS-side filtering (or full sift evaluation) for what we
 // can't.
 //
@@ -23,7 +23,7 @@
 // columns ('meta_href') via INDEXED_COLUMNS. Anything outside this
 // mapping is not indexed and falls back to JS.
 
-// Map sift field names → catalog_entities column names.
+// Map sift field names → mikser_entities column names.
 export const INDEXED_COLUMNS = {
     id:            'id',
     collection:    'collection',

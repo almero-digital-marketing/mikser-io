@@ -100,14 +100,14 @@ export async function readCatalog(workdir) {
     const { default: Database } = await import('better-sqlite3')
     const db = new Database(file, { readonly: true, fileMustExist: true })
     try {
-        const version = db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version')?.value ?? null
-        // catalog_entities only exists after the catalog schema has
+        const version = db.prepare('SELECT value FROM mikser_meta WHERE key = ?').get('schema_version')?.value ?? null
+        // mikser_entities only exists after the catalog schema has
         // been registered + applied. If a fresh mikser run never
         // touched the catalog (e.g. config-error exit), this query
         // raises — return empty entities then.
         let entities = []
         try {
-            entities = db.prepare('SELECT data FROM catalog_entities ORDER BY id').all()
+            entities = db.prepare('SELECT data FROM mikser_entities ORDER BY id').all()
                 .map(r => JSON.parse(r.data))
         } catch { /* table not yet present */ }
         return { version, entities }

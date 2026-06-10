@@ -130,7 +130,7 @@ Tasks:
   schema-version stamp, onLoaded lifecycle wiring
 - `src/database/sqlite.js`: better-sqlite3 wrapper, connection
   lifecycle, PRAGMAs (WAL, synchronous=NORMAL), schema script application
-- Schema registration: subsystems call `registerSchema('catalog',
+- Schema registration: subsystems call `registerSchema('mikser_entities',
   sqlScript)` at module-import time; database applies them at open()
 - Transaction primitive: `db.transaction(fn)` — better-sqlite3's
   built-in wrapper, handles BEGIN / COMMIT / ROLLBACK on throw
@@ -145,7 +145,7 @@ migration.
 
 Catalog moves to sqlite. Map driver retires (or becomes `:memory:` shim).
 
-- Schema: `catalog_entities (id, collection, type, format, meta_href,
+- Schema: `mikser_entities (id, collection, type, format, meta_href,
   meta_layout, time, checksum, data TEXT NOT NULL)` with indexes on the
   denormalized columns
 - Configurable extra indexes via `catalog: { indexed: [...] }`
@@ -200,12 +200,12 @@ parity (smoke + scenarios pass); per-render latency tracked.
 ### Phase 4 — Migrate refs
 **Duration: 2-3 days**
 
-- Schema: `catalog_refs (source_id, target_ref, kind, field)` with indexes
+- Schema: `mikser_refs (source_id, target_ref, kind, field)` with indexes
   on both source and target; FK + ON DELETE CASCADE to entities
 - `inboundFor`, `outboundFor`, `inverseClosureOf` become indexed SQL queries
 - `refs.onPersist` removed; refs maintenance happens inside the
   `catalog.onPersist` transaction
-- `manifest.replaceDynamic` writes to `catalog_refs` directly (replacing
+- `manifest.replaceDynamic` writes to `mikser_refs` directly (replacing
   in-memory `dynamicOutbound`)
 
 **Validation:** mikser-io-mcp's `mikser_refs_*` tools return correct
@@ -305,7 +305,7 @@ populate at each phase boundary:
 - **Two transactions per cycle, one per lifecycle phase.** Render is
   transaction-free.
   - **`onPersist` transaction.** Applies journal CREATE/UPDATE/DELETE
-    mutations to `catalog_entities` + `catalog_refs` atomically. Closes
+    mutations to `mikser_entities` + `mikser_refs` atomically. Closes
     before render dispatch. Size scales with mutation count — typically
     <10s, up to ~60s on cold 100k.
   - **Render phase.** No transaction. Piscina workers read entities
@@ -348,7 +348,7 @@ populate at each phase boundary:
   config. Duplicates dedupe naturally — same field, same index.
 
   **Implementation:** each indexed field gets a denormalized column
-  on `catalog_entities` (populated from the entity body at write
+  on `mikser_entities` (populated from the entity body at write
   time) plus `CREATE INDEX IF NOT EXISTS`. Engine code reads columns
   directly; the sift→SQL translator pushes structured filters down
   to indexed columns when possible, falls back to JSON1 extract

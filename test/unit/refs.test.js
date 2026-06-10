@@ -1,7 +1,7 @@
 // Tests for the engine-level inverse-reference index (`runtime.refs`).
 // Covers the DB-backed index data structure + subscriber dispatch in
 // isolation over an in-memory sqlite database. The lifecycle
-// integration (catalog.onPersist maintains catalog_refs inside its
+// integration (catalog.onPersist maintains mikser_refs inside its
 // transaction; engine.js calls replaceDynamic after each render) and
 // rename cascade are exercised end-to-end via the smoke test and
 // scenarios; this file covers the data-structure invariants without
@@ -13,27 +13,27 @@ import assert from 'node:assert/strict'
 import { createIndex, createSubscribers } from '../../src/refs.js'
 import { createSqliteDatabase } from '../../src/database/index.js'
 
-// catalog_entities schema (parent of the FK). Bare-bones — refs
+// mikser_entities schema (parent of the FK). Bare-bones — refs
 // tests don't exercise catalog columns.
 const CATALOG_SCHEMA = `
-    CREATE TABLE IF NOT EXISTS catalog_entities (
+    CREATE TABLE IF NOT EXISTS mikser_entities (
         id   TEXT PRIMARY KEY,
         data TEXT NOT NULL
     ) WITHOUT ROWID;
 `
 
-// catalog_refs schema. Mirrors the production registration in
+// mikser_refs schema. Mirrors the production registration in
 // src/refs.js — duplicated here so refs tests don't import side-
 // effecting modules just to grab a schema string.
 const REFS_SCHEMA = `
-    CREATE TABLE IF NOT EXISTS catalog_refs (
+    CREATE TABLE IF NOT EXISTS mikser_refs (
         source_id   TEXT NOT NULL,
         target_ref  TEXT NOT NULL,
         kind        TEXT NOT NULL,
         field       TEXT NOT NULL DEFAULT '',
         PRIMARY KEY (source_id, target_ref, kind, field)
     ) WITHOUT ROWID;
-    CREATE INDEX IF NOT EXISTS idx_catalog_refs_target ON catalog_refs(target_ref);
+    CREATE INDEX IF NOT EXISTS idx_mikser_refs_target ON mikser_refs(target_ref);
 `
 
 // Open a fresh in-memory database with the two-table schema. Each
@@ -44,8 +44,8 @@ function makeTestDb() {
         version: 'test',
         config: { filename: ':memory:' },
         schemas: new Map([
-            ['catalog_entities', CATALOG_SCHEMA],
-            ['catalog_refs',     REFS_SCHEMA],
+            ['mikser_entities', CATALOG_SCHEMA],
+            ['mikser_refs',     REFS_SCHEMA],
         ]),
     })
     db.open()

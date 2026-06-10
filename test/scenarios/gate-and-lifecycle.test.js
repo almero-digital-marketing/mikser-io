@@ -159,7 +159,7 @@ describe('catalog cache invalidation', () => {
         // exits non-zero with a message the user can act on.
         const { default: Database } = await import('better-sqlite3')
         const db = new Database(path.join(workdir, 'runtime/mikser.sqlite'))
-        db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run('schema_version', '0.0.0-test')
+        db.prepare('INSERT OR REPLACE INTO mikser_meta (key, value) VALUES (?, ?)').run('schema_version', '0.0.0-test')
         db.close()
 
         const { code, combined } = await runMikser(workdir)

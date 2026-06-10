@@ -3,7 +3,7 @@
 // engine/database migration.
 //
 // Schema (registered with the substrate at module load time):
-//   catalog_entities (id, collection, type, format, name, meta_href,
+//   mikser_entities (id, collection, type, format, name, meta_href,
 //                     meta_layout, meta_lang, time, uri, data)
 // Denormalized indexed columns are the union of `id` + the engine
 // defaults — the fields engine code actually queries today, audited.
@@ -41,8 +41,8 @@ export { queryContext }
 // at db.open() via CREATE IF NOT EXISTS.
 // `WITHOUT ROWID` makes the primary key clustered — smaller file,
 // faster id lookups.
-registerSchema('catalog', `
-    CREATE TABLE IF NOT EXISTS catalog_entities (
+registerSchema('mikser_entities', `
+    CREATE TABLE IF NOT EXISTS mikser_entities (
         id           TEXT PRIMARY KEY,
         collection   TEXT,
         type         TEXT,
@@ -55,15 +55,15 @@ registerSchema('catalog', `
         uri          TEXT,
         data         TEXT NOT NULL
     ) WITHOUT ROWID;
-    CREATE INDEX IF NOT EXISTS idx_catalog_collection  ON catalog_entities(collection);
-    CREATE INDEX IF NOT EXISTS idx_catalog_type        ON catalog_entities(type);
-    CREATE INDEX IF NOT EXISTS idx_catalog_format      ON catalog_entities(format);
-    CREATE INDEX IF NOT EXISTS idx_catalog_name        ON catalog_entities(name);
-    CREATE INDEX IF NOT EXISTS idx_catalog_meta_href   ON catalog_entities(meta_href)   WHERE meta_href   IS NOT NULL;
-    CREATE INDEX IF NOT EXISTS idx_catalog_meta_layout ON catalog_entities(meta_layout) WHERE meta_layout IS NOT NULL;
-    CREATE INDEX IF NOT EXISTS idx_catalog_meta_lang   ON catalog_entities(meta_lang)   WHERE meta_lang   IS NOT NULL;
-    CREATE INDEX IF NOT EXISTS idx_catalog_time        ON catalog_entities(time);
-    CREATE INDEX IF NOT EXISTS idx_catalog_uri         ON catalog_entities(uri);
+    CREATE INDEX IF NOT EXISTS idx_mikser_entities_collection  ON mikser_entities(collection);
+    CREATE INDEX IF NOT EXISTS idx_mikser_entities_type        ON mikser_entities(type);
+    CREATE INDEX IF NOT EXISTS idx_mikser_entities_format      ON mikser_entities(format);
+    CREATE INDEX IF NOT EXISTS idx_mikser_entities_name        ON mikser_entities(name);
+    CREATE INDEX IF NOT EXISTS idx_mikser_entities_meta_href   ON mikser_entities(meta_href)   WHERE meta_href   IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_mikser_entities_meta_layout ON mikser_entities(meta_layout) WHERE meta_layout IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_mikser_entities_meta_lang   ON mikser_entities(meta_lang)   WHERE meta_lang   IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_mikser_entities_time        ON mikser_entities(time);
+    CREATE INDEX IF NOT EXISTS idx_mikser_entities_uri         ON mikser_entities(uri);
 `)
 
 function recordQuery(filter) {
@@ -143,7 +143,7 @@ function entityToRow(entity) {
 
 // Apply per-cycle journal mutations inside one transaction (per the
 // migration plan's per-phase transaction granularity). Maintains
-// `catalog_refs` alongside `catalog_entities` so refs and entities
+// `mikser_refs` alongside `mikser_entities` so refs and entities
 // commit atomically — neither view ever shows a partial mutation.
 //
 // better-sqlite3's transaction wrapper is sync-only, so we drain the
@@ -172,7 +172,7 @@ async function applyJournalMutations() {
                 case OPERATION.DELETE:
                     logger.trace('Database %s %s: %s', entity.collection, operation, entity.id)
                     stmtDelete.run(entity.id)
-                    // FK ON DELETE CASCADE handles catalog_refs cleanup.
+                    // FK ON DELETE CASCADE handles mikser_refs cleanup.
                     cacheEvict(entity.id)
                     break
             }
@@ -201,9 +201,9 @@ onLoaded(async () => {
         }
     })
 
-    stmtGet = db.prepare('SELECT data FROM catalog_entities WHERE id = ?')
+    stmtGet = db.prepare('SELECT data FROM mikser_entities WHERE id = ?')
     stmtUpsert = db.prepare(`
-        INSERT INTO catalog_entities
+        INSERT INTO mikser_entities
             (id, collection, type, format, name, meta_href, meta_layout, meta_lang, time, uri, data)
         VALUES
             (@id, @collection, @type, @format, @name, @meta_href, @meta_layout, @meta_lang, @time, @uri, @data)
@@ -219,9 +219,9 @@ onLoaded(async () => {
             uri         = @uri,
             data        = @data
     `)
-    stmtDelete = db.prepare('DELETE FROM catalog_entities WHERE id = ?')
-    stmtAllData = db.prepare('SELECT data FROM catalog_entities')
-    stmtCount = db.prepare('SELECT COUNT(*) AS c FROM catalog_entities')
+    stmtDelete = db.prepare('DELETE FROM mikser_entities WHERE id = ?')
+    stmtAllData = db.prepare('SELECT data FROM mikser_entities')
+    stmtCount = db.prepare('SELECT COUNT(*) AS c FROM mikser_entities')
     // Bulk-prefetch primitive used by source.js's gate. Pulls the
     // checksum field for every entity in a collection without parsing
     // the full JSON body — `json_extract` evaluates inside sqlite,
@@ -229,7 +229,7 @@ onLoaded(async () => {
     // ~14× faster than per-file findById (no per-row JSON.parse).
     stmtChecksumsForCollection = db.prepare(`
         SELECT id, json_extract(data, '$.checksum') AS checksum
-        FROM catalog_entities
+        FROM mikser_entities
         WHERE collection = ?
     `)
 
@@ -284,7 +284,7 @@ onFinalize(async () => {
 function exportCatalog() {
     if (!db?.isOpen) return { version: null, entities: [] }
     const rows = stmtAllData.all()
-    const meta = db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version')
+    const meta = db.prepare('SELECT value FROM mikser_meta WHERE key = ?').get('schema_version')
     return {
         version: meta?.value ?? null,
         entities: rows.map(r => JSON.parse(r.data)),
@@ -346,12 +346,12 @@ export async function findEntity(query) {
         }
 
         const t = siftToSql(query)
-        const sql = `SELECT data FROM catalog_entities ${t.sql} LIMIT ${t.jsFilter ? '' : '1'}`
+        const sql = `SELECT data FROM mikser_entities ${t.sql} LIMIT ${t.jsFilter ? '' : '1'}`
         // With a jsFilter we may need to scan multiple rows before
         // finding a match; without one, LIMIT 1 short-circuits.
         const stmt = db.prepare(t.jsFilter
-            ? `SELECT data FROM catalog_entities ${t.sql}`
-            : `SELECT data FROM catalog_entities ${t.sql} LIMIT 1`)
+            ? `SELECT data FROM mikser_entities ${t.sql}`
+            : `SELECT data FROM mikser_entities ${t.sql} LIMIT 1`)
         const matcher = t.jsFilter ? sift(t.jsFilter) : null
         for (const row of stmt.iterate(...t.params)) {
             const entity = JSON.parse(row.data)
@@ -388,7 +388,7 @@ export async function findEntities(query) {
             return stmtAllData.all().map(r => JSON.parse(r.data))
         }
         const t = siftToSql(query)
-        const stmt = db.prepare(`SELECT data FROM catalog_entities ${t.sql}`)
+        const stmt = db.prepare(`SELECT data FROM mikser_entities ${t.sql}`)
         const rows = stmt.all(...t.params)
         const entities = rows.map(r => JSON.parse(r.data))
         if (t.jsFilter) {

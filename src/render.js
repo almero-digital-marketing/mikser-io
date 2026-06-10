@@ -30,9 +30,9 @@ function ensureWorkerDb(options) {
     // setting once for WAL-mode consistency with the writer.
     workerDb.pragma('journal_mode = WAL')
     // Read-only consumers only need the JSON body. meta_href is
-    // indexed in catalog_entities; one row per (href, lang) tuple.
+    // indexed in mikser_entities; one row per (href, lang) tuple.
     stmtHrefLookup = workerDb.prepare(
-        'SELECT data FROM catalog_entities WHERE meta_href = ?',
+        'SELECT data FROM mikser_entities WHERE meta_href = ?',
     )
 }
 

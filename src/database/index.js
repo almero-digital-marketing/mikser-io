@@ -15,7 +15,7 @@
 //     win. Acceptable because the catalog is a derived cache; on crash
 //     we rebuild from source.
 //   - foreign_keys=ON: opt-in to the FK enforcement we'll lean on for
-//     the catalog_refs / catalog_entities cascade in Phase 4.
+//     the mikser_refs / mikser_entities cascade in Phase 4.
 //
 // Schema discipline: each subsystem registers an idempotent CREATE
 // script via `registerSchema(name, sql)`. The database applies every
@@ -118,13 +118,13 @@ export function createSqliteDatabase({
         // meta table always exists — holds the schema_version stamp
         // and any future engine-wide key/value state.
         handle.exec(`
-            CREATE TABLE IF NOT EXISTS meta (
+            CREATE TABLE IF NOT EXISTS mikser_meta (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             )
         `)
 
-        const recorded = handle.prepare('SELECT value FROM meta WHERE key = ?')
+        const recorded = handle.prepare('SELECT value FROM mikser_meta WHERE key = ?')
             .get('schema_version')?.value
         if (recorded && recorded !== version) {
             handle.close()
@@ -134,7 +134,7 @@ export function createSqliteDatabase({
                 `Run \`mikser --clear\` to rebuild from sources.`,
             )
         }
-        handle.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)')
+        handle.prepare('INSERT OR REPLACE INTO mikser_meta (key, value) VALUES (?, ?)')
             .run('schema_version', version)
 
         // Apply each subsystem's registered schema script. Idempotent

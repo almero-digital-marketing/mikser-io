@@ -1,5 +1,5 @@
-// Engine-level reverse-reference index. Persisted in `catalog_refs`
-// alongside `catalog_entities` and maintained inside catalog.onPersist's
+// Engine-level reverse-reference index. Persisted in `mikser_refs`
+// alongside `mikser_entities` and maintained inside catalog.onPersist's
 // transaction (static `$`-keyed refs from entity.meta) plus per-render
 // `replaceDynamic` calls (layout/partial/query edges from the track
 // API).
@@ -19,9 +19,9 @@
 //   inbound  :: "Which entities reference this target_ref?"
 //   outbound :: "Which target_refs does this source emit?"
 //
-// The catalog is the source of truth (ADR-0002); catalog_refs is a
+// The catalog is the source of truth (ADR-0002); mikser_refs is a
 // projection maintained alongside it. ON DELETE CASCADE means
-// catalog_entities deletes cascade automatically — no orphaned refs.
+// mikser_entities deletes cascade automatically — no orphaned refs.
 //
 // Lives in the engine (not as a plugin) per ADR-0006's five-test:
 // substrate (not domain), strategic (operationalises ADR-0007 as a
@@ -39,7 +39,7 @@ import { findEntity, findById } from './catalog.js'
 import { registerSchema, useDatabase } from './database/index.js'
 
 // Schema registration. Applied idempotently at db.open(). FK to
-// catalog_entities means a catalog DELETE cascades to refs cleanup,
+// mikser_entities means a catalog DELETE cascades to refs cleanup,
 // no orphans. WITHOUT ROWID makes (source_id, target_ref, kind, field)
 // the clustered key — smaller, faster prefix scans on source_id.
 //
@@ -47,16 +47,16 @@ import { registerSchema, useDatabase } from './database/index.js'
 // who references X). The primary key's leading source_id column
 // already covers forward (everything X references) without a
 // separate index.
-registerSchema('catalog_refs', `
-    CREATE TABLE IF NOT EXISTS catalog_refs (
+registerSchema('mikser_refs', `
+    CREATE TABLE IF NOT EXISTS mikser_refs (
         source_id   TEXT NOT NULL,
         target_ref  TEXT NOT NULL,
         kind        TEXT NOT NULL,
         field       TEXT NOT NULL DEFAULT '',
         PRIMARY KEY (source_id, target_ref, kind, field),
-        FOREIGN KEY (source_id) REFERENCES catalog_entities(id) ON DELETE CASCADE
+        FOREIGN KEY (source_id) REFERENCES mikser_entities(id) ON DELETE CASCADE
     ) WITHOUT ROWID;
-    CREATE INDEX IF NOT EXISTS idx_catalog_refs_target ON catalog_refs(target_ref);
+    CREATE INDEX IF NOT EXISTS idx_mikser_refs_target ON mikser_refs(target_ref);
 `)
 
 // Build the index handle over the provided sqlite database. Prepares
@@ -71,53 +71,53 @@ export function createIndex(db) {
 
     // Read statements
     const stmtInboundStatic = db.prepare(`
-        SELECT source_id, field FROM catalog_refs
+        SELECT source_id, field FROM mikser_refs
         WHERE target_ref = ? AND kind = 'ref'
     `)
     const stmtOutboundStatic = db.prepare(`
-        SELECT field, target_ref FROM catalog_refs
+        SELECT field, target_ref FROM mikser_refs
         WHERE source_id = ? AND kind = 'ref'
     `)
     const stmtInboundAny = db.prepare(`
-        SELECT DISTINCT source_id FROM catalog_refs
+        SELECT DISTINCT source_id FROM mikser_refs
         WHERE target_ref = ?
     `)
     const stmtInboundDynamic = db.prepare(`
-        SELECT source_id, kind FROM catalog_refs
+        SELECT source_id, kind FROM mikser_refs
         WHERE target_ref = ? AND kind != 'ref'
     `)
     const stmtOutboundDynamic = db.prepare(`
-        SELECT kind, target_ref FROM catalog_refs
+        SELECT kind, target_ref FROM mikser_refs
         WHERE source_id = ? AND kind != 'ref'
     `)
     const stmtAllRefs = db.prepare(`
-        SELECT DISTINCT target_ref FROM catalog_refs WHERE kind = 'ref'
+        SELECT DISTINCT target_ref FROM mikser_refs WHERE kind = 'ref'
     `)
     const stmtCountStaticEdges = db.prepare(`
-        SELECT COUNT(*) AS c FROM catalog_refs WHERE kind = 'ref'
+        SELECT COUNT(*) AS c FROM mikser_refs WHERE kind = 'ref'
     `)
     const stmtCountStaticTargets = db.prepare(`
-        SELECT COUNT(DISTINCT target_ref) AS c FROM catalog_refs WHERE kind = 'ref'
+        SELECT COUNT(DISTINCT target_ref) AS c FROM mikser_refs WHERE kind = 'ref'
     `)
     const stmtCountStaticSources = db.prepare(`
-        SELECT COUNT(DISTINCT source_id) AS c FROM catalog_refs WHERE kind = 'ref'
+        SELECT COUNT(DISTINCT source_id) AS c FROM mikser_refs WHERE kind = 'ref'
     `)
     const stmtCountDynamicEdges = db.prepare(`
-        SELECT COUNT(*) AS c FROM catalog_refs WHERE kind != 'ref'
+        SELECT COUNT(*) AS c FROM mikser_refs WHERE kind != 'ref'
     `)
     const stmtCountDynamicSources = db.prepare(`
-        SELECT COUNT(DISTINCT source_id) AS c FROM catalog_refs WHERE kind != 'ref'
+        SELECT COUNT(DISTINCT source_id) AS c FROM mikser_refs WHERE kind != 'ref'
     `)
 
     // Write statements
     const stmtClearStaticForSource = db.prepare(`
-        DELETE FROM catalog_refs WHERE source_id = ? AND kind = 'ref'
+        DELETE FROM mikser_refs WHERE source_id = ? AND kind = 'ref'
     `)
     const stmtClearDynamicForSource = db.prepare(`
-        DELETE FROM catalog_refs WHERE source_id = ? AND kind != 'ref'
+        DELETE FROM mikser_refs WHERE source_id = ? AND kind != 'ref'
     `)
     const stmtInsertEdge = db.prepare(`
-        INSERT OR IGNORE INTO catalog_refs (source_id, target_ref, kind, field)
+        INSERT OR IGNORE INTO mikser_refs (source_id, target_ref, kind, field)
         VALUES (?, ?, ?, ?)
     `)
 
@@ -200,7 +200,7 @@ export function createIndex(db) {
     // `replaceDynamic` after each successful render. DELETEs cascade
     // automatically via the FK — no explicit removeEntity needed.
 
-    // Replace this entity's static refs in catalog_refs. Idempotent:
+    // Replace this entity's static refs in mikser_refs. Idempotent:
     // delete-then-insert wipes prior edges for the same source. Caller
     // must be inside a transaction (catalog.onPersist provides one).
     function indexEntity(entity) {
@@ -231,8 +231,8 @@ export function createIndex(db) {
         replaceDynamic(sourceId, [])
     }
 
-    const stmtClearAllStatic  = db.prepare(`DELETE FROM catalog_refs WHERE kind = 'ref'`)
-    const stmtClearAll        = db.prepare(`DELETE FROM catalog_refs`)
+    const stmtClearAllStatic  = db.prepare(`DELETE FROM mikser_refs WHERE kind = 'ref'`)
+    const stmtClearAll        = db.prepare(`DELETE FROM mikser_refs`)
 
     // One-shot rebuild — clears all static refs, then re-indexes the
     // given entities. Not used on hot paths (catalog.onPersist maintains
@@ -428,7 +428,7 @@ export function createRefs(db, prebuiltIndex = null) {
     const querySubscribers = createQuerySubscribers()
 
     // Per-cycle dispatch hook. No rebuild walk anymore — catalog.onPersist
-    // maintains catalog_refs incrementally inside its own transaction,
+    // maintains mikser_refs incrementally inside its own transaction,
     // so by the time our onPersist runs (after catalog's, by import
     // order in index.js), every static ref edge for this cycle's
     // mutations is already in the DB.
@@ -544,7 +544,7 @@ export function createRefs(db, prebuiltIndex = null) {
 // Module-level wiring. createRefs needs the DB; useDatabase() returns
 // null until database.js's onLoaded fires, so we defer wiring to that
 // phase. catalog.js is imported before refs.js in index.js, so its
-// onLoaded (which opens prepared statements over catalog_entities)
+// onLoaded (which opens prepared statements over mikser_entities)
 // runs before ours. Static-ref maintenance happens in catalog.onPersist
 // via the index handle we expose on runtime; see catalog.js for the
 // hook integration.
@@ -564,7 +564,7 @@ onLoaded(async () => {
 })
 
 // Expose the index for catalog.js's onPersist hook so static refs can
-// be maintained inside the same transaction as catalog_entities
+// be maintained inside the same transaction as mikser_entities
 // mutations. Returns null before onLoaded fires.
 export function useRefsIndex() {
     return sharedIndex

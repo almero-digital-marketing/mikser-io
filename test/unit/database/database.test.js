@@ -100,7 +100,7 @@ describe('createSqliteDatabase — schema and lifecycle', () => {
             schemas: new Map(),
         })
         db.open()
-        const stored = db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version')
+        const stored = db.prepare('SELECT value FROM mikser_meta WHERE key = ?').get('schema_version')
         assert.equal(stored.value, '8.2.0')
         db.close()
         rmSync(runtimeFolder, { recursive: true, force: true })
@@ -129,12 +129,12 @@ describe('createSqliteDatabase — schema and lifecycle', () => {
 
     it('applies registered schemas at open()', () => {
         const schemas = new Map([
-            ['catalog', `
-                CREATE TABLE IF NOT EXISTS catalog_entities (
+            ['mikser_entities', `
+                CREATE TABLE IF NOT EXISTS mikser_entities (
                     id   TEXT PRIMARY KEY,
                     data TEXT NOT NULL
                 ) WITHOUT ROWID;
-                CREATE INDEX IF NOT EXISTS idx_dummy ON catalog_entities(id);
+                CREATE INDEX IF NOT EXISTS idx_dummy ON mikser_entities(id);
             `],
         ])
         const db = createSqliteDatabase({
@@ -145,8 +145,8 @@ describe('createSqliteDatabase — schema and lifecycle', () => {
         db.open()
 
         // Schema applied — we can insert and query
-        db.prepare('INSERT INTO catalog_entities (id, data) VALUES (?, ?)').run('a', '{}')
-        const row = db.prepare('SELECT id, data FROM catalog_entities WHERE id = ?').get('a')
+        db.prepare('INSERT INTO mikser_entities (id, data) VALUES (?, ?)').run('a', '{}')
+        const row = db.prepare('SELECT id, data FROM mikser_entities WHERE id = ?').get('a')
         assert.deepEqual(row, { id: 'a', data: '{}' })
         db.close()
         rmSync(runtimeFolder, { recursive: true, force: true })
@@ -154,8 +154,8 @@ describe('createSqliteDatabase — schema and lifecycle', () => {
 
     it('schema apply is idempotent across re-opens', () => {
         const schemas = new Map([
-            ['catalog', `
-                CREATE TABLE IF NOT EXISTS catalog_entities (
+            ['mikser_entities', `
+                CREATE TABLE IF NOT EXISTS mikser_entities (
                     id   TEXT PRIMARY KEY,
                     data TEXT NOT NULL
                 ) WITHOUT ROWID;
@@ -165,7 +165,7 @@ describe('createSqliteDatabase — schema and lifecycle', () => {
             runtimeFolder, version: '8.2.0', schemas,
         })
         db1.open()
-        db1.prepare('INSERT INTO catalog_entities (id, data) VALUES (?, ?)').run('a', '{}')
+        db1.prepare('INSERT INTO mikser_entities (id, data) VALUES (?, ?)').run('a', '{}')
         db1.close()
 
         // Second open with the same schema — script reruns idempotently,
@@ -174,7 +174,7 @@ describe('createSqliteDatabase — schema and lifecycle', () => {
             runtimeFolder, version: '8.2.0', schemas,
         })
         db2.open()
-        const row = db2.prepare('SELECT id FROM catalog_entities WHERE id = ?').get('a')
+        const row = db2.prepare('SELECT id FROM mikser_entities WHERE id = ?').get('a')
         assert.equal(row.id, 'a')
         db2.close()
         rmSync(runtimeFolder, { recursive: true, force: true })
@@ -182,14 +182,14 @@ describe('createSqliteDatabase — schema and lifecycle', () => {
 
     it('throws with a useful message on malformed schema script', () => {
         const schemas = new Map([
-            ['catalog', 'CREATE TABLE this is not valid sql;'],
+            ['mikser_entities', 'CREATE TABLE this is not valid sql;'],
         ])
         const db = createSqliteDatabase({
             runtimeFolder, version: '8.2.0', schemas,
         })
         assert.throws(
             () => db.open(),
-            /Schema "catalog" failed to apply/,
+            /Schema "mikser_entities" failed to apply/,
         )
         rmSync(runtimeFolder, { recursive: true, force: true })
     })
@@ -204,8 +204,8 @@ describe('createSqliteDatabase — transactions', () => {
 
     function makeDb() {
         const schemas = new Map([
-            ['catalog', `
-                CREATE TABLE IF NOT EXISTS catalog_entities (
+            ['mikser_entities', `
+                CREATE TABLE IF NOT EXISTS mikser_entities (
                     id   TEXT PRIMARY KEY,
                     data TEXT NOT NULL
                 ) WITHOUT ROWID;
@@ -220,12 +220,12 @@ describe('createSqliteDatabase — transactions', () => {
 
     it('transaction(fn) commits on normal return', () => {
         const db = makeDb()
-        const insert = db.prepare('INSERT INTO catalog_entities (id, data) VALUES (?, ?)')
+        const insert = db.prepare('INSERT INTO mikser_entities (id, data) VALUES (?, ?)')
         db.transaction(() => {
             insert.run('a', '{}')
             insert.run('b', '{}')
         })
-        const count = db.prepare('SELECT COUNT(*) AS c FROM catalog_entities').get().c
+        const count = db.prepare('SELECT COUNT(*) AS c FROM mikser_entities').get().c
         assert.equal(count, 2)
         db.close()
         rmSync(runtimeFolder, { recursive: true, force: true })
@@ -233,14 +233,14 @@ describe('createSqliteDatabase — transactions', () => {
 
     it('transaction(fn) rolls back on throw', () => {
         const db = makeDb()
-        const insert = db.prepare('INSERT INTO catalog_entities (id, data) VALUES (?, ?)')
+        const insert = db.prepare('INSERT INTO mikser_entities (id, data) VALUES (?, ?)')
         assert.throws(() => {
             db.transaction(() => {
                 insert.run('a', '{}')
                 throw new Error('boom')
             })
         }, /boom/)
-        const count = db.prepare('SELECT COUNT(*) AS c FROM catalog_entities').get().c
+        const count = db.prepare('SELECT COUNT(*) AS c FROM mikser_entities').get().c
         assert.equal(count, 0, 'failed transaction should leave no rows')
         db.close()
         rmSync(runtimeFolder, { recursive: true, force: true })

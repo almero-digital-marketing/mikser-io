@@ -488,7 +488,7 @@ onLoaded(async () => {
     dirty = false
 
     // Dynamic edge replay retired in Phase 4: dynamic edges (layout /
-    // partial / query) now live in catalog_refs alongside static refs
+    // partial / query) now live in mikser_refs alongside static refs
     // and persist across restarts. The first post-restart cycle's
     // inverseClosureOf reads them straight from the DB — nothing to
     // replay.
