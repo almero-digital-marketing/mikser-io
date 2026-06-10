@@ -12,7 +12,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import { createSqliteDatabase } from '../../../src/database/sqlite.js'
+import { createSqliteDatabase } from '../../../src/database/index.js'
 
 function tmpdirFor(label) {
     return mkdtempSync(path.join(tmpdir(), `mikser-db-${label}-`))
