@@ -253,6 +253,17 @@ export function useSource(core, options) {
     scanHook(async () => {
         if (!absFolder) return // setup didn't run (shouldn't happen)
         const logger = useLogger()
+        // --resume: the journal has unfinished entries from a prior run
+        // and we're picking up where it died. Skip the filesystem scan
+        // entirely — re-globbing 1M paths is the single biggest startup
+        // cost at scale, and any disk changes during downtime are
+        // explicitly out of scope for resume (use a plain restart to
+        // catch them). Watcher wiring already happened in the setup
+        // hook, so post-resume changes still flow through chokidar.
+        if (runtime.options.resume) {
+            logger.info('%s scan skipped (--resume)', cap)
+            return
+        }
         const scanned = new Set()
         const stats = { loaded: 0, skipped: 0, emitted: 0, deleted: 0 }
         const files = await globby(pattern, {

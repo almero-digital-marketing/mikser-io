@@ -28,9 +28,16 @@ import path from 'node:path'
 import { mkdirSync } from 'node:fs'
 import Database from 'better-sqlite3'
 import runtime from '../runtime.js'
-import { useLogger } from '../engine.js'
 import { onLoaded } from '../lifecycle.js'
 import packageInfo from '../../package.json' with { type: 'json' }
+
+// Local logger resolver — same one-liner engine.js exports as
+// `useLogger`. Inlined here so database/ doesn't import engine.js
+// (which would close a journal → database → engine → journal cycle
+// at module-eval time).
+function useLogger() {
+    return runtime.engine?.logger
+}
 
 const DEFAULT_FILENAME = 'mikser.sqlite'
 

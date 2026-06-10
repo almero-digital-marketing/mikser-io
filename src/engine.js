@@ -96,6 +96,7 @@ export async function setup(options) {
             .option('-o --output-folder <folder>', 'set mikser output folder relative to working folder', 'out')
             .option('-w --watch', 'watch entities for changes', false)
             .option('-f --force', 'rebuild everything; disable incremental dispatch', false)
+            .option('-R --resume', 'continue from journal entries left by a previous interrupted run; skip the initial filesystem scan', false)
             .option('--verify', 'verify output folder against manifest; report drift instead of building', false)
             .option('-d --debug', 'display debug statements')
             .option('-t --trace', 'display trace statements')
