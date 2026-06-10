@@ -7,6 +7,7 @@ import { inputHashOf } from '../utils.js'
 import { createTrack } from '../track.js'
 import { queryContext } from '../catalog.js'
 import { gateChecksum, sweepDeleted, scanSummary } from '../source.js'
+import { checksumsByCollection } from '../catalog.js'
 
 // Liquid / Handlebars / Eta keywords we don't want surfaced as
 // "variables this layout references." Anything that looks like a path
@@ -403,20 +404,39 @@ export default ({
         // persisted catalog. Required because the gate (below) now
         // suppresses CREATEs for unchanged layouts this cycle, so
         // neither map can be built from journal walks alone. Source-
-        // of-truth is the catalog (which catalog.js reads from disk
-        // at onInitialized). Subsequent in-cycle mutations still
-        // flow through createEntity / addToSitemap / onProcessed.
+        // of-truth is the catalog. Subsequent in-cycle mutations
+        // still flow through createEntity / addToSitemap / onProcessed.
         //
-        // Sitemap filter mirrors onProcessed below: entities with a
-        // resolved layout (persisted across runs) or with an explicit
-        // meta.href (redirect-style entries with no layout).
+        // Two indexed queries instead of one full-catalog walk: the
+        // `collection` and `meta_href` / `meta_layout` columns are
+        // indexed in catalog_entities, so the rebuild touches only
+        // entities that actually contribute to the maps. For a typical
+        // mixed corpus (documents + resources + schemas + ...) this
+        // skips the bulk of the catalog. For a homogeneous one (a
+        // 14k-blog where every doc has meta.layout) the sitemap query
+        // still returns everyone, but the layouts-collection query
+        // is small.
+        //
+        // Sitemap candidate filter: `meta.layout` (string ref to a
+        // layout — the persisted intent) OR `meta.href` (explicit
+        // redirect-style entry). Equivalent to the old `e.layout ||
+        // e.meta?.href` check for entities whose layout resolution
+        // succeeded last cycle; entities whose meta.layout pointed
+        // at a missing layout now appear in the sitemap rebuild but
+        // are harmless (downstream consumers check `e.layout` or
+        // `e.meta?.href` anyway).
         const { layouts } = runtime.state.layouts
-        for (const e of await findEntities()) {
-            if (e.collection === collection) {
-                layouts[e.name] = e
-            } else if (e.layout || e.meta?.href) {
-                addToSitemap(e)
-            }
+        for (const e of await findEntities({ collection })) {
+            layouts[e.name] = e
+        }
+        for (const e of await findEntities({
+            $or: [
+                { 'meta.layout': { $exists: true } },
+                { 'meta.href':   { $exists: true } },
+            ],
+        })) {
+            if (e.collection === collection) continue   // skip layouts themselves
+            addToSitemap(e)
         }
     })
 
@@ -436,12 +456,16 @@ export default ({
         // layouts.inspect), and the load step layers in
         // getFormatInfo. The gate + sweep + summary line shape are
         // shared regardless.
+        // Bulk-prefetch this collection's (id → checksum) map once
+        // before the loop; the gate hits a Map.get instead of a per-
+        // file SQL lookup.
+        const priorChecksums = checksumsByCollection(collection)
         for (let relativePath of paths) {
             const uri = path.join(runtime.options.layoutsFolder, relativePath)
             const id = path.join('/layouts', relativePath)
             scanned.add(id)
 
-            const chksum = await gateChecksum(uri, id)
+            const chksum = await gateChecksum(uri, id, { priorChecksums })
             if (chksum === null) {
                 stats.skipped++
                 continue
