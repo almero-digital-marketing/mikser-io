@@ -95,7 +95,6 @@ export default ({
     onProcessed,
     onBeforeRender,
     useJournal,
-    updateEntry,
     renderEntities,
     onComplete,
     onSync,
@@ -372,13 +371,8 @@ export default ({
             return (await findEntity({ id: stateEntry.id })) || stateEntry
         }
 
-        for await (let { id, entity, operation } of useJournal('Layouts processing', [OPERATION.CREATE, OPERATION.UPDATE, OPERATION.DELETE], signal)) {
+        for await (let { entity, operation } of useJournal('Layouts processing', [OPERATION.CREATE, OPERATION.UPDATE, OPERATION.DELETE], signal)) {
             if (entity.collection == collection) continue
-            // Track whether layout/meta mutations actually happened so
-            // we only persist the entity back to the journal when there's
-            // something to write — most entities in this loop don't match
-            // any layout and shouldn't pay the UPDATE cost.
-            let mutated = false
             switch (operation) {
                 case OPERATION.CREATE:
                 case OPERATION.UPDATE:
@@ -387,7 +381,6 @@ export default ({
                             if (matchEntity(entity, pattern)) {
                                 const layoutName = runtime.config.layouts?.match[pattern]
                                 entity.layout = await resolveLayout(layoutName)
-                                mutated = true
                                 // Mirror the resolved layout name into
                                 // meta.layout so the catalog's indexed
                                 // `meta_layout` column finds this entity
@@ -420,7 +413,6 @@ export default ({
                             const autoLayout = candidates.find(name => layouts[name])
                             if (autoLayout) {
                                 entity.layout = await resolveLayout(autoLayout)
-                                mutated = true
                                 // Same mirror as the config-pattern
                                 // path above — stamp meta.layout so the
                                 // catalog's indexed query finds this
@@ -436,7 +428,6 @@ export default ({
                         }
                     } else {
                         entity.layout = await resolveLayout(entity.meta.layout)
-                        mutated = true
                     }
                     if (entity.meta?.layout && !entity.layout) {
                         logger.warn('Layout not found for %s: %s', entity.collection, entity.id)
@@ -457,7 +448,6 @@ export default ({
 
                     if (entity.layout && entity.meta?.postprocessor) {
                         entity.layout.postprocessor = entity.meta.postprocessor
-                        mutated = true
                     }
 
                     if (entity.layout) {
@@ -467,25 +457,16 @@ export default ({
                     }
                     break
                 case OPERATION.DELETE:
-                    // Catalog DELETE is now the sole source of truth for
-                    // "this entity is no longer in the sitemap". The old
-                    // in-memory addToSitemap / removeFromSitemap
-                    // bookkeeping was a mirror; sitemap lives in the
-                    // catalog (queried via meta_href), so the DELETE
-                    // alone removes it.
+                    // Catalog DELETE is the sole source of truth for "this
+                    // entity is no longer in the sitemap" — sitemap lives
+                    // in the catalog (queried via meta_href), so the
+                    // DELETE alone removes it.
                     break
             }
-            // Persist mutations back to the journal so downstream
-            // consumers (catalog onPersist, layouts onBeforeRender's
-            // findById hydration, refs replay) see the resolved layout
-            // and the meta.layout mirror. Pre-database the journal was
-            // an in-memory array — yielded entities were live references,
-            // so mutations propagated implicitly. Sqlite-backed
-            // useJournal yields a fresh JSON.parse per row; mutations
-            // are isolated to that yield unless we write them back.
-            if (mutated) {
-                await updateEntry({ id, entity })
-            }
+            // Any layout/meta mutation above is auto-persisted by the
+            // useJournal generator when this for-body completes (the
+            // generator JSON.stringifies the entity post-yield and
+            // UPDATEs the row if it diverged from the original).
         }
     })
 

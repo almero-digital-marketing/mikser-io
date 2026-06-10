@@ -170,11 +170,10 @@ export async function updateEntry({ id, entity, output, deps }) {
 // Chunked read: pages CHUNK_SIZE rows at a time, closing the SELECT
 // cursor between chunks. better-sqlite3 forbids concurrent queries on
 // the same connection; an open `.iterate()` cursor would block the
-// `updateEntry` UPDATEs plugins routinely fire inside their useJournal
-// loops. Chunked .all() over LIMIT/seq cursors avoids the lock —
-// writes happen freely in the gap between chunks — while keeping peak
-// journal memory bounded at CHUNK_SIZE × row_size (~3.5MB regardless
-// of corpus).
+// UPDATEs the auto-persist path below fires after each yield. Chunked
+// .all() over LIMIT/seq cursors avoids the lock — writes happen
+// freely in the gap between chunks — while keeping peak journal
+// memory bounded at CHUNK_SIZE × row_size (~3.5MB regardless of corpus).
 //
 // Snapshot semantics: maxSeq is captured at call time and used as the
 // upper bound on every chunk. Rows inserted during iteration land
@@ -182,6 +181,27 @@ export async function updateEntry({ id, entity, output, deps }) {
 // the prior in-memory implementation gave (it slice-copied at call
 // time). Plugins that want to react to entries they added themselves
 // do it via a fresh useJournal in a later phase.
+//
+// AUTO-PERSIST: between each yield and the next iteration step, the
+// yielded entity is JSON.stringify'd and compared to the row's
+// original entity JSON. If they differ, the row is UPDATEd before the
+// next yield. This restores the value-by-reference mutation semantic
+// the in-memory journal had for free — plugins can mutate the
+// yielded entity in-place (entity.meta.foo = bar, _.merge(entity,
+// patch), etc.) and the change propagates to subsequent phases'
+// useJournal walks AND to catalog onPersist, without an explicit
+// updateEntry call.
+//
+// Cost: one JSON.stringify per yield, plus a write for actually-
+// mutated rows. At 14k cold × ~6 journal walks ≈ 4s added cold time.
+// Warm cycles are unaffected (handful of yields). The bug class this
+// closes (plugin author forgets updateEntry; mutation silently drops;
+// downstream phases see stale state) is silent and easy to miss —
+// the cold-time cost is the right trade for guaranteed correctness.
+//
+// Plugins that still want to be explicit can call updateEntry({id,
+// entity}) themselves; the write hits the same row, auto-persist sees
+// no diff afterwards, no double-write.
 export async function* useJournal(name, operations, signal) {
     if (!db?.isOpen) return
 
@@ -208,7 +228,20 @@ export async function* useJournal(name, operations, signal) {
                 throw new AbortError()
             }
             updateProgress()
-            yield rowToEntry(row)
+
+            const entry = rowToEntry(row)
+            const originalEntity = row.entity   // already a JSON string
+
+            yield entry
+
+            // Yield returned — caller's for-body completed for this
+            // iteration. Diff and write back if mutated.
+            if (entry.entity != null) {
+                const currentEntity = JSON.stringify(entry.entity)
+                if (currentEntity !== originalEntity) {
+                    stmtUpdateEntity.run({ seq: row.seq, entity: currentEntity })
+                }
+            }
         }
 
         lastSeq = rows[rows.length - 1].seq

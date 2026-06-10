@@ -4,7 +4,6 @@ export default ({
     onProcess,
     useLogger,
     useJournal,
-    updateEntry,
     matchEntity,
     runtime,
     constants: { OPERATION },
@@ -13,12 +12,11 @@ export default ({
         const logger = useLogger()
 
         for (let { match, map, operations = [OPERATION.CREATE, OPERATION.UPDATE] } of runtime.config.mapper?.mappers || []) {
-            for await (let { id, entity } of useJournal('Mapper', operations, signal)) {
+            for await (let { entity } of useJournal('Mapper', operations, signal)) {
                 if (entity && matchEntity(entity, match)) {
                     logger.trace('Mapper: %s', entity.id)
                     try {
                         await map(entity)
-                        await updateEntry({ id, entity })
                     } catch (err) {
                         logger.error('Mapper error: %s %s', entity.name || entity.id, err.message)
                     }

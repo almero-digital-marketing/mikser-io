@@ -23,7 +23,6 @@ export default ({
     checksum,
     trackProgress,
     updateProgress,
-    updateEntry,
     matchEntity,
     constants: { OPERATION },
 }) => {
@@ -60,7 +59,7 @@ export default ({
         const logger = useLogger()
         const { resourceLib, resourceMap } = runtime.state.resources
 
-        for await (let { id, entity } of useJournal('Resources provision', [OPERATION.CREATE, OPERATION.UPDATE], signal)) {
+        for await (let { entity } of useJournal('Resources provision', [OPERATION.CREATE, OPERATION.UPDATE], signal)) {
             if (entity.collection != collection && entity.meta) {
                 resourceMap[entity.id] = []
                 _.eachDeep(entity.meta, resource => {
@@ -73,7 +72,6 @@ export default ({
                     }
                 })
                 entity.resources = resourceMap[entity.id].map(({ resource }) => resource)
-                await updateEntry({ id, entity })
             }
         }
         const resources = [].concat(...Object.values(resourceMap))
