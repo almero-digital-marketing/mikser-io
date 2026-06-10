@@ -32,7 +32,7 @@ import { expandEntity, projectMeta, refFilter } from './utils.js'
 import { normalizeFilter } from './track.js'
 import { useDatabase, registerSchema } from './database/index.js'
 import { translate as siftToSql, INDEXED_COLUMNS } from './database/sift-to-sql.js'
-import { queryContext } from './query-context.js'
+import { queryContext } from './database/query-context.js'
 
 export { queryContext }
 
