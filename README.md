@@ -208,8 +208,8 @@ For a working starter — config with a real plugin set, sample `documents/`, ex
 The shape mikser fits cleanly:
 
 - **Marketing sites with editorial teams** — content authors work in files (via their editor, a Git client, or `mikser-io-decap`), engineers ship features without negotiating with a CMS schema, the site stays portable.
-- **Multilingual publishing platforms** — the `useHref()` / `useAlternates()` pattern in `sdk-vue` decouples logical references from per-locale URLs. One source tree, many language deployments.
-- **Content-heavy product catalogues** — `documents` + `mikser-io-schemas` + `data` plugin + a Vue frontend = typed product listings with live updates, semantic search via `vector`, and static-CDN-friendly JSON snapshots all at once.
+- **Multilingual publishing platforms** — the `useHref()` / `useAlternates()` pattern decouples logical references from per-locale URLs. One source tree, many language deployments.
+- **Content-heavy product catalogues** — `documents` + `mikser-io-schemas` + `data` plugin + any framework SDK = typed product listings with live updates, semantic search via `vector`, and static-CDN-friendly JSON snapshots all at once.
 - **AI-augmented media pipelines** — `assets` plugin presets call out to Replicate / OpenAI / local models to upscale images, transcribe audio, transcode video. The pipeline is JS code, so anything Node can do is in scope.
 - **Mixed-output publishing** — the same source document renders to HTML, PDF (via `post-pdf`), MJML email (via `post-mjml`), and JSON snapshots. One catalog, many output formats, all concurrent.
 - **Headless backends for static frontends** — pair the `api` plugin with `sdk-api` for SSE-driven live frontends; pair the `data` plugin output with any static host for pre-rendered consumption.
