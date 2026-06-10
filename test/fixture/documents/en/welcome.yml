@@ -1,4 +1,5 @@
 layout: welcome
+task: worker
 lang: en
 title: Welcome to Mikser
 preview: Your content engine is ready.

@@ -21,6 +21,31 @@ import { inputHashOf } from './utils.js'
 import { createTrack } from './track.js'
 import { queryContext } from './database/query-context.js'
 
+// Build a structuredClone-safe copy of runtime.options for WORKER
+// dispatch. Plugin surfaces live under `runtime.options.<plugin>` per
+// the engine's namespacing convention and routinely hold functions
+// (e.g. `runtime.options.layouts.inspect`, `runtime.options.preview.get`)
+// — those don't cross thread boundaries via Piscina's structured clone.
+//
+// Per-key probe: anything that survives `structuredClone(value)` passes
+// through; anything that throws (DataCloneError on functions/handles/
+// errors with non-cloneable cause chains) is dropped. Engine fields
+// (workingFolder, outputFolder, threads, info, debug, ...) are all
+// primitives and pass through untouched. Plugin function surfaces drop
+// out — workers don't need them; they have access to the catalog via
+// their own sqlite handle and call back into the engine via the IPC
+// port for logging.
+function workerSafeOptions(opts) {
+    const result = {}
+    for (const [k, v] of Object.entries(opts)) {
+        try {
+            structuredClone(v)
+            result[k] = v
+        } catch { /* not cloneable — skip */ }
+    }
+    return result
+}
+
 export async function setup(options) {
     runtime.options.threads = options?.threads !== undefined ? options.threads : 4
     runtime.engine = {
@@ -32,16 +57,27 @@ export async function setup(options) {
         // transports); progress-bar coordination is then their problem.
         logger: options?.logger || createMikserLogger('info'),
         commander: new Command(),
-        // Lazily-allocated worker pool. Render dispatch is INLINE by
-        // default; Piscina only matters when a layout opts into
-        // TASKS.WORKER (`task: 'worker'`) or a postprocessor declares
-        // worker mode. minThreads: 0 prevents Piscina from pre-spawning
-        // workers at construction time — INLINE-only workloads pay zero
-        // worker cost. idleTimeout unspawns workers that have sat idle,
-        // so transient bursts of WORKER tasks don't leave threads alive
-        // for the rest of the build.
+        // Lazily-allocated worker pools. Render and postprocess both
+        // default to INLINE; Piscina only matters when a layout opts
+        // into TASKS.WORKER (`task: 'worker'`). minThreads: 0 prevents
+        // Piscina from pre-spawning workers at construction time —
+        // INLINE-only workloads pay zero worker cost. idleTimeout
+        // unspawns workers that have sat idle, so transient bursts of
+        // WORKER tasks don't leave threads alive for the rest of the
+        // build.
+        //
+        // Separate pools for render and postprocess: a long PDF
+        // postprocess shouldn't starve render dispatch (or vice versa),
+        // and the two have very different per-task profiles
+        // (renders ~μs-ms, postprocess often hundreds of ms).
         renderWorkers: new Piscina({
             filename: new URL('./render.js', import.meta.url).href,
+            maxThreads: runtime.options.threads,
+            minThreads: 0,
+            idleTimeout: 30_000,
+        }),
+        postprocessWorkers: new Piscina({
+            filename: new URL('./postprocess.js', import.meta.url).href,
             maxThreads: runtime.options.threads,
             minThreads: 0,
             idleTimeout: 30_000,
@@ -307,6 +343,25 @@ export async function setup(options) {
                                 }
                                 mc.port2.unref()
                                 renderOptions.port = mc.port1
+                                // Strip plugin-surface functions
+                                // (runtime.options.layouts.inspect, etc.) so
+                                // Piscina's structured clone doesn't choke on
+                                // them. Engine-side primitives pass through;
+                                // plugin surfaces are reachable via the
+                                // worker's own sqlite handle or by IPC over
+                                // the port.
+                                renderOptions.options = {
+                                    ...workerSafeOptions(runtime.options),
+                                    tasks: renderOptions.options.tasks,
+                                    ...options,
+                                }
+                                // Track is a closure object — its .partial /
+                                // .query methods can't cross thread
+                                // boundaries. Workers fall back to
+                                // layout-only deps (added by
+                                // manifest.collectEdges), so drop the track
+                                // entirely before dispatch.
+                                renderOptions.track = undefined
                                 return await runtime.engine.renderWorkers.run(
                                     renderOptions,
                                     { signal, transferList: [mc.port1] }
@@ -475,6 +530,46 @@ export async function setup(options) {
                                     result = await runtime.engine.queue.add(() => postprocess(postprocessOptions), { signal })
                                 }
                                 break
+                            case TASKS.WORKER: {
+                                // Postprocess in a Piscina worker. Same
+                                // IPC logger forwarding shape as render
+                                // WORKER (engine.js render dispatcher). The
+                                // worker's plugins module-state is fresh per
+                                // thread — plugins that hold state across
+                                // calls (e.g. post-pdf's puppeteer browser
+                                // launched in setup()) need to be re-entrant
+                                // per worker, since the main-process setup()
+                                // hook didn't run inside the worker.
+                                // Stateless postprocessors (post-mjml) work
+                                // out-of-the-box.
+                                const mc = new MessageChannel()
+                                mc.port2.onmessage = event => {
+                                    const message = JSON.parse(event.data)
+                                    if (message.command == 'logger') {
+                                        runtime.engine.logger[message.data.log](...message.data.args)
+                                    }
+                                }
+                                mc.port2.unref()
+                                postprocessOptions.port = mc.port1
+                                // Same options-sanitization as the render
+                                // WORKER path — drop plugin-surface
+                                // functions before structured clone.
+                                postprocessOptions.options = {
+                                    ...workerSafeOptions(runtime.options),
+                                    tasks: postprocessOptions.options.tasks,
+                                    postprocessor: postprocessOptions.options.postprocessor,
+                                    ...(postprocessOptions.options.outputFolder
+                                        ? { outputFolder: postprocessOptions.options.outputFolder }
+                                        : {}),
+                                }
+                                if (!signal.aborted) {
+                                    result = await runtime.engine.postprocessWorkers.run(
+                                        postprocessOptions,
+                                        { signal, transferList: [mc.port1] }
+                                    )
+                                }
+                                break
+                            }
                         }
                         if (!signal.aborted) {
                             entry.output = { success: true }
@@ -509,6 +604,11 @@ export async function setup(options) {
         if (runtime.engine.renderWorkers.queueSize) {
             await new Promise(resolve => {
                 runtime.engine.renderWorkers.once('drain', resolve)
+            })
+        }
+        if (runtime.engine.postprocessWorkers.queueSize) {
+            await new Promise(resolve => {
+                runtime.engine.postprocessWorkers.once('drain', resolve)
             })
         }
     })

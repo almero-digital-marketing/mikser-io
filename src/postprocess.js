@@ -4,8 +4,12 @@ import { existsSync } from 'node:fs'
 import _ from 'lodash'
 import { useLogger } from './engine.js'
 
-export async function loadPlugin(pluginName, workingFolder) {
-    const logger = useLogger()
+export async function loadPlugin(pluginName, workingFolder, loggerOverride) {
+    // Worker contexts don't have access to the engine's pino instance
+    // via useLogger() — callers from inside the Piscina dispatch pass
+    // their port-forwarded logger explicitly so plugin-load failures
+    // surface back in the engine's log stream instead of disappearing.
+    const logger = loggerOverride ?? useLogger()
     const require = createRequire(path.join(workingFolder, 'package.json'))
     let nodeModulesResolved
     try {
@@ -39,7 +43,20 @@ export async function loadPlugin(pluginName, workingFolder) {
     logger?.error('Postprocess plugin %s not found.', pluginName)
 }
 
-export default async ({ entity, options, config, context, state, logger }) => {
+export default async ({ entity, options, config, context, state, logger, port }) => {
+
+    // Piscina worker context: no main-process logger reaches the worker.
+    // Build one that forwards records back to the engine over the
+    // MessageChannel port the dispatcher transfers in. Same shape as
+    // render.js's worker logger so engine-side handling is identical.
+    logger = logger || {
+        info(...args)   { port.postMessage(JSON.stringify({ command: 'logger', data: { log: 'info',   args } })) },
+        warn(...args)   { port.postMessage(JSON.stringify({ command: 'logger', data: { log: 'warn',   args } })) },
+        error(...args)  { port.postMessage(JSON.stringify({ command: 'logger', data: { log: 'error',  args } })) },
+        debug(...args)  { port.postMessage(JSON.stringify({ command: 'logger', data: { log: 'debug',  args } })) },
+        trace(...args)  { port.postMessage(JSON.stringify({ command: 'logger', data: { log: 'trace',  args } })) },
+        notice(...args) { port.postMessage(JSON.stringify({ command: 'logger', data: { log: 'notice', args } })) },
+    }
 
     const { postprocessor } = options
     const plugins = {}
@@ -60,7 +77,7 @@ export default async ({ entity, options, config, context, state, logger }) => {
     }
 
     for (let pluginName of pluginsToLoad) {
-        const plugin = await loadPlugin(pluginName, options.workingFolder)
+        const plugin = await loadPlugin(pluginName, options.workingFolder, logger)
         if (!plugin) continue // loadPlugin already logged the "not found" path
         plugins[pluginName] = plugin
         if (plugin.load) {
