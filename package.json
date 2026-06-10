@@ -25,6 +25,7 @@
 		"@budibase/handlebars-helpers": "^0.14.3",
 		"await-semaphore": "^0.1.3",
 		"axios": "^1.17.0",
+		"better-sqlite3": "^12.10.0",
 		"chokidar": "^5.0.0",
 		"commander": "^15.0.0",
 		"cors": "^2.8.5",
