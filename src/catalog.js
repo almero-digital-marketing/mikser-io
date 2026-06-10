@@ -51,6 +51,7 @@ registerSchema('mikser_entities', `
         meta_href    TEXT,
         meta_layout  TEXT,
         meta_lang    TEXT,
+        meta_cache   INTEGER,
         time         INTEGER,
         uri          TEXT,
         data         TEXT NOT NULL
@@ -62,6 +63,10 @@ registerSchema('mikser_entities', `
     CREATE INDEX IF NOT EXISTS idx_mikser_entities_meta_href   ON mikser_entities(meta_href)   WHERE meta_href   IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_mikser_entities_meta_layout ON mikser_entities(meta_layout) WHERE meta_layout IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_mikser_entities_meta_lang   ON mikser_entities(meta_lang)   WHERE meta_lang   IS NOT NULL;
+    -- Partial index over meta.cache: false (rare opt-out for renders
+    -- mikser can't track precisely). Typical site has 0-10; WHERE
+    -- clause keeps the index tiny.
+    CREATE INDEX IF NOT EXISTS idx_mikser_entities_meta_cache  ON mikser_entities(meta_cache)  WHERE meta_cache  IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_mikser_entities_time        ON mikser_entities(time);
     CREATE INDEX IF NOT EXISTS idx_mikser_entities_uri         ON mikser_entities(uri);
 `)
@@ -135,6 +140,10 @@ function entityToRow(entity) {
         meta_href:    entity.meta?.href   ?? null,
         meta_layout:  entity.meta?.layout ?? null,
         meta_lang:    entity.meta?.lang   ?? null,
+        // meta.cache: false is the opt-out — entities that should
+        // render every cycle. Stored as 0 (the only meaningful value;
+        // NULL means "not set" so the partial index skips it).
+        meta_cache:   entity.meta?.cache === false ? 0 : null,
         time:         entity.time         ?? null,
         uri:          entity.uri          ?? null,
         data:         JSON.stringify(entity),
@@ -204,9 +213,9 @@ onLoaded(async () => {
     stmtGet = db.prepare('SELECT data FROM mikser_entities WHERE id = ?')
     stmtUpsert = db.prepare(`
         INSERT INTO mikser_entities
-            (id, collection, type, format, name, meta_href, meta_layout, meta_lang, time, uri, data)
+            (id, collection, type, format, name, meta_href, meta_layout, meta_lang, meta_cache, time, uri, data)
         VALUES
-            (@id, @collection, @type, @format, @name, @meta_href, @meta_layout, @meta_lang, @time, @uri, @data)
+            (@id, @collection, @type, @format, @name, @meta_href, @meta_layout, @meta_lang, @meta_cache, @time, @uri, @data)
         ON CONFLICT(id) DO UPDATE SET
             collection  = @collection,
             type        = @type,
@@ -215,6 +224,7 @@ onLoaded(async () => {
             meta_href   = @meta_href,
             meta_layout = @meta_layout,
             meta_lang   = @meta_lang,
+            meta_cache  = @meta_cache,
             time        = @time,
             uri         = @uri,
             data        = @data

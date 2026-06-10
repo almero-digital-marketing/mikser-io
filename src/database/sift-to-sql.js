@@ -33,6 +33,7 @@ export const INDEXED_COLUMNS = {
     'meta.href':   'meta_href',
     'meta.layout': 'meta_layout',
     'meta.lang':   'meta_lang',
+    'meta.cache':  'meta_cache',
     time:          'time',
     uri:           'uri',
 }

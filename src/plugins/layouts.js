@@ -100,6 +100,7 @@ export default ({
     matchEntity,
     changeExtension,
     getFormatInfo,
+    findById,
     findEntity,
     findEntities,
     constants: { ACTION, OPERATION, TASKS },
@@ -471,22 +472,26 @@ export default ({
         const logger = useLogger()
         const tasks = []
 
-        // Render candidates = entities the catalog records as having a
-        // resolved/declared layout. Query goes through the indexed
-        // `meta_layout` column; we still post-filter for `e.layout`
-        // because meta.layout being set doesn't guarantee resolution
-        // succeeded (a missing layout name persists meta.layout but
-        // not e.layout). `--force` (or a missing refs index) walks
-        // all of them — the old behaviour, kept as a safety net.
-        const allLayoutEntities = (await findEntities({
-            'meta.layout': { $exists: true },
-        })).filter(e => e.layout)
-
         let entities
         if (runtime.options.force || !runtime.refs?.inverseClosureOf) {
-            entities = allLayoutEntities
-            if (runtime.options.force) logger.debug('Force rebuild — dispatching all %d entities', entities.length)
+            // --force (or missing refs index) — dispatch every render
+            // candidate. Materializes the full layout-bearing slice of
+            // the catalog. Operator opt-in; the memory cost is the
+            // cost of the work.
+            entities = (await findEntities({
+                'meta.layout': { $exists: true },
+            })).filter(e => e.layout)
+            if (runtime.options.force) {
+                logger.debug('Force rebuild — dispatching all %d entities', entities.length)
+            }
         } else {
+            // Incremental path. Build seed list from journal mutations,
+            // walk refs.inverseClosureOf to get the dispatch ids, then
+            // findById each one. Crucially: we do NOT materialize the
+            // full layout-bearing slice of the catalog into heap. At
+            // 110k entities that allocation was 800MB; this path is
+            // bounded by closure size (typically 10s-100s on warm).
+            //
             // Hash-aware seeding: drop CREATE/UPDATE entries whose
             // post-processing inputHash matches the last manifest
             // snapshot. Cold-start file discovery emits CREATE for
@@ -494,20 +499,6 @@ export default ({
             // this filter, every restart would seed every entity and
             // the closure walk would expand to the whole catalog.
             // DELETE seeds always count.
-            //
-            // Journal CREATE/UPDATE entries carry the *raw* entity
-            // (file bytes + uri, before front-matter / yaml extraction
-            // populate entity.meta). Hashes recorded in the manifest
-            // are over the *processed* entity. We resolve through the
-            // catalog to get the post-processing version for the hash
-            // compare.
-            //
-            // Build an id → recorded inputHash Map up front so per-
-            // mutation lookup is O(1). Paginated outputs share an id
-            // with the parent; we keep the first-seen hash (they were
-            // all written from the same parent's render, same inputHash).
-            // Hash map built across all snapshots (entity inputHash +
-            // dep target hashes) — manifest owns this view.
             const recordedHashes = runtime.manifest?.recordedHashes() ?? new Map()
 
             const seenSeeds = new Set()
@@ -530,22 +521,32 @@ export default ({
                 seeds.push(current)
             }
 
-            // Opt-out: `meta.cache: false` on an entity puts it in
-            // every cycle's dispatch regardless of refs. Escape hatch
-            // for renders mikser can't track precisely (external data,
-            // sidecars with API calls, ECT partials).
-            const optOuts = new Set()
-            for (const e of allLayoutEntities) {
-                if (e.meta?.cache === false) optOuts.add(e.id)
-            }
+            // Opt-outs: `meta.cache: false` entities render every
+            // cycle regardless of refs (escape hatch for external-data
+            // sidecars, ECT partials, anything mikser can't precisely
+            // track). Indexed query on the `meta_cache` column —
+            // typical site has 0-10 of these, no full scan.
+            const optOutEntities = await findEntities({ 'meta.cache': 0 })
 
-            if (seeds.length === 0 && optOuts.size === 0) {
+            if (seeds.length === 0 && optOutEntities.length === 0) {
                 entities = []
             } else {
                 const closure = seeds.length ? runtime.refs.inverseClosureOf(seeds) : new Set()
-                entities = allLayoutEntities.filter(e => closure.has(e.id) || optOuts.has(e.id))
-                logger.debug('Incremental dispatch: %d seeds + %d opt-outs → %d entities (of %d total)',
-                    seeds.length, optOuts.size, entities.length, allLayoutEntities.length)
+                // Combine closure ids + opt-out ids into one dispatch set.
+                const dispatchIds = new Set(closure)
+                for (const e of optOutEntities) dispatchIds.add(e.id)
+
+                // Hydrate each id via findById. LRU cache absorbs
+                // duplicates (refs BFS revisits, partial dispatches
+                // hitting the same layout, etc.). Bounded by closure
+                // size — not by catalog size.
+                entities = []
+                for (const id of dispatchIds) {
+                    const entity = findById(id)
+                    if (entity?.layout) entities.push(entity)
+                }
+                logger.debug('Incremental dispatch: %d seeds + %d opt-outs → %d entities',
+                    seeds.length, optOutEntities.length, entities.length)
             }
         }
 
