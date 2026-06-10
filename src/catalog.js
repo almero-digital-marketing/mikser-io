@@ -16,7 +16,7 @@
 //
 // Identity semantics: each `findEntity({id})` call returns a freshly
 // JSON.parsed entity, NOT the same instance as the previous call
-// (unlike the prior Map driver). The codebase already mutates only
+// (unlike the prior in-memory Map). The codebase already mutates only
 // through `_.cloneDeep` or locally-constructed entities, so this
 // works in practice. New plugin code should not assume identity
 // across calls.
@@ -36,8 +36,8 @@ import { queryContext } from './database/query-context.js'
 
 export { queryContext }
 
-// Register the catalog schema with the database substrate. The
-// driver applies this at open(), idempotent via CREATE IF NOT EXISTS.
+// Register the catalog schema with the database. Applied idempotently
+// at db.open() via CREATE IF NOT EXISTS.
 // `WITHOUT ROWID` makes the primary key clustered — smaller file,
 // faster id lookups.
 registerSchema('catalog', `
@@ -79,7 +79,7 @@ function recordQuery(filter) {
 // 100k corpus: ~10% holds the hot working set (refs BFS revisits,
 // manifest collectEdges hashing). Memory cost is bounded — 10k
 // entries × ~7KB average = ~70MB cache footprint, still much less
-// than the prior Map driver that held the entire catalog in heap.
+// than the prior in-memory Map that held the entire catalog in heap.
 //
 // Bigger workloads can tune via `runtime.config.catalog.cache.size`
 // (handled at onLoaded).
@@ -173,13 +173,13 @@ async function applyJournalMutations() {
 }
 
 onLoaded(async () => {
-    const driver = useDatabase()
-    if (!driver) {
-        // Shouldn't happen — database.js's onLoaded runs first (it's
-        // imported earlier in index.js). Treat as a misconfiguration.
-        throw new Error('Catalog requires the database substrate; none was opened.')
+    db = useDatabase()
+    if (!db) {
+        // Shouldn't happen — src/database/index.js's onLoaded runs
+        // first (it's imported earlier in index.js). Treat as a
+        // misconfiguration.
+        throw new Error('Catalog requires the database; none was opened.')
     }
-    db = driver
 
     // Register a REGEXP user function so the sift→SQL translator can
     // push $regex predicates down. Null-safe: null column never
@@ -237,11 +237,10 @@ onLoaded(async () => {
     // call findEntity / findEntities / queryEntities for queries —
     // those go through the sift→SQL translator and the LRU cache.
     runtime.catalog = {
-        driver: 'sqlite',
         // No persistent state version mismatch handling here — the
-        // database substrate's schema_version stamp catches that at
-        // driver.open() and throws with "run mikser --clear". For
-        // source.js's gate we keep cacheInvalidated as a stable false
+        // database's schema_version stamp catches that at db.open()
+        // and throws with "run mikser --clear". For source.js's gate
+        // we keep cacheInvalidated as a stable false
         // (the source-side semantics now follow from journal + db
         // state, not from a separate flag).
         cacheInvalidated: false,

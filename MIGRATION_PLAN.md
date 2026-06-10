@@ -1,8 +1,8 @@
 # Database substrate migration
 
-Engine-level database (sqlite default, postgres opt-in). Catalog, refs,
-manifest all move from per-subsystem persistence (Map+NDJSON, in-memory
-graphs, NDJSON snapshots) to one backing store with shared transactions.
+Engine-level sqlite database. Catalog, refs, manifest all move from
+per-subsystem persistence (Map+NDJSON, in-memory graphs, NDJSON
+snapshots) to one backing store with shared transactions.
 
 Living on `engine/database`. Merge to `main` only when the full curve is
 in place — half-migrated state isn't shippable.
@@ -92,12 +92,10 @@ access patterns AND the storage — not just the storage.
     reads. Test that --verify works while a long-running watch process
     is open.
 13. **Schema migrations.** Until v10: drop `runtime/`, rebuild. After v10:
-    revisit if a real scenario forces it (production postgres with
-    editorial content, multi-instance coordinated upgrade, schema change
-    that needs to preserve data). Initial design uses inline
-    `CREATE IF NOT EXISTS` + a `meta.schema_version` stamp; mismatched
-    version fails loud with "run mikser --clear". No migration framework
-    until we have evidence we need one.
+    revisit if a real post-v10 scenario forces it. Initial design uses
+    inline `CREATE IF NOT EXISTS` + a `meta.schema_version` stamp;
+    mismatched version fails loud with "run mikser --clear". No
+    migration framework until we have evidence we need one.
 14. **Native sqlite dep install story.** `better-sqlite3` ships prebuilt
     binaries for common Node + platform combos; exotic environments
     (musl libc, very new Node releases without prebuilts yet) may need
@@ -113,31 +111,30 @@ to main happens after Phase 6.
 ### Phase 1 — Database substrate
 **Duration: 3-4 days**
 
-Engine-level `database` config, driver dispatcher, sqlite driver. No
-subsystem migrations yet.
+Engine-level `database` config + `useDatabase()` API + better-sqlite3
+implementation. No subsystem migrations yet.
 
-Library choices locked in:
-
-- **sqlite:** `better-sqlite3` (matches mikser-io-vector's choice;
-  consistent install story across the codebase). Gives us `.iterate()`
-  for lazy result streaming, `db.function()` for sift→SQL escape hatches
-  (`$regex` etc.), prepared statements, sync API for hot paths.
-- **postgres:** `pg` (also matches vector). Connection pool via `pg.Pool`.
+Library locked in: **better-sqlite3** (matches mikser-io-vector's
+choice; consistent install story across the codebase). Gives us
+`.iterate()` for lazy result streaming, `db.function()` for sift→SQL
+escape hatches (`$regex` etc.), prepared statements, sync API for hot
+paths.
 
 Tasks:
 
-- `mikser.config.js` reads `database: { driver, sqlite: {...}, postgres: {...} }`
-- Connection config mirrors vector's shape: `sqlite: { filename }`,
-  fallback to `runtime/mikser.sqlite`
-- `src/database.js`: dispatcher + driver registration + `useDatabase()` API
-- `src/database-driver-sqlite.js`: better-sqlite3 wrapper, connection
-  lifecycle, PRAGMAs (WAL, synchronous=NORMAL), schema migration runner
-- Schema registration API: subsystems call `registerSchema('catalog',
-  sqlScript)` during `onInitialize`; engine runs migrations at
-  `onInitialized`
+- `mikser.config.js` reads `database: { filename }` (optional —
+  defaults to `runtime/mikser.sqlite`)
+- Connection config mirrors vector's shape — `:memory:` works for
+  in-process tests.
+- `src/database/index.js`: `useDatabase()` + `registerSchema()` API,
+  schema-version stamp, onLoaded lifecycle wiring
+- `src/database/sqlite.js`: better-sqlite3 wrapper, connection
+  lifecycle, PRAGMAs (WAL, synchronous=NORMAL), schema script application
+- Schema registration: subsystems call `registerSchema('catalog',
+  sqlScript)` at module-import time; database applies them at open()
 - Transaction primitive: `db.transaction(fn)` — better-sqlite3's
-  built-in `db.transaction()` wrapper, which handles BEGIN / COMMIT /
-  ROLLBACK on throw automatically
+  built-in wrapper, handles BEGIN / COMMIT / ROLLBACK on throw
+  automatically
 
 **Validation:** existing tests still pass; `runtime.database` available
 at onLoaded; empty schema initializes cleanly; subsequent runs skip
@@ -227,22 +224,7 @@ rebuild on cold start).
 **Validation:** all scenarios pass (incl. cache-invalidation, --verify);
 warm clean stable.
 
-### Phase 6 — Postgres driver
-**Duration: 3-4 days**
-
-- `src/database-driver-postgres.js`: `pg` connection pool, schema
-  namespacing, `jsonb` columns instead of `TEXT`
-- Sift→SQL translator's postgres dialect: `data->'meta'->>'status'` instead
-  of `json_extract(data, '$.meta.status')`, etc.
-- `ON CONFLICT` vs `INSERT OR REPLACE`
-- Migration scripts adapted to postgres syntax
-- Document when to use sqlite (CLI/local/library) vs postgres
-  (server/multi-tenant/CMS backend)
-
-**Validation:** same test suite passes against postgres; performance
-characteristics documented.
-
-### Phase 7 — Documentation + ADR
+### Phase 6 — Documentation + ADR
 **Duration: 1 day**
 
 - New ADR: "Database is engine substrate" — five-test framework
@@ -250,7 +232,7 @@ characteristics documented.
 - Update README + CLAUDE.md
 - Migration notes for plugin authors (sift filter rules, useDatabase
   access, schema namespacing convention `<plugin>_<table>`)
-- Performance numbers across drivers + entity weights
+- Performance numbers + entity weights
 - Document the canonical plugin persistence pattern: `useDatabase()` +
   `registerSchema('<plugin-name>', sql)` — same shape mikser-io-vector
   will adopt after this branch merges
@@ -288,20 +270,31 @@ populate at each phase boundary:
 
 ## Decisions made
 
-- **better-sqlite3 for sqlite, `pg` for postgres.** Matches
-  mikser-io-vector. Consistent install story, one native dep across
-  the codebase, `.iterate()` available for lazy result streaming,
-  `db.function()` available for sift→SQL escape hatches.
+- **better-sqlite3 only.** Sqlite is the database. We considered a
+  pluggable driver abstraction with sqlite + postgres implementations
+  but dropped it before adding the complexity. Reasons:
+  - Postgres broke the worker-side hot path. `pg` is async, hbs/eta/
+    liquid templates are sync, and the only honest bridge was an
+    in-memory sitemap mirror — defeating the whole reason to move
+    sitemap into the DB in the first place.
+  - Mikser is a build engine. The catalog is derived from source
+    files; there's no editorial content that needs postgres's
+    multi-instance story. A sqlite file per project is the right
+    shape.
+  - "Till v10, freedom to break" — don't carry speculative
+    abstraction for a use case that may never materialize.
+  Reasons we picked better-sqlite3 itself (over node:sqlite): sync
+  API for hot paths, `.iterate()` for lazy result streaming,
+  `db.function()` for sift→SQL escape hatches, matches the install
+  story mikser-io-vector already carries.
 
 - **No migration framework. Inline `CREATE IF NOT EXISTS` + schema
   version stamp.** Mikser's catalog is a derived cache rebuildable
   from source files; each project has its own self-contained
-  `runtime/mikser.sqlite`. Versioned migrations earn their keep in
-  multi-tenant production where data can't be regenerated — not here.
-  The driver's `open()` hook:
+  `runtime/mikser.sqlite`. The database's `open()` hook:
   - Runs idempotent `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT
-    EXISTS` statements (the schema lives in the driver source, reviewed
-    in PRs like any other code).
+    EXISTS` statements (the schema lives in each subsystem's source,
+    reviewed in PRs like any other code).
   - Reads `meta.schema_version`. On mismatch with the current engine
     constant, throws with a clear message: "Database schema is X; this
     mikser-io expects Y. Run `mikser --clear` to rebuild from sources."
@@ -323,11 +316,9 @@ populate at each phase boundary:
     `manifest_snapshots`. Short — usually <10s.
 
   This avoids the "one giant 30-minute transaction per cycle" failure
-  mode: in sqlite that grows the WAL unboundedly, blocks other writers,
-  and slows crash recovery; in postgres it blocks VACUUM, holds row
-  locks indefinitely, and breaks pgbouncer transaction pooling. With
-  per-phase transactions, the longest transaction scales with entity
-  count, not build wall-time.
+  mode that would grow the WAL unboundedly, block other writers, and
+  slow crash recovery. With per-phase transactions, the longest
+  transaction scales with entity count, not build wall-time.
 
 - **Config-driven indexes with engine defaults; user config is
   additive.** Engine ships with a fixed list of indexed dimensions
@@ -386,16 +377,16 @@ populate at each phase boundary:
 
   ### What this means for mikser-io-vector
 
-  - Drops its own `src/drivers/{sqlite,postgres}.js` files
+  - Drops its own `src/drivers/{sqlite,postgres}.js` files and the
+    postgres-specific code paths entirely (vector follows the engine's
+    sqlite-only decision)
   - `createDriver({ connection, ... })` becomes `createDriver({ db, ... })`
     where `db = useDatabase()`
   - `runtime/vectors.db` retires; tables live in `runtime/mikser.sqlite`
     alongside catalog/refs/manifest
   - Vector config simplifies — no more `vector.client` /
-    `vector.connection` (engine config picks the driver)
-  - When engine driver is sqlite, vector keeps using `sqlite-vec`
-    extension; when postgres, vector uses `pgvector`. Driver selection
-    is implicit (follows engine).
+    `vector.connection`
+  - Vector keeps using `sqlite-vec` extension on the shared handle
   - Cross-subsystem transactions become possible: catalog write +
     vector embedding update in one atomic call. Worth it for "I
     just saved an entity; its embedding is guaranteed up to date."

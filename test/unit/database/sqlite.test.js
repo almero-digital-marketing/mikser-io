@@ -1,13 +1,10 @@
-// Unit tests for the engine-level database substrate (Phase 1 of the
-// engine/database migration).
+// Unit tests for the engine-level database.
 //
-// The substrate exposes registerSchema() + useDatabase() + sqlite
-// driver. These tests exercise the driver directly (without driving
-// the lifecycle) so we can assert on each behavior in isolation.
-//
-// Schema integration with the lifecycle (registerSchema → onLoaded →
-// driver.open() applies it) is exercised by the smoke test, which
-// runs a real cycle end-to-end.
+// Exercises the `createSqliteDatabase` factory directly (without
+// driving the lifecycle) so we can assert on each behavior in
+// isolation. Schema integration with the lifecycle (registerSchema
+// → onLoaded → db.open() applies it) is exercised by the smoke
+// test, which runs a real cycle end-to-end.
 
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
@@ -15,13 +12,13 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import { createSqliteDriver } from '../../../src/database/sqlite.js'
+import { createSqliteDatabase } from '../../../src/database/sqlite.js'
 
 function tmpdirFor(label) {
     return mkdtempSync(path.join(tmpdir(), `mikser-db-${label}-`))
 }
 
-describe('createSqliteDriver — schema and lifecycle', () => {
+describe('createSqliteDatabase — schema and lifecycle', () => {
     let runtimeFolder
 
     beforeEach(() => {
@@ -29,103 +26,102 @@ describe('createSqliteDriver — schema and lifecycle', () => {
     })
 
     it('opens at the default path under runtimeFolder', () => {
-        const driver = createSqliteDriver({
+        const db = createSqliteDatabase({
             runtimeFolder,
             version: '8.2.0',
             schemas: new Map(),
         })
-        driver.open()
-        assert.equal(driver.kind, 'sqlite')
-        assert.equal(driver.path, path.join(runtimeFolder, 'mikser.sqlite'))
-        assert.equal(driver.isOpen, true)
-        driver.close()
+        db.open()
+        assert.equal(db.path, path.join(runtimeFolder, 'mikser.sqlite'))
+        assert.equal(db.isOpen, true)
+        db.close()
         rmSync(runtimeFolder, { recursive: true, force: true })
     })
 
     it('open() is idempotent — second call is a no-op', () => {
-        const driver = createSqliteDriver({
+        const db = createSqliteDatabase({
             runtimeFolder,
             version: '8.2.0',
             schemas: new Map(),
         })
-        driver.open()
-        const handleA = driver.handle
-        driver.open()
-        const handleB = driver.handle
+        db.open()
+        const handleA = db.handle
+        db.open()
+        const handleB = db.handle
         assert.equal(handleA, handleB, 'reopening should not swap the handle')
-        driver.close()
+        db.close()
         rmSync(runtimeFolder, { recursive: true, force: true })
     })
 
     it('honors absolute config.filename', () => {
         const customPath = path.join(runtimeFolder, 'custom.sqlite')
-        const driver = createSqliteDriver({
+        const db = createSqliteDatabase({
             runtimeFolder,
             version: '8.2.0',
             schemas: new Map(),
             config: { filename: customPath },
         })
-        driver.open()
-        assert.equal(driver.path, customPath)
-        driver.close()
+        db.open()
+        assert.equal(db.path, customPath)
+        db.close()
         rmSync(runtimeFolder, { recursive: true, force: true })
     })
 
     it('honors relative config.filename (resolved against runtimeFolder)', () => {
-        const driver = createSqliteDriver({
+        const db = createSqliteDatabase({
             runtimeFolder,
             version: '8.2.0',
             schemas: new Map(),
             config: { filename: 'shared.sqlite' },
         })
-        driver.open()
-        assert.equal(driver.path, path.join(runtimeFolder, 'shared.sqlite'))
-        driver.close()
+        db.open()
+        assert.equal(db.path, path.join(runtimeFolder, 'shared.sqlite'))
+        db.close()
         rmSync(runtimeFolder, { recursive: true, force: true })
     })
 
     it('supports :memory: filename for in-process / test use', () => {
-        const driver = createSqliteDriver({
+        const db = createSqliteDatabase({
             runtimeFolder,
             version: '8.2.0',
             schemas: new Map(),
             config: { filename: ':memory:' },
         })
-        driver.open()
-        assert.equal(driver.path, ':memory:')
-        assert.equal(driver.isOpen, true)
-        driver.close()
+        db.open()
+        assert.equal(db.path, ':memory:')
+        assert.equal(db.isOpen, true)
+        db.close()
     })
 
     it('writes meta.schema_version on first open', () => {
-        const driver = createSqliteDriver({
+        const db = createSqliteDatabase({
             runtimeFolder,
             version: '8.2.0',
             schemas: new Map(),
         })
-        driver.open()
-        const stored = driver.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version')
+        db.open()
+        const stored = db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version')
         assert.equal(stored.value, '8.2.0')
-        driver.close()
+        db.close()
         rmSync(runtimeFolder, { recursive: true, force: true })
     })
 
     it('throws on schema_version mismatch with "run mikser --clear" hint', () => {
-        const driver1 = createSqliteDriver({
+        const db1 = createSqliteDatabase({
             runtimeFolder,
             version: '8.2.0',
             schemas: new Map(),
         })
-        driver1.open()
-        driver1.close()
+        db1.open()
+        db1.close()
 
-        const driver2 = createSqliteDriver({
+        const db2 = createSqliteDatabase({
             runtimeFolder,
             version: '9.0.0',
             schemas: new Map(),
         })
         assert.throws(
-            () => driver2.open(),
+            () => db2.open(),
             /Database schema is 8\.2\.0; this mikser-io expects 9\.0\.0.*mikser --clear/,
         )
         rmSync(runtimeFolder, { recursive: true, force: true })
@@ -141,18 +137,18 @@ describe('createSqliteDriver — schema and lifecycle', () => {
                 CREATE INDEX IF NOT EXISTS idx_dummy ON catalog_entities(id);
             `],
         ])
-        const driver = createSqliteDriver({
+        const db = createSqliteDatabase({
             runtimeFolder,
             version: '8.2.0',
             schemas,
         })
-        driver.open()
+        db.open()
 
         // Schema applied — we can insert and query
-        driver.prepare('INSERT INTO catalog_entities (id, data) VALUES (?, ?)').run('a', '{}')
-        const row = driver.prepare('SELECT id, data FROM catalog_entities WHERE id = ?').get('a')
+        db.prepare('INSERT INTO catalog_entities (id, data) VALUES (?, ?)').run('a', '{}')
+        const row = db.prepare('SELECT id, data FROM catalog_entities WHERE id = ?').get('a')
         assert.deepEqual(row, { id: 'a', data: '{}' })
-        driver.close()
+        db.close()
         rmSync(runtimeFolder, { recursive: true, force: true })
     })
 
@@ -165,22 +161,22 @@ describe('createSqliteDriver — schema and lifecycle', () => {
                 ) WITHOUT ROWID;
             `],
         ])
-        const driver1 = createSqliteDriver({
+        const db1 = createSqliteDatabase({
             runtimeFolder, version: '8.2.0', schemas,
         })
-        driver1.open()
-        driver1.prepare('INSERT INTO catalog_entities (id, data) VALUES (?, ?)').run('a', '{}')
-        driver1.close()
+        db1.open()
+        db1.prepare('INSERT INTO catalog_entities (id, data) VALUES (?, ?)').run('a', '{}')
+        db1.close()
 
         // Second open with the same schema — script reruns idempotently,
         // existing data survives
-        const driver2 = createSqliteDriver({
+        const db2 = createSqliteDatabase({
             runtimeFolder, version: '8.2.0', schemas,
         })
-        driver2.open()
-        const row = driver2.prepare('SELECT id FROM catalog_entities WHERE id = ?').get('a')
+        db2.open()
+        const row = db2.prepare('SELECT id FROM catalog_entities WHERE id = ?').get('a')
         assert.equal(row.id, 'a')
-        driver2.close()
+        db2.close()
         rmSync(runtimeFolder, { recursive: true, force: true })
     })
 
@@ -188,25 +184,25 @@ describe('createSqliteDriver — schema and lifecycle', () => {
         const schemas = new Map([
             ['catalog', 'CREATE TABLE this is not valid sql;'],
         ])
-        const driver = createSqliteDriver({
+        const db = createSqliteDatabase({
             runtimeFolder, version: '8.2.0', schemas,
         })
         assert.throws(
-            () => driver.open(),
+            () => db.open(),
             /Schema "catalog" failed to apply/,
         )
         rmSync(runtimeFolder, { recursive: true, force: true })
     })
 })
 
-describe('createSqliteDriver — transactions', () => {
+describe('createSqliteDatabase — transactions', () => {
     let runtimeFolder
 
     beforeEach(() => {
         runtimeFolder = tmpdirFor('tx')
     })
 
-    function makeDriver() {
+    function makeDb() {
         const schemas = new Map([
             ['catalog', `
                 CREATE TABLE IF NOT EXISTS catalog_entities (
@@ -215,46 +211,46 @@ describe('createSqliteDriver — transactions', () => {
                 ) WITHOUT ROWID;
             `],
         ])
-        const driver = createSqliteDriver({
+        const db = createSqliteDatabase({
             runtimeFolder, version: '8.2.0', schemas,
         })
-        driver.open()
-        return driver
+        db.open()
+        return db
     }
 
     it('transaction(fn) commits on normal return', () => {
-        const driver = makeDriver()
-        const insert = driver.prepare('INSERT INTO catalog_entities (id, data) VALUES (?, ?)')
-        driver.transaction(() => {
+        const db = makeDb()
+        const insert = db.prepare('INSERT INTO catalog_entities (id, data) VALUES (?, ?)')
+        db.transaction(() => {
             insert.run('a', '{}')
             insert.run('b', '{}')
         })
-        const count = driver.prepare('SELECT COUNT(*) AS c FROM catalog_entities').get().c
+        const count = db.prepare('SELECT COUNT(*) AS c FROM catalog_entities').get().c
         assert.equal(count, 2)
-        driver.close()
+        db.close()
         rmSync(runtimeFolder, { recursive: true, force: true })
     })
 
     it('transaction(fn) rolls back on throw', () => {
-        const driver = makeDriver()
-        const insert = driver.prepare('INSERT INTO catalog_entities (id, data) VALUES (?, ?)')
+        const db = makeDb()
+        const insert = db.prepare('INSERT INTO catalog_entities (id, data) VALUES (?, ?)')
         assert.throws(() => {
-            driver.transaction(() => {
+            db.transaction(() => {
                 insert.run('a', '{}')
                 throw new Error('boom')
             })
         }, /boom/)
-        const count = driver.prepare('SELECT COUNT(*) AS c FROM catalog_entities').get().c
+        const count = db.prepare('SELECT COUNT(*) AS c FROM catalog_entities').get().c
         assert.equal(count, 0, 'failed transaction should leave no rows')
-        driver.close()
+        db.close()
         rmSync(runtimeFolder, { recursive: true, force: true })
     })
 
     it('returns the value from fn()', () => {
-        const driver = makeDriver()
-        const out = driver.transaction(() => 42)
+        const db = makeDb()
+        const out = db.transaction(() => 42)
         assert.equal(out, 42)
-        driver.close()
+        db.close()
         rmSync(runtimeFolder, { recursive: true, force: true })
     })
 })

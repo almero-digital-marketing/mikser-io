@@ -1,7 +1,7 @@
-// Sqlite database driver using better-sqlite3. The default driver for
-// mikser's engine-level database substrate. Phase 1 of the
-// engine/database migration — exposes prepare / exec / transaction
-// primitives; subsystem migrations land in later phases.
+// Database implementation: better-sqlite3 with WAL mode, prepared
+// statements, and a sync API for hot paths (catalog findById, refs
+// BFS, manifest collectEdges). Exposes prepare / exec / transaction
+// primitives that subsystems wrap.
 //
 // PRAGMA setup at open():
 //   - WAL: concurrent reads during writes; checkpoint at commit
@@ -13,7 +13,7 @@
 //
 // Schema discipline: each subsystem registers an idempotent CREATE
 // script via the engine-level `registerSchema(name, sql)` API. The
-// driver applies every registered script at open(). `meta.schema_
+// database applies every registered script at open(). `meta.schema_
 // version` catches incompatibility — if the recorded version doesn't
 // match this engine version, open() throws with a clear "run mikser
 // --clear" message.
@@ -24,7 +24,7 @@ import Database from 'better-sqlite3'
 
 const DEFAULT_FILENAME = 'mikser.sqlite'
 
-export function createSqliteDriver({
+export function createSqliteDatabase({
     runtimeFolder, version, logger, config = {}, schemas,
 }) {
     // Resolve the on-disk path. Honor an absolute `config.filename`,
@@ -107,13 +107,12 @@ export function createSqliteDriver({
     }
 
     return {
-        kind: 'sqlite',
         path: dbPath,
         open,
         close,
         get isOpen() { return db !== null },
         // Pass-through primitives for subsystems. They prepare their
-        // own statements at the driver's underlying handle.
+        // own statements at the underlying better-sqlite3 handle.
         prepare(sql) {
             if (!db) throw new Error('Database not open')
             return db.prepare(sql)
@@ -123,9 +122,9 @@ export function createSqliteDriver({
             return db.exec(sql)
         },
         transaction,
-        // Underlying handle — escape hatch for driver-specific work
-        // (PRAGMA tweaks, backup API, etc.). Subsystems should prefer
-        // prepare/exec/transaction.
+        // Underlying better-sqlite3 handle — escape hatch for
+        // PRAGMA tweaks, custom functions, backup API. Subsystems
+        // should prefer prepare/exec/transaction.
         get handle() { return db },
     }
 }
