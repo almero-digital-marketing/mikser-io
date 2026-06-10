@@ -493,38 +493,54 @@ export default ({
         const logger = useLogger()
         const tasks = []
 
-        let entities
-        if (runtime.options.force || !runtime.refs?.inverseClosureOf) {
-            // --force (or missing refs index) — dispatch every render
-            // candidate. The prior implementation called
-            // findEntities({'meta.layout': {$exists:true}}) and then
-            // .filter(e => e.layout), materializing the full layout-
-            // bearing entity slice TWICE (once into the SQL result, once
-            // into the filtered array). At 1M corpus that doubled-up
-            // shape was ~14GB peak.
-            //
-            // Project ids only — `id` is ~50B vs ~7KB for a full entity
-            // body, ~140× smaller. SQL ORDER BY time DESC handles the
-            // sort we'd otherwise do client-side. Then hydrate each id
-            // via findById, dropping the rare meta_layout-set-but-no-
-            // resolved-layout entries on the JS side (layout name
-            // didn't match any layout file; layouts.onProcessed
-            // couldn't attach `.layout`).
-            const db = useDatabase()
-            const ids = db.prepare(`
-                SELECT id FROM mikser_entities
-                WHERE meta_layout IS NOT NULL
-                ORDER BY time DESC
-            `).all().map(r => r.id)
-            entities = []
-            for (const id of ids) {
-                const entity = findById(id)
-                if (entity?.layout) entities.push(entity)
+        // Batched journal flush. tasks accumulate across many entities
+        // (sidecar load, pagination expansion), so cap the in-memory
+        // queue at FLUSH_BATCH and write to the journal in chunks. At
+        // 1M --force the prior shape held the full tasks list in heap
+        // (~10GB); chunked flushing keeps peak constant regardless of
+        // corpus. Each renderEntities call is one journal transaction;
+        // multiple calls land sequentially before onRender fires.
+        const FLUSH_BATCH = 1000
+        async function maybeFlush() {
+            if (tasks.length >= FLUSH_BATCH) {
+                await renderEntities(tasks)
+                tasks.length = 0
             }
-            if (runtime.options.force) {
-                logger.debug('Force rebuild — dispatching all %d entities', entities.length)
+        }
+
+        // Async generator over the entities-to-dispatch. Two shapes
+        // depending on path:
+        //   - --force / no refs: stream layout-bearing ids from SQL
+        //     (ORDER BY time DESC; one-at-a-time findById hydration;
+        //     no entity-array materialization regardless of corpus)
+        //   - incremental: build seeds + closure + opt-outs in JS
+        //     (bounded by graph reachability; typically tens to
+        //     hundreds), sort the small set, yield in order.
+        async function* dispatchSource() {
+            if (runtime.options.force || !runtime.refs?.inverseClosureOf) {
+                // --force path. Project ids only — ~50B vs ~7KB per
+                // full entity body, ~140× smaller. SQL ORDER BY time
+                // DESC handles the sort we'd otherwise do JS-side.
+                // findById hydrates each in turn; entities without a
+                // resolved .layout (meta.layout was set but no layout
+                // file matched) drop here.
+                const db = useDatabase()
+                const ids = db.prepare(`
+                    SELECT id FROM mikser_entities
+                    WHERE meta_layout IS NOT NULL
+                    ORDER BY time DESC
+                `).all().map(r => r.id)
+                if (runtime.options.force) {
+                    logger.debug('Force rebuild — streaming %d candidate entities', ids.length)
+                }
+                for (const id of ids) {
+                    if (signal.aborted) return
+                    const entity = findById(id)
+                    if (entity?.layout) yield entity
+                }
+                return
             }
-        } else {
+
             // Incremental path. Build seed list from journal mutations,
             // walk refs.inverseClosureOf to get the dispatch ids, then
             // findById each one. Crucially: we do NOT materialize the
@@ -568,31 +584,34 @@ export default ({
             // typical site has 0-10 of these, no full scan.
             const optOutEntities = await findEntities({ 'meta.cache': 0 })
 
-            if (seeds.length === 0 && optOutEntities.length === 0) {
-                entities = []
-            } else {
-                const closure = seeds.length ? runtime.refs.inverseClosureOf(seeds) : new Set()
-                // Combine closure ids + opt-out ids into one dispatch set.
-                const dispatchIds = new Set(closure)
-                for (const e of optOutEntities) dispatchIds.add(e.id)
+            if (seeds.length === 0 && optOutEntities.length === 0) return
 
-                // Hydrate each id via findById. LRU cache absorbs
-                // duplicates (refs BFS revisits, partial dispatches
-                // hitting the same layout, etc.). Bounded by closure
-                // size — not by catalog size.
-                entities = []
-                for (const id of dispatchIds) {
-                    const entity = findById(id)
-                    if (entity?.layout) entities.push(entity)
-                }
-                logger.debug('Incremental dispatch: %d seeds + %d opt-outs → %d entities',
-                    seeds.length, optOutEntities.length, entities.length)
+            const closure = seeds.length ? runtime.refs.inverseClosureOf(seeds) : new Set()
+            // Combine closure ids + opt-out ids into one dispatch set.
+            const dispatchIds = new Set(closure)
+            for (const e of optOutEntities) dispatchIds.add(e.id)
+
+            // Hydrate each id via findById. LRU cache absorbs
+            // duplicates (refs BFS revisits, partial dispatches
+            // hitting the same layout, etc.). Bounded by closure
+            // size — not by catalog size. We do materialize this
+            // small set because the sort is intrinsically order-
+            // sensitive — closure walk doesn't preserve time order.
+            const entities = []
+            for (const id of dispatchIds) {
+                const entity = findById(id)
+                if (entity?.layout) entities.push(entity)
+            }
+            entities.sort((a, b) => b.time - a.time)
+            logger.debug('Incremental dispatch: %d seeds + %d opt-outs → %d entities',
+                seeds.length, optOutEntities.length, entities.length)
+            for (const entity of entities) {
+                if (signal.aborted) return
+                yield entity
             }
         }
 
-        entities.sort((a, b) => b.time - a.time)
-
-        for (let original of entities) {
+        for await (const original of dispatchSource()) {
             if (signal.aborted) return
 
             delete original.page
@@ -704,8 +723,10 @@ export default ({
                     })
                 }
             }
+            await maybeFlush()
         }
-        await renderEntities(tasks)
+        // Final flush — drain anything below the FLUSH_BATCH watermark.
+        if (tasks.length) await renderEntities(tasks)
     })
 
     onComplete(async ({ entity, options, output }) => {
