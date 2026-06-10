@@ -221,8 +221,16 @@ export async function setup(options) {
         // cycle's CREATE/UPDATE/DELETE journal entries — RENDER entries
         // are this cycle's work, not the trigger.
         //
-        // - `mutatedRefs` is a Set of ids (and hrefs) — fast membership
-        //   check for layout/partial/$-ref edges.
+        // - `mutatedRefs` is a Map<key, Set<lang|null>>: the keys are
+        //   the ids / hrefs / id-minus-extension forms a refClosure
+        //   entry might target; the values are the set of languages
+        //   that touched that key this cycle (null for entities with
+        //   no meta.lang). The Map shape preserves the fast `.has(key)`
+        //   membership check the existing skip logic relied on AND
+        //   adds language information so multilingual sites don't
+        //   over-invalidate. When a French author entity changes,
+        //   English posts that reference the same /authors/<name>
+        //   href don't re-render — the lang sets disagree.
         // - `currentHashes` carries the current input hash for each
         //   mutated entity. Cold-start file discovery emits CREATE for
         //   every file even when content didn't change; without the
@@ -231,13 +239,14 @@ export async function setup(options) {
         // - `mutatedEntities` carries the entity payloads themselves so
         //   the query-match check can call `sift(filter)` against each
         //   mutation to decide whether a stored query dep is hit.
-        const mutatedRefs = new Set()
+        const mutatedRefs = new Map()
         const currentHashes = new Map()
         const mutatedEntities = new Map()
         for await (let { entity, operation } of useJournal('Manifest mutations', [OPERATION.CREATE, OPERATION.UPDATE, OPERATION.DELETE])) {
             if (!entity?.id) continue
             mutatedEntities.set(entity.id, entity)
             const hash = operation === OPERATION.DELETE ? null : inputHashOf(entity)
+            const lang = entity.meta?.lang ?? null
             // Expand the mutated entity into every form a refClosure
             // entry might target — id, meta.href, AND id-minus-extension
             // — via lookupKeys. Without the stripped form, a refClosure
@@ -250,6 +259,9 @@ export async function setup(options) {
             // use the same extension-tolerant resolution; the manifest
             // layer has to match.
             //
+            // Each key carries the language tag of the mutation so
+            // shouldSkip can constrain by language compatibility.
+            //
             // For DELETE we set `null` as the current hash so manifest.
             // shouldSkip can distinguish "target was deleted from the
             // catalog" from "target wasn't in this cycle's mutations
@@ -257,7 +269,8 @@ export async function setup(options) {
             // refClosure points at a deleted partial/layout would
             // silently skip re-rendering.
             for (const key of lookupKeys(entity)) {
-                mutatedRefs.add(key)
+                if (!mutatedRefs.has(key)) mutatedRefs.set(key, new Set())
+                mutatedRefs.get(key).add(lang)
                 currentHashes.set(key, hash)
             }
         }

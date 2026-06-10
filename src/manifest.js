@@ -253,6 +253,7 @@ export function createManifest(db) {
             if (!snapshot?.inputHash) return false
             if (inputHashOf(entity) !== snapshot.inputHash) return false
             if (!snapshot.refClosure?.length) return true
+            const sourceLang = entity?.meta?.lang ?? null
             for (const entry of snapshot.refClosure) {
                 if (entry.kind === 'query') {
                     if (!entry.filter) return false
@@ -264,6 +265,20 @@ export function createManifest(db) {
                     continue
                 }
                 if (!mutatedRefs?.has(entry.target)) continue
+                // Language scope: if the source has a meta.lang AND the
+                // mutation came from a different meta.lang, the ref
+                // doesn't actually depend on what changed. A `null` lang
+                // in the mutation set means a shared (un-localized)
+                // entity touched the same key — that does invalidate
+                // language-specific sources because the shared entity
+                // is the only variant. Sources without a meta.lang are
+                // language-agnostic and accept any mutation lang.
+                if (sourceLang) {
+                    const mutatedLangs = mutatedRefs.get(entry.target)
+                    if (mutatedLangs && !mutatedLangs.has(sourceLang) && !mutatedLangs.has(null)) {
+                        continue
+                    }
+                }
                 if (!entry.hash) return false
                 const currentHash = currentHashes?.get(entry.target)
                 if (currentHash === undefined) continue
