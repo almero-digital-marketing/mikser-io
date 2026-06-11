@@ -119,4 +119,9 @@ test/fixture/resources/
 # Claude Code
 .claude/
 
-.DS_Storeruntime/
+# macOS Finder
+.DS_Store
+
+# Engine-owned runtime state in test/perf and any working folder used
+# for local mikser runs from this repo root
+runtime/
