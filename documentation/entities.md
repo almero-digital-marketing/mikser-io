@@ -227,7 +227,11 @@ const blogPosts = await findEntities({ collection: 'documents', format: 'md' })
 // Find with a function — runs JS-side against the full scan
 const recent = await findEntities(e => e.meta?.date > '2024-01-01')
 
-// Find all entities (no query = return all)
+// Find all entities (no query = return all). This works, but inside a
+// render's queryContext (sidecar load(), template helpers) it records a
+// null query dep that conservatively invalidates on every mutation.
+// The engine warns when this happens. For "all renderable entities"
+// use the more precise shape below instead.
 const everything = await findEntities()
 
 // Streaming variant — yields entities one at a time, seek-paginated.
@@ -241,6 +245,62 @@ const { entities, total } = await queryEntities(
   { collection: 'documents' },
   { sort: { 'meta.date': -1 }, limit: 20, expand: ['$author'] }
 )
+```
+
+### Query filters and incremental invalidation
+
+Inside a render's `queryContext` (sidecar `load()`, template helpers, anything inside `runtime.process()`), every `findEntities` / `iterateEntities` / `queryEntities` call records its filter into the rendered entity's `refClosure`. On the next cycle, `manifest.shouldSkip` and `manifest.queryAffected` sift-match each filter against this cycle's mutated entities — if anything matches, the aggregate re-renders.
+
+That means **the filter you write determines what invalidates your aggregate.** Two anti-patterns to avoid:
+
+```js
+// Filter-after-fetch — null filter recorded, invalidates on EVERY mutation
+const all = await findEntities()
+const posts = all.filter(e => e.meta?.layout === 'post')
+
+// Same shape with JS predicate — also records as null
+const recent = await findEntities(e => e.meta?.date > '2024-01-01')
+```
+
+The engine surfaces a one-time warning per offending entity when this happens. Fix by pushing the filter into the query:
+
+```js
+// Posts only — invalidates only when entities with meta.layout='post' change
+const posts = await findEntities({ 'meta.layout': 'post' })
+
+// All renderable entities — for a true sitemap; invalidates only on
+// changes to entities that produce output, not on files / assets / etc.
+const sitemap = await findEntities({ 'meta.href': { $exists: true } })
+
+// Combined indexed scope — pushes down to SQL
+const recent = await findEntities({
+  collection: 'documents',
+  type: 'document',
+  format: 'md',
+})
+```
+
+Indexed columns that push down (other clauses fall through to JS-side sift over the materialized subset):
+
+| column | filter shape | typical use |
+|---|---|---|
+| `id` | `{id: '/path/to/entity'}` | direct lookup |
+| `collection` | `{collection: 'documents'}` | scope by source type |
+| `type` | `{type: 'document'}` | scope by semantic type |
+| `format` | `{format: 'md'}` | scope by file extension |
+| `name` | `{name: 'index'}` | name match |
+| `meta.href` | `{'meta.href': {$exists: true}}` | renderable-only scope |
+| `meta.layout` | `{'meta.layout': 'post'}` | layout-keyed scope |
+| `meta.lang` | `{'meta.lang': 'en'}` | language scope |
+| `meta.cache` | `{'meta.cache': 0}` | the cache opt-out partition |
+| `time` | `{time: {$gt: 1700000000000}}` | recency |
+| `uri` | `{uri: {$regex: '...'}}` | path patterns |
+
+For relationship-driven aggregates ("all posts by Dick"), prefer the refs index over a query — the closure walk handles invalidation precisely without recording a query dep at all:
+
+```js
+const postIds = runtime.refs.inboundFor('/authors/dick.yml')
+const posts = postIds.map(id => findEntity({ id }))
 ```
 
 ### Catalog in Plugins / Render Templates

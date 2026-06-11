@@ -61,8 +61,10 @@ describe('null-filter query warning', () => {
         assert.equal(code, 0, combined)
         assert.match(combined, /findEntities.+called with no filter from \/documents\/index\.html/,
             `expected the null-filter warning to surface naming the rendering entity\n${combined}`)
-        assert.match(combined, /Narrow the call/,
-            `expected the warning to include actionable guidance\n${combined}`)
+        assert.match(combined, /meta\.href.+\$exists/,
+            `expected the warning to surface the "all renderable entities" pattern\n${combined}`)
+        assert.match(combined, /indexed column/,
+            `expected the warning to point at indexed columns as the right shape\n${combined}`)
     })
 
     it('warning is suppressed once the sidecar narrows the call', async () => {

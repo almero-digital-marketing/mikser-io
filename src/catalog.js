@@ -98,7 +98,7 @@ function recordQuery(filter) {
             _warnedNullFilter.add(ctx.entityId)
             const logger = useLogger()
             logger?.warn(
-                'findEntities()/iterateEntities() called with no filter from %s — the recorded query dep matches every mutation. Narrow the call (e.g. findEntities({collection: \'documents\', type: \'document\'})) so the manifest only invalidates this render when relevant entities actually change.',
+                'findEntities()/iterateEntities() called with no filter from %s — recorded query dep invalidates on every mutation. For "all renderable entities" use findEntities({"meta.href": {$exists: true}}). For narrower scopes use any indexed column ({collection, type, format, "meta.layout", "meta.lang"}); pushing the filter into SQL keeps invalidation precise.',
                 ctx.entityId,
             )
         }
