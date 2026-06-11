@@ -410,7 +410,20 @@ export async function setup(options) {
                             sidecarQueries: context?.sidecarQueries,
                         })
                         entry.deps = edges
-                        runtime.refs?.replaceDynamic(entity.id, edges)
+                        // Pagination produces synthetic pageEntities
+                        // (index.2.html, index.3.html, ...) whose ids
+                        // are NOT in mikser_entities — they exist only
+                        // at render time. Roll their dynamic refs up to
+                        // entity.parent (set by layouts.onBeforeRender
+                        // for pages 2+) so the mikser_refs FK to
+                        // mikser_entities holds. The parent's own
+                        // render also writes to the same source_id;
+                        // INSERT OR IGNORE in stmtInsertEdge handles the
+                        // dedup across pages. Invalidation re-dispatches
+                        // the parent and the pagination expansion
+                        // produces the children from there, so granular
+                        // per-page refs aren't needed.
+                        runtime.refs?.replaceDynamic(entity.parent ?? entity.id, edges)
                         await runtime.complete(entry)
                         await updateEntry({ id, output: entry.output, deps: edges })
                     }
