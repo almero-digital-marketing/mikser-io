@@ -25,7 +25,7 @@
 // version, open() throws with a clear "run mikser --clear" message.
 
 import path from 'node:path'
-import { mkdirSync, unlinkSync } from 'node:fs'
+import { mkdirSync, unlinkSync, existsSync } from 'node:fs'
 import Database from 'better-sqlite3'
 import runtime from '../runtime.js'
 import { onLoaded } from '../lifecycle.js'
@@ -49,17 +49,37 @@ const DEFAULT_FILENAME = 'mikser.sqlite'
 // vector_documents in mikser-io-vector).
 const schemas = new Map()
 
-// Extension loaders registered by plugins. Functions of (handle) that
-// load a sqlite runtime extension (e.g. sqlite-vec's vec0 virtual table
-// module) into the connection. Called between db creation and schema
-// apply on every open — so the schema validator can resolve any
-// virtual-table references and so per-cycle prepared statements don't
-// fail with "no such module: <ext>" after the first open.
+// Provisioning callbacks registered by plugins. Run on every open(),
+// between the raw `new Database(dbPath)` (with PRAGMAs + meta bootstrap)
+// and the schema apply pass. Each callback receives a context object:
 //
-// Plugins register these at module-eval time the same way they
-// registerSchema. Order doesn't matter as long as the loader runs
-// before any prepare against tables that use the extension.
-const extensions = []
+//   {
+//     firstRun:        boolean — db file didn't exist before this open
+//                                (or :memory:, or was wiped by --clear /
+//                                schema mismatch)
+//     upgraded:        boolean — stored schema_version differed from
+//                                current (db was just wiped + recreated)
+//     previousVersion: string | null — the version stamp we found before
+//                                       this open, null if firstRun
+//     currentVersion:  string — what this mikser binary expects
+//     handle:          Database — the raw better-sqlite3 handle, for
+//                                 loadExtension / collations / custom
+//                                 functions / one-time data seeding
+//     logger:          pino|null — for surfacing user-visible setup events
+//   }
+//
+// Use cases:
+//   - Load runtime extensions before they're referenced by schemas
+//     (sqlite-vec's vec0 module is the canonical example)
+//   - Register custom collations, application_id, etc.
+//   - First-run data seeding (use `if (ctx.firstRun)` to gate)
+//   - Upgrade-time data migrations (gate on `ctx.upgraded` and check
+//     `ctx.previousVersion`)
+//
+// Plugins register at module-eval time, same shape as registerSchema.
+// Order doesn't matter unless callbacks depend on each other; if you
+// have such a dep, both should be in the same plugin.
+const provisioners = []
 
 // Active database handle. Set during the first onLoaded; persists across
 // cycles (sqlite stays open for the lifetime of the process). Public API
@@ -114,30 +134,50 @@ export function registerSchema(name, sqlScript) {
     }
 }
 
-// Register a sqlite runtime-extension loader. `loader(handle)` runs on
-// every open(), between the raw `new Database(dbPath)` and the schema
-// apply pass. This is the only safe spot for a plugin to install
-// virtual-table modules (sqlite-vec's vec0, sqlite-spellfix, etc.) —
-// after this point, schema validation can resolve any references and
-// every subsequent prepare against tables that use the extension works.
+// Register a database-provisioning callback. Fires once per open(),
+// AFTER PRAGMAs and the mikser_meta bootstrap (so version detection
+// and the schema-mismatch wipe have already happened) and BEFORE
+// schema apply (so callbacks can install virtual-table modules,
+// register collations, etc. that the schemas about to apply may
+// reference).
 //
-// Plugins register at module-eval time, the same shape registerSchema
-// uses. Lazy-applies immediately if the database is already open
-// (matches registerSchema's late-registration semantics).
+// Callback receives a context object with everything needed to act
+// situationally:
 //
-// Example (mikser-io-vector):
-//   import * as sqliteVec from 'sqlite-vec'
-//   import { loadExtension, registerSchema } from 'mikser-io'
+//   onProvision(({ firstRun, upgraded, previousVersion, currentVersion, handle, logger }) => {
+//       // Install runtime extensions on every open:
+//       sqliteVec.load(handle)
 //
-//   loadExtension(handle => sqliteVec.load(handle))
-//   registerSchema('mikser_vector_essays', '... USING vec0(...) ...')
-export function loadExtension(loader) {
-    if (typeof loader !== 'function') {
-        throw new Error('loadExtension: loader must be a function (handle) => void')
+//       // Seed default data on first run only:
+//       if (firstRun) {
+//           handle.exec("INSERT INTO mikser_meta (key, value) VALUES ('site_id', '...')")
+//       }
+//
+//       // Migrate after a specific upgrade:
+//       if (upgraded && previousVersion?.startsWith('8.2')) {
+//           handle.exec("UPDATE my_plugin_table SET ...")
+//       }
+//   })
+//
+// Plugins register at module-eval time, same shape as registerSchema.
+// Lazy-applies on the live handle if the database is already open
+// (matches registerSchema's late-registration semantics) — the
+// callback fires with firstRun=false, upgraded=false (since the open
+// already happened cleanly), and the live handle.
+export function onProvision(callback) {
+    if (typeof callback !== 'function') {
+        throw new Error('onProvision: callback must be a function (ctx) => void')
     }
-    extensions.push(loader)
+    provisioners.push(callback)
     if (db?.isOpen) {
-        loader(db.handle)
+        callback({
+            firstRun: false,
+            upgraded: false,
+            previousVersion: db.provisioning?.currentVersion ?? null,
+            currentVersion: db.provisioning?.currentVersion ?? null,
+            handle: db.handle,
+            logger: runtime.engine?.logger ?? null,
+        })
     }
 }
 
@@ -157,8 +197,12 @@ export function useDatabase() {
 // the full onLoaded chain). The runtime path uses this internally from
 // onLoaded below.
 export function createSqliteDatabase({
-    runtimeFolder, version, logger, config = {}, schemas,
+    runtimeFolder, version, logger, config = {}, schemas, provisioners: provisionersArg,
 }) {
+    // Tests inject their own provisioners; the runtime path falls
+    // through to the module-level `provisioners` array that plugins
+    // populate via onProvision() at module-eval.
+    const provisionersToRun = provisionersArg ?? provisioners
     // Resolve the on-disk path. Honor an absolute `config.filename`,
     // otherwise resolve relative to the runtime folder. `:memory:`
     // works for tests — better-sqlite3 treats it as ephemeral.
@@ -171,6 +215,11 @@ export function createSqliteDatabase({
             : path.join(runtimeFolder, DEFAULT_FILENAME)
 
     let handle = null
+    // Provisioning context exposed on the returned wrapper so any code
+    // with a handle (catalog onLoaded, plugin onLoaded, etc.) can ask
+    // "was this open a fresh db / a version upgrade / a normal cycle?"
+    // without subscribing to onProvision.
+    let provisioningCtx = null
 
     function open() {
         if (handle) return  // idempotent — caller may invoke twice across cycles
@@ -178,6 +227,10 @@ export function createSqliteDatabase({
         if (dbPath !== ':memory:') {
             mkdirSync(path.dirname(dbPath), { recursive: true })
         }
+
+        // Detect firstRun BEFORE we touch the filesystem. :memory:
+        // always counts as firstRun (no persistence across opens).
+        const fileExistedBeforeOpen = dbPath !== ':memory:' && existsSync(dbPath)
 
         const setupConnection = () => {
             handle.exec('PRAGMA journal_mode = WAL')
@@ -189,19 +242,6 @@ export function createSqliteDatabase({
                     value TEXT NOT NULL
                 )
             `)
-            // Load registered runtime extensions (sqlite-vec etc.)
-            // before anything else touches the schema. Without this,
-            // a connection that opens a file containing virtual tables
-            // whose backing module isn't loaded fails the schema
-            // validator on the first prepare against ANY table —
-            // including unrelated ones like mikser_entities.
-            for (const loader of extensions) {
-                try {
-                    loader(handle)
-                } catch (err) {
-                    throw new Error(`Database extension loader failed: ${err.message}`)
-                }
-            }
         }
 
         handle = new Database(dbPath)
@@ -209,6 +249,7 @@ export function createSqliteDatabase({
 
         const recorded = handle.prepare('SELECT value FROM mikser_meta WHERE key = ?')
             .get('schema_version')?.value
+        let upgradedFromVersion = null
         if (recorded && recorded !== version) {
             // Schema mismatch on upgrade or downgrade. Per ADR-0002 the
             // files on disk are the source of truth and this database
@@ -236,11 +277,41 @@ export function createSqliteDatabase({
                 }
             }
 
+            upgradedFromVersion = recorded
             handle = new Database(dbPath)
             setupConnection()
         }
         handle.prepare('INSERT OR REPLACE INTO mikser_meta (key, value) VALUES (?, ?)')
             .run('schema_version', version)
+
+        // Build provisioning context. firstRun is true when the file
+        // didn't exist before this open OR when the schema mismatch
+        // wiped it (and the previous open's stamp is gone) — both shapes
+        // present an empty-state database to provisioners.
+        provisioningCtx = {
+            firstRun: !fileExistedBeforeOpen || upgradedFromVersion !== null,
+            upgraded: upgradedFromVersion !== null,
+            previousVersion: upgradedFromVersion,
+            currentVersion: version,
+            handle,
+            logger: logger ?? null,
+        }
+
+        // Fire provisioning callbacks before schema apply, so they can
+        // load runtime extensions (sqlite-vec's vec0, etc.) that the
+        // schemas about to apply might reference, register custom
+        // collations, or do first-run / upgrade work that needs to
+        // happen before the engine tables exist.
+        for (const provision of provisionersToRun) {
+            try {
+                provision(provisioningCtx)
+            } catch (err) {
+                handle.close()
+                handle = null
+                provisioningCtx = null
+                throw new Error(`onProvision callback failed: ${err.message}`)
+            }
+        }
 
         // Apply each subsystem's registered schema script. Idempotent
         // CREATE statements mean replay-safe across opens.
@@ -251,6 +322,7 @@ export function createSqliteDatabase({
             } catch (err) {
                 handle.close()
                 handle = null
+                provisioningCtx = null
                 throw new Error(`Schema "${name}" failed to apply: ${err.message}`)
             }
         }
@@ -278,6 +350,12 @@ export function createSqliteDatabase({
         open,
         close,
         get isOpen() { return handle !== null },
+        // Provisioning context from the most recent open. Plugins'
+        // onLoaded handlers can read this without subscribing to
+        // onProvision — useful when the work needs the catalog or
+        // refs schemas to exist first (which onProvision callbacks
+        // can't assume because they fire before schema apply).
+        get provisioning() { return provisioningCtx },
         // Pass-through primitives for subsystems. They prepare their
         // own statements at the underlying better-sqlite3 handle.
         prepare(sql) {
