@@ -14,11 +14,23 @@ export async function createEntity(entity) {
     }
 }
 
-export async function deleteEntity({ id, collection, type }) {
+// deleteEntity accepts either a minimal { id, type, collection }
+// payload or a full entity. The full-entity form is preferred when
+// the caller has it on hand (source.sweepDeleted does — it just
+// findById'd the entity to compute the deletion), because the
+// manifest's query-affected dispatch (and any downstream sift-based
+// invalidation) can only match against the entity's actual fields.
+// A minimal {id,type,collection} still works for backwards
+// compatibility but query deps on fields not in that triple
+// (format, meta.*, name, etc.) won't fire.
+export async function deleteEntity(payload) {
     const logger = useLogger()
-    const entry = { operation: OPERATION.DELETE, entity: { id, type, collection } }
+    const entity = payload?.id
+        ? payload   // accept full entity payload as-is
+        : { id: payload?.id, type: payload?.type, collection: payload?.collection }
+    const entry = { operation: OPERATION.DELETE, entity }
     if (await runtime.validate(entry)) {
-        logger.debug('Delete %s entity: %s %s', collection, type, id)
+        logger.debug('Delete %s entity: %s %s', entity.collection, entity.type, entity.id)
         await addEntry(entry)
     }
 }

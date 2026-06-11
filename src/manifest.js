@@ -232,6 +232,15 @@ export function createManifest(db) {
           AND json_extract(value, '$.hash')   IS NOT NULL
         GROUP BY json_extract(value, '$.target')
     `)
+    // Snapshots whose refClosure contains at least one query dep. The
+    // LIKE pre-filter is cheap (JSON column scan with no parse) and
+    // narrows down to the small set of aggregate-layout renders.
+    // queryAffected then JSON.parses just those rows and sift-matches
+    // each query filter against each mutated entity.
+    const stmtSnapshotsWithQuery = db.prepare(`
+        SELECT id, refClosure FROM mikser_snapshots
+        WHERE refClosure LIKE '%"kind":"query"%'
+    `)
 
     const manifest = {
         // Look up a previously-recorded entry by entity (or by an
@@ -291,6 +300,45 @@ export function createManifest(db) {
         // Record a successful render. Single INSERT OR REPLACE.
         record(entity, deps) {
             stmtUpsert.run(snapToRow(buildSnapshot(entity, deps)))
+        },
+
+        // Return the set of entity ids whose recorded snapshots have a
+        // query dep that matches any of the cycle's mutated entities.
+        // The static-ref closure walk (refs.inverseClosureOf) only finds
+        // entities reachable via $-keyed edges in mikser_refs; aggregate
+        // layouts that depend on findEntities(...) results need this
+        // second-pass dispatch hint.
+        //
+        // Cheap when there are no aggregate layouts (LIKE pre-filter
+        // returns no rows). Cost scales with (snapshots-with-query) ×
+        // (mutated-entities), both typically small.
+        queryAffected(mutatedEntities) {
+            const affected = new Set()
+            if (!mutatedEntities?.size) return affected
+            for (const row of stmtSnapshotsWithQuery.iterate()) {
+                const refClosure = row.refClosure ? JSON.parse(row.refClosure) : []
+                let hit = false
+                for (const entry of refClosure) {
+                    if (entry.kind !== 'query') continue
+                    if (!entry.filter) {
+                        // Null filter = unserializable predicate captured
+                        // at render time. Conservative: invalidate on any
+                        // mutation.
+                        hit = true
+                        break
+                    }
+                    const matcher = sift(entry.filter)
+                    for (const mutated of mutatedEntities.values()) {
+                        if (matcher(mutated)) {
+                            hit = true
+                            break
+                        }
+                    }
+                    if (hit) break
+                }
+                if (hit) affected.add(row.id)
+            }
+            return affected
         },
 
         // Drop all snapshots owned by entity id (direct outputs and any

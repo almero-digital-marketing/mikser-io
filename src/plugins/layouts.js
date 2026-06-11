@@ -565,12 +565,24 @@ export default ({
             // typical site has 0-10 of these, no full scan.
             const optOutEntities = await findEntities({ 'meta.cache': 0 })
 
-            if (seeds.length === 0 && optOutEntities.length === 0) return
+            // Query-dep affected snapshots: aggregate layouts that
+            // depend on findEntities(...) instead of static $-refs need
+            // a second-pass dispatch hint. manifest.queryAffected walks
+            // every snapshot whose refClosure contains a `query` entry
+            // and sift-matches the recorded filter against the cycle's
+            // mutated entities. Bounded by snapshots-with-query (small
+            // — index pages, sitemaps, RSS) × seeds.
+            const mutatedEntities = new Map(seeds.map(s => [s.id, s]))
+            const queryAffected = runtime.manifest?.queryAffected(mutatedEntities) ?? new Set()
+
+            if (seeds.length === 0 && optOutEntities.length === 0 && queryAffected.size === 0) return
 
             const closure = seeds.length ? runtime.refs.inverseClosureOf(seeds) : new Set()
-            // Combine closure ids + opt-out ids into one dispatch set.
+            // Combine closure ids + opt-out ids + query-affected ids
+            // into one dispatch set.
             const dispatchIds = new Set(closure)
             for (const e of optOutEntities) dispatchIds.add(e.id)
+            for (const id of queryAffected) dispatchIds.add(id)
 
             // Hydrate each id via findById. LRU cache absorbs
             // duplicates (refs BFS revisits, partial dispatches
@@ -700,7 +712,16 @@ export default ({
                             postprocessor: entity.layout.postprocessor,
                             tasks: entity.meta?.task || TASKS.INLINE
                         },
-                        context: { data, plugins }
+                        // sidecarQueries threads the sidecar load()'s
+                        // findEntities calls into manifest.collectEdges
+                        // as `{kind: 'query', filter}` refClosure entries.
+                        // Without it, aggregate layouts that don't
+                        // paginate (sitemap.xml, index pages, RSS feeds)
+                        // lose query-dep tracking and never invalidate
+                        // when matching entities are added/modified/
+                        // deleted. The paginated branch above already
+                        // does this.
+                        context: { data, plugins, sidecarQueries: sidecarTrack.queries }
                     })
                 }
             }

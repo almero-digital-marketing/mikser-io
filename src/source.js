@@ -351,7 +351,12 @@ export function useSource(core, options) {
         }, { concurrency: SCAN_CONCURRENCY })
 
         scanStats.deleted = await sweepDeleted(collection, scanned, async (e) => {
-            await deleteEntity({ id: e.id, type, collection })
+            // Pass the full entity (e is hydrated from catalog by
+            // sweepDeleted) so the manifest's query-affected dispatch
+            // can sift-match aggregate-layout filters against the
+            // actual fields (format, meta.layout, etc.). Minimal
+            // {id,type,collection} would miss those filters.
+            await deleteEntity(e)
             logger.debug('%s removed (file gone): %s', collection, e.name)
         })
 
