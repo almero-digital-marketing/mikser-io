@@ -119,4 +119,4 @@ test/fixture/resources/
 # Claude Code
 .claude/
 
-.DS_Store
+.DS_Storeruntime/
