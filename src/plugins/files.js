@@ -1,6 +1,8 @@
 import path from 'node:path'
 import { mkdir, symlink, unlink, lstat, realpath } from 'fs/promises'
 import { globby } from 'globby'
+import pMap from 'p-map'
+import { checksumsByCollection } from '../catalog.js'
 
 export default ({
     runtime,
@@ -125,25 +127,44 @@ export default ({
 
         const paths = await globby('**/*', { cwd: runtime.options.filesFolder })
         trackProgress('Files import', paths.length)
-        return Promise.all(paths.map(async relativePath => {
+        // Bulk-prefetch the catalog's existing (id → checksum) map for
+        // this collection once at scan start, so the gate below reads
+        // from it per-file instead of doing per-file SQL lookups. Same
+        // pattern source.js uses for documents/layouts via useSource.
+        // Without this gate the plugin re-emitted createEntity on every
+        // cycle for every file regardless of changes, inflating the
+        // journal with phantom mutations and triggering downstream
+        // re-dispatch of aggregate layouts whose recorded query deps
+        // matched the collection.
+        const priorChecksums = checksumsByCollection(collection)
+        await pMap(paths, async relativePath => {
             const { uri, source } = await ensureLink(relativePath)
             let name = relativePath
             if (runtime.config.files?.outputFolder) {
                 name = path.join(runtime.config.files.outputFolder, relativePath)
             }
+            const id = path.join(`/${collection}`, relativePath)
+            const newChecksum = await checksum(source)
+            updateProgress()
+            // Gate: if the catalog already has this entity with the same
+            // checksum, the file hasn't changed since the last cycle.
+            // Skip emitting a CREATE — the catalog row stays correct,
+            // the journal stays accurate (mutations = actual changes),
+            // and downstream aggregate-layout invalidation isn't fired
+            // spuriously.
+            if (priorChecksums.get(id) === newChecksum) return
             await createEntity({
-                id: path.join(`/${collection}`, relativePath),
+                id,
                 uri,
                 collection,
                 type,
                 format: path.extname(relativePath).substring(1).toLowerCase(),
                 name,
                 source,
-                checksum: await checksum(source),
-                link: await link(source)
+                checksum: newChecksum,
+                link: await link(source),
             })
-            updateProgress()
-        }))
+        }, { concurrency: 16 })
     })
 
     return {
