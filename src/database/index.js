@@ -49,6 +49,18 @@ const DEFAULT_FILENAME = 'mikser.sqlite'
 // vector_documents in mikser-io-vector).
 const schemas = new Map()
 
+// Extension loaders registered by plugins. Functions of (handle) that
+// load a sqlite runtime extension (e.g. sqlite-vec's vec0 virtual table
+// module) into the connection. Called between db creation and schema
+// apply on every open — so the schema validator can resolve any
+// virtual-table references and so per-cycle prepared statements don't
+// fail with "no such module: <ext>" after the first open.
+//
+// Plugins register these at module-eval time the same way they
+// registerSchema. Order doesn't matter as long as the loader runs
+// before any prepare against tables that use the extension.
+const extensions = []
+
 // Active database handle. Set during the first onLoaded; persists across
 // cycles (sqlite stays open for the lifetime of the process). Public API
 // readers see null only before the first onLoaded fires.
@@ -102,6 +114,33 @@ export function registerSchema(name, sqlScript) {
     }
 }
 
+// Register a sqlite runtime-extension loader. `loader(handle)` runs on
+// every open(), between the raw `new Database(dbPath)` and the schema
+// apply pass. This is the only safe spot for a plugin to install
+// virtual-table modules (sqlite-vec's vec0, sqlite-spellfix, etc.) —
+// after this point, schema validation can resolve any references and
+// every subsequent prepare against tables that use the extension works.
+//
+// Plugins register at module-eval time, the same shape registerSchema
+// uses. Lazy-applies immediately if the database is already open
+// (matches registerSchema's late-registration semantics).
+//
+// Example (mikser-io-vector):
+//   import * as sqliteVec from 'sqlite-vec'
+//   import { loadExtension, registerSchema } from 'mikser-io'
+//
+//   loadExtension(handle => sqliteVec.load(handle))
+//   registerSchema('mikser_vector_essays', '... USING vec0(...) ...')
+export function loadExtension(loader) {
+    if (typeof loader !== 'function') {
+        throw new Error('loadExtension: loader must be a function (handle) => void')
+    }
+    extensions.push(loader)
+    if (db?.isOpen) {
+        loader(db.handle)
+    }
+}
+
 // Return the active database handle. Hot-path callers (catalog, refs,
 // manifest) should cache the reference once at onLoaded rather than
 // calling per-operation.
@@ -150,6 +189,19 @@ export function createSqliteDatabase({
                     value TEXT NOT NULL
                 )
             `)
+            // Load registered runtime extensions (sqlite-vec etc.)
+            // before anything else touches the schema. Without this,
+            // a connection that opens a file containing virtual tables
+            // whose backing module isn't loaded fails the schema
+            // validator on the first prepare against ANY table —
+            // including unrelated ones like mikser_entities.
+            for (const loader of extensions) {
+                try {
+                    loader(handle)
+                } catch (err) {
+                    throw new Error(`Database extension loader failed: ${err.message}`)
+                }
+            }
         }
 
         handle = new Database(dbPath)
