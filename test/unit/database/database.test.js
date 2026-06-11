@@ -106,24 +106,49 @@ describe('createSqliteDatabase — schema and lifecycle', () => {
         rmSync(runtimeFolder, { recursive: true, force: true })
     })
 
-    it('throws on schema_version mismatch with "run mikser --clear" hint', () => {
+    it('on schema_version mismatch: wipes the cache and re-stamps the new version', () => {
+        // ADR-0002: files are the source of truth, the database is a
+        // derived cache. Schema mismatch on upgrade/downgrade is
+        // recoverable — wipe the cache, re-stamp the new version,
+        // continue. The next cycle rebuilds from source.
         const db1 = createSqliteDatabase({
             runtimeFolder,
             version: '8.2.0',
-            schemas: new Map(),
+            schemas: new Map([
+                ['sentinel', 'CREATE TABLE IF NOT EXISTS sentinel (id TEXT PRIMARY KEY)'],
+            ]),
         })
         db1.open()
+        db1.prepare('INSERT INTO sentinel (id) VALUES (?)').run('marker')
         db1.close()
 
+        const warnings = []
         const db2 = createSqliteDatabase({
             runtimeFolder,
             version: '9.0.0',
-            schemas: new Map(),
+            schemas: new Map([
+                ['sentinel', 'CREATE TABLE IF NOT EXISTS sentinel (id TEXT PRIMARY KEY)'],
+            ]),
+            logger: { warn: (...args) => warnings.push(args), debug: () => {} },
         })
-        assert.throws(
-            () => db2.open(),
-            /Database schema is 8\.2\.0; this mikser-io expects 9\.0\.0.*mikser --clear/,
-        )
+        db2.open()
+
+        // No throw. Cache wiped: sentinel marker row is gone (table
+        // was recreated empty by the schema apply on reopen).
+        const survivors = db2.prepare('SELECT id FROM sentinel').all()
+        assert.deepEqual(survivors, [], 'cache should be empty after wipe')
+
+        // New version is stamped.
+        const stamp = db2.prepare('SELECT value FROM mikser_meta WHERE key = ?').get('schema_version')
+        assert.equal(stamp?.value, '9.0.0')
+
+        // Warning surfaced.
+        assert.equal(warnings.length, 1, 'expected exactly one warning')
+        const msg = warnings[0].join(' ')
+        assert.match(msg, /schema mismatch/i)
+        assert.match(msg, /files are the source of truth/i)
+
+        db2.close()
         rmSync(runtimeFolder, { recursive: true, force: true })
     })
 

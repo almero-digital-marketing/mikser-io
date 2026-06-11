@@ -25,7 +25,7 @@
 // version, open() throws with a clear "run mikser --clear" message.
 
 import path from 'node:path'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, unlinkSync } from 'node:fs'
 import Database from 'better-sqlite3'
 import runtime from '../runtime.js'
 import { onLoaded } from '../lifecycle.js'
@@ -140,30 +140,52 @@ export function createSqliteDatabase({
             mkdirSync(path.dirname(dbPath), { recursive: true })
         }
 
+        const setupConnection = () => {
+            handle.exec('PRAGMA journal_mode = WAL')
+            handle.exec('PRAGMA synchronous = NORMAL')
+            handle.exec('PRAGMA foreign_keys = ON')
+            handle.exec(`
+                CREATE TABLE IF NOT EXISTS mikser_meta (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+            `)
+        }
+
         handle = new Database(dbPath)
-
-        handle.exec('PRAGMA journal_mode = WAL')
-        handle.exec('PRAGMA synchronous = NORMAL')
-        handle.exec('PRAGMA foreign_keys = ON')
-
-        // meta table always exists — holds the schema_version stamp
-        // and any future engine-wide key/value state.
-        handle.exec(`
-            CREATE TABLE IF NOT EXISTS mikser_meta (
-                key   TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            )
-        `)
+        setupConnection()
 
         const recorded = handle.prepare('SELECT value FROM mikser_meta WHERE key = ?')
             .get('schema_version')?.value
         if (recorded && recorded !== version) {
+            // Schema mismatch on upgrade or downgrade. Per ADR-0002 the
+            // files on disk are the source of truth and this database
+            // is a derived cache, so the right behavior is to wipe the
+            // cache and let the next cycle rebuild it from source —
+            // not to halt the build with an error.
+            //
+            // Loud warning so operators can see it happened and know to
+            // expect a cold-start rebuild on this run. No data loss
+            // beyond the cache itself; everything in mikser.sqlite is
+            // recoverable from the working folder.
+            logger?.warn(
+                'Database schema mismatch: stored=%s, current=%s. Wiping the cache and rebuilding from sources (files are the source of truth — no source data is affected).',
+                recorded, version,
+            )
             handle.close()
             handle = null
-            throw new Error(
-                `Database schema is ${recorded}; this mikser-io expects ${version}. ` +
-                `Run \`mikser --clear\` to rebuild from sources.`,
-            )
+
+            if (dbPath !== ':memory:') {
+                // sqlite WAL leaves -wal and -shm sidecar files. Remove
+                // them along with the main file so the next open starts
+                // from a guaranteed-clean slate.
+                for (const suffix of ['', '-wal', '-shm']) {
+                    try { unlinkSync(dbPath + suffix) } catch { /* file may not exist */ }
+                }
+            }
+
+            handle = new Database(dbPath)
+            setupConnection()
         }
         handle.prepare('INSERT OR REPLACE INTO mikser_meta (key, value) VALUES (?, ?)')
             .run('schema_version', version)

@@ -152,20 +152,25 @@ describe('catalog cache invalidation', () => {
         await runMikser(workdir) // populate catalog + manifest
     })
 
-    it('schema-version mismatch — mikser exits with a clear "run --clear" message', async () => {
-        // Tweak the persisted schema version stamp directly. The
-        // database substrate refuses to open with a mismatched
-        // version — by design, no silent recovery — and the engine
-        // exits non-zero with a message the user can act on.
+    it('schema-version mismatch — mikser warns, wipes the cache, and rebuilds from sources', async () => {
+        // Tweak the persisted schema version stamp directly. ADR-0002
+        // says files are the source of truth; the database is a derived
+        // cache. So a schema mismatch is recoverable: warn loudly, wipe
+        // the cache, let the next cycle rebuild from source. No error,
+        // no manual --clear needed.
         const { default: Database } = await import('better-sqlite3')
         const db = new Database(path.join(workdir, 'runtime/mikser.sqlite'))
         db.prepare('INSERT OR REPLACE INTO mikser_meta (key, value) VALUES (?, ?)').run('schema_version', '0.0.0-test')
         db.close()
 
         const { code, combined } = await runMikser(workdir)
-        assert.notEqual(code, 0, 'mikser should exit non-zero on version mismatch')
-        assert.match(combined, /Database schema is 0\.0\.0-test/)
-        assert.match(combined, /mikser --clear/)
+        assert.equal(code, 0, 'mikser should exit 0 — schema mismatch is recoverable from sources')
+        assert.match(combined, /schema mismatch/i,
+            `expected the warning to surface the mismatch\n${combined}`)
+        assert.match(combined, /stored=0\.0\.0-test/,
+            `expected the warning to name the stored version\n${combined}`)
+        assert.match(combined, /files are the source of truth/i,
+            `expected the warning to explain that no source data is affected\n${combined}`)
     })
 
     it('missing database — mikser rebuilds from sources cleanly', async () => {
