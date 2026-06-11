@@ -71,9 +71,38 @@ registerSchema('mikser_entities', `
     CREATE INDEX IF NOT EXISTS idx_mikser_entities_uri         ON mikser_entities(uri);
 `)
 
+// Per-process dedupe of the no-filter findEntities/iterateEntities
+// warning. Keyed by the rendering entity id (which is what gets
+// blamed in the recorded refClosure). Once per offending site is
+// enough — the warning is educational, not load-bearing.
+const _warnedNullFilter = new Set()
+
 function recordQuery(filter) {
     const ctx = queryContext.getStore()
     if (!ctx?.track) return
+    // Null/undefined filter records as `null` in the snapshot's
+    // refClosure, which manifest.shouldSkip and manifest.queryAffected
+    // treat as "any mutation could have affected this render."
+    // Architecturally correct, but it means an aggregate layout whose
+    // sidecar calls findEntities() with no args invalidates on every
+    // single CREATE/UPDATE/DELETE — including spurious ones (plugins
+    // re-emitting unchanged entities, etc.).
+    //
+    // Warn once per rendering entity so authors can narrow the filter.
+    // The fix is almost always to add the collection / type / format
+    // dimension the sidecar actually cares about; the JS-side .filter()
+    // chain that usually follows findEntities() is the signal that the
+    // filter belongs in the SQL.
+    if ((filter === undefined || filter === null) && ctx.entityId) {
+        if (!_warnedNullFilter.has(ctx.entityId)) {
+            _warnedNullFilter.add(ctx.entityId)
+            const logger = useLogger()
+            logger?.warn(
+                'findEntities()/iterateEntities() called with no filter from %s — the recorded query dep matches every mutation. Narrow the call (e.g. findEntities({collection: \'documents\', type: \'document\'})) so the manifest only invalidates this render when relevant entities actually change.',
+                ctx.entityId,
+            )
+        }
+    }
     ctx.track.query(normalizeFilter(filter))
 }
 
