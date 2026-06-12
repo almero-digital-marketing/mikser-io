@@ -12,7 +12,7 @@
 // test is a true end-to-end restart simulation.
 
 import { spawn } from 'node:child_process'
-import { mkdir, writeFile, rm } from 'node:fs/promises'
+import { mkdir, writeFile, rm, symlink } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -42,6 +42,16 @@ export function freshWorkdir(label = 'scenario') {
 export async function setupFixture(workdir, files) {
     await rm(workdir, { recursive: true, force: true })
     await mkdir(workdir, { recursive: true })
+    // Symlink mikser-io into <workdir>/node_modules so the consumer
+    // config's `import { documents } from 'mikser-io'` resolves through
+    // standard ESM package lookup. NODE_PATH is CJS-only and doesn't
+    // help here.
+    await mkdir(path.join(workdir, 'node_modules'), { recursive: true })
+    try {
+        await symlink(MIKSER_ROOT, path.join(workdir, 'node_modules', 'mikser-io'), 'dir')
+    } catch (err) {
+        if (err.code !== 'EEXIST') throw err
+    }
     for (const [rel, content] of Object.entries(files)) {
         const full = path.join(workdir, rel)
         await mkdir(path.dirname(full), { recursive: true })
@@ -54,10 +64,21 @@ export async function setupFixture(workdir, files) {
 // catches hung child processes.
 export function runMikser(workdir, args = []) {
     return new Promise((resolve, reject) => {
+        // NODE_PATH makes `import 'mikser-io'` resolve from inside the
+        // temp working folder's mikser.config.js. The config file lives
+        // outside any node_modules tree pointing at this checkout, so
+        // without NODE_PATH the spawned subprocess can't find the
+        // package by name. The parent dir of MIKSER_ROOT contains
+        // `mikser-io` as a sibling directory, which is exactly the
+        // resolution shape NODE_PATH expects.
         const p = spawn('node', ['--no-warnings', 'app.js', '--working-folder', workdir, ...args], {
             cwd: MIKSER_ROOT,
             stdio: ['ignore', 'pipe', 'pipe'],
-            env: { ...process.env, NO_COLOR: '1' },
+            env: {
+                ...process.env,
+                NO_COLOR: '1',
+                NODE_PATH: path.dirname(MIKSER_ROOT),
+            },
         })
         let stdout = '', stderr = ''
         p.stdout.on('data', d => stdout += d.toString())

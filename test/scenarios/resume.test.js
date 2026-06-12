@@ -18,8 +18,9 @@ import {
 } from './_harness.js'
 
 const MINIMAL_CONFIG = `
+import { documents, frontMatter, yaml, layouts, renderHbs } from 'mikser-io'
 export default {
-    plugins: ['documents', 'front-matter', 'yaml', 'layouts', 'render-hbs'],
+    plugins: [documents(), frontMatter(), yaml(), layouts({ autoLayouts: true }), renderHbs()],
 }
 `
 const POST_LAYOUT = '<html><body>{{{document.content}}}</body></html>'

@@ -4,14 +4,14 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import assetsPlugin, { normalizePresetConfig } from '../../../src/plugins/assets.js'
+import { assets, normalizePresetConfig } from '../../../src/plugins/assets.js'
 import { createHarness } from '../plugin-harness.js'
 
 // Spin up a temp workingFolder with an optional npm preset package and
 // optional local preset file, run the assets plugin through onLoaded +
 // onImport, and hand the harness back for assertions. Cleans up the
 // temp dir afterward.
-async function withPresetProject({ npmPresets = {}, localPresets = {}, config, entities = [] }, fn) {
+async function withPresetProject({ npmPresets = {}, localPresets = {}, assetsOptions, entities = [] }, fn) {
     const workingFolder = await mkdtemp(path.join(tmpdir(), 'mikser-presets-'))
     try {
         // Lay down npm-style packages under node_modules.
@@ -32,10 +32,9 @@ async function withPresetProject({ npmPresets = {}, localPresets = {}, config, e
 
         const h = createHarness({
             options: { workingFolder, outputFolder: path.join(workingFolder, 'out') },
-            config,
             entities,
         })
-        assetsPlugin(h.core)
+        assets(assetsOptions ?? {})(h.core)
         await h.runHook('loaded')
         await h.runHook('import')
         return await fn(h)
@@ -57,7 +56,7 @@ describe('assets plugin: preset resolution', () => {
     it('loads a preset from an npm package (mikser-io-preset-<name>) when no local file exists', async () => {
         await withPresetProject({
             npmPresets: { thumbnail: presetModule({ revision: 7, format: 'avif' }) },
-            config: { assets: { presets: { thumbnail: ['/files/**/*.jpg'] } } },
+            assetsOptions: { presets: { thumbnail: ['/files/**/*.jpg'] } },
         }, (h) => {
             const created = h.journal.find(e => e.operation === 'create' && e.entity?.id === '/presets/thumbnail')
             assert.ok(created, 'expected a preset entity created for the npm-resolved thumbnail')
@@ -76,7 +75,7 @@ describe('assets plugin: preset resolution', () => {
         await withPresetProject({
             localPresets: { thumbnail: presetModule({ revision: 1, format: 'webp' }) },   // local
             npmPresets:   { thumbnail: presetModule({ revision: 9, format: 'avif' }) },   // npm — should be ignored
-            config: { assets: { presets: { thumbnail: ['/files/**/*.jpg'] } } },
+            assetsOptions: { presets: { thumbnail: ['/files/**/*.jpg'] } },
         }, (h) => {
             const created = h.journal.filter(e => e.operation === 'create' && e.entity?.id === '/presets/thumbnail')
             assert.equal(created.length, 1, 'preset should be loaded exactly once')
@@ -90,7 +89,7 @@ describe('assets plugin: preset resolution', () => {
 
     it('logs an error and skips a configured preset that resolves to neither local nor npm', async () => {
         await withPresetProject({
-            config: { assets: { presets: { ghost: ['/files/**/*.jpg'] } } },
+            assetsOptions: { presets: { ghost: ['/files/**/*.jpg'] } },
         }, (h) => {
             const created = h.journal.find(e => e.operation === 'create' && e.entity?.id === '/presets/ghost')
             assert.equal(created, undefined, 'unresolvable preset should not create an entity')
@@ -106,14 +105,14 @@ describe('assets plugin', () => {
     // explicitly because the dual naming is easy to miss.
     it('returns its (internal) collection identifier', () => {
         const h = createHarness()
-        const api = assetsPlugin(h.core)
+        const api = assets()(h.core)
         assert.equal(api.collection, 'presets')
         assert.equal(api.type, 'preset')
     })
 
     it('registers the expected hooks', () => {
         const h = createHarness()
-        assetsPlugin(h.core)
+        assets()(h.core)
         assert.ok(h.hooks.loaded.length >= 1)
         assert.ok(h.hooks.import.length >= 1)
         assert.ok(h.hooks.processed.length >= 1)
@@ -221,13 +220,11 @@ describe('assets plugin: per-preset options from config', () => {
                     `export const options = { width: 400, height: 300, quality: 70, checksum: false }\n` +
                     `export default () => {}\n`,
             },
-            config: {
-                assets: {
-                    presets: {
-                        resize: {
-                            match: '@/files/*',
-                            options: { width: 800, quality: 90 },
-                        },
+            assetsOptions: {
+                presets: {
+                    resize: {
+                        match: '@/files/*',
+                        options: { width: 800, quality: 90 },
                     },
                 },
             },
@@ -255,11 +252,9 @@ describe('assets plugin: per-preset options from config', () => {
                     `export const options = { width: 128, checksum: false }\n` +
                     `export default () => {}\n`,
             },
-            config: {
-                assets: {
-                    presets: {
-                        thumbnail: '@/files/*',          // backwards-compatible string form
-                    },
+            assetsOptions: {
+                presets: {
+                    thumbnail: '@/files/*',          // backwards-compatible string form
                 },
             },
         }, async (h) => {

@@ -81,7 +81,10 @@ brevity.
   (`minThreads: 0` + `idleTimeout: 30_000`) so INLINE-only workloads
   pay no worker overhead. `workerSafeOptions(runtime.options)`
   strips plugin-surface functions before TASKS.WORKER dispatch so
-  Piscina's structured clone doesn't choke.
+  Piscina's structured clone doesn't choke. Renderer / postprocessor
+  descriptors in `runtime.options.plugins` are projected to their
+  `render-${name}` / `post-${name}` identifier so workers can
+  resolve them via dynamic import.
 - `database/` — `createSqliteDatabase()`, `registerSchema()`,
   `useDatabase()` (the `mikser_meta` table stamps schema_version).
   `sift-to-sql.js` translates sift filters to SQL WHERE clauses
@@ -111,10 +114,27 @@ brevity.
   the engine's logger. Each worker opens its own read-only sqlite
   handle on first task (`ensureWorkerDb` in render.js) so template
   helpers like `runtime.lookupHref` stay sync. Never touch the journal
-  directly.
-- `config.js` — loads `mikser.config.js` at `onLoad`.
-- `plugins.js` — loads user plugins at `onLoad`. Plugin factories
-  receive the full `core` exports as their first argument.
+  directly. Plugin loading: main-thread INLINE dispatch reads
+  `runtime.renderers` / `runtime.postprocessors` first (populated by
+  plugins.js from descriptor returns); workers see empty registries
+  in their separate-process runtime and fall through to dynamic-import
+  by `mikser-io-${name}` package name. Per-plugin options flow through
+  `descriptor.options` and arrive as the `config` arg to
+  `load`/`render`/`setup`/`postprocess`/`teardown`.
+- `config.js` — loads `mikser.config.js` at `onLoad` into
+  `runtime.config`. v9 holds only engine-level keys (`server`,
+  `logging`, `catalog` if tuned) plus the `plugins` array — all
+  plugin options moved to the factory call site (ADR-0010).
+- `plugins.js` — dispatches v9 plugin entries at `onLoad`. Each
+  entry in `plugins: []` is a factory call return; the dispatcher
+  duck-types on shape:
+  - function → lifecycle plugin; called with `core` so it can
+    register hooks.
+  - `{ name, options, load?, render? }` → renderer descriptor;
+    stored in `runtime.renderers`.
+  - `{ name, options, postprocess, output?, setup?, teardown? }` →
+    postprocessor descriptor; stored in `runtime.postprocessors`.
+  Strings produce a v9 migration error pointing at the new shape.
 - `manager.js` — file watching (chokidar) and cron scheduling.
 - `source.js` — `useSource` codifies the folder-of-files pattern.
 - `constants.js` — `OPERATION` (CREATE/UPDATE/DELETE/RENDER/
@@ -149,7 +169,10 @@ brevity.
   `import { queryEntities, subscribe, useRenderer, useCollection,
   readEntityContent, isTextEntity } from 'mikser-io'`.
 - **Plugin packages**: `mikser-io-<name>` (mikser-io-mcp, mikser-io-vector,
-  mikser-io-schemas, etc.).
+  mikser-io-schemas, etc.). Each exports a v9 named factory in
+  camelCase: `import { vector } from 'mikser-io-vector'`,
+  `import { renderHbs } from 'mikser-io'`. Consumer uses
+  `plugins: [vector({...})]` — never the bare string.
 - **MCP tools**: `mikser_<verb>` or `mikser_<subsystem>_<verb>`:
   `mikser_query_entities`, `mikser_read_entity`, `mikser_update_entity`,
   `mikser_delete_entity`, `mikser_render`, `mikser_refs_inbound`,
@@ -206,25 +229,39 @@ brevity.
   persistence pattern. Journal-on-sqlite (Phase 7) enables `--resume`;
   auto-persist (Phase 9) means plugins mutate the yielded entity and
   the journal writes back without an explicit `updateEntry` call.
+- **0010** — Plugin bundles + factory-call form + inline options.
+  Plugins are imported by name and called as factories;
+  `plugins: []` carries factory returns, never strings.
+  Lifecycle plugins are `(options) => (core) => void`; renderers
+  return `{name, options, load?, render?}`; postprocessors return
+  `{name, options, output?, setup?, postprocess, teardown?}`. Per-
+  plugin config moved entirely off `runtime.config.<plugin>`; it
+  arrives as factory args, gets stashed on the descriptor, and is
+  passed as `config` to `load`/`render`/`setup`/`postprocess`.
 
 ## MCP
 
-Lives in `mikser-io-mcp` plugin (separate repo). Activate by listing
-`'mcp'` **first** in your `mikser.config.js` plugins array:
+Lives in `mikser-io-mcp` plugin (separate repo). Activate by calling
+`mcp()` **first** in your `mikser.config.js` plugins array:
 
 ```js
+import { mcp } from 'mikser-io-mcp'
+
 export default {
-    plugins: ['mcp', /* ...other plugins */],
-    mcp: {
-        path: '/mcp',          // optional; default '/mcp'
-        // endpoints: { ... }  // optional; per-endpoint token + scope
-    },
+    plugins: [
+        mcp({
+            // path: '/mcp',          // default '/mcp'
+            // endpoints: { ... },    // per-endpoint token + scope
+        }),
+        /* ...other plugins */
+    ],
 }
 ```
 
 Must be first because its factory creates `runtime.options.mcp`
-synchronously, and other plugins gate their MCP tool registration on
-`if (runtime.options.mcp)` in their own `onLoaded`.
+synchronously when its closure runs, and other plugins gate their
+MCP tool registration on `if (runtime.options.mcp)` in their own
+`onLoaded`.
 
 There is **no `--mcp` CLI flag**. Activation is plugin-presence only.
 
@@ -276,9 +313,13 @@ There is **no `--mcp` CLI flag**. Activation is plugin-presence only.
 
 - **New engine capability?** Run through ADR-0006's five tests. Bar
   is high. Express is the only earned addition.
-- **New plugin?** Own repo, named `mikser-io-<name>`. Composes
-  against `runtime.options.app` / `runtime.options.mcp` / lifecycle
-  hooks. Never imports another plugin's source.
+- **New plugin?** Own repo, named `mikser-io-<name>`. Exports a
+  named v9 factory (e.g. `export function vector(options = {}) {
+  return (core) => { ... } }`). Composes against
+  `runtime.options.app` / `runtime.options.mcp` / lifecycle hooks.
+  Never imports another plugin's source — and the engine never
+  reads `runtime.config.<plugin>` for plugin options; everything
+  flows through the factory arg (ADR-0010).
 - **New MCP tool?** Add to `mikser-io-mcp/index.js` via
   `mcp.simpleTool(name, description, zodSchema, handler)`. Tool name
   follows `mikser_*` convention.

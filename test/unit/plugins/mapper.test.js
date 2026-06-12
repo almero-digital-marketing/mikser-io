@@ -1,15 +1,12 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
-import mapperPlugin from '../../../src/plugins/mapper.js'
+import { mapper } from '../../../src/plugins/mapper.js'
 import { createHarness } from '../plugin-harness.js'
 
 function setup({ mappers = [], journal = [] } = {}) {
-    const h = createHarness({
-        config: { mapper: { mappers } },
-        journal,
-    })
-    mapperPlugin(h.core)
+    const h = createHarness({ journal })
+    mapper({ mappers })(h.core)
     return h
 }
 

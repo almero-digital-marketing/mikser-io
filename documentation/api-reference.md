@@ -13,15 +13,15 @@ Initializes the runtime and registers all built-in hooks. Returns the `runtime` 
 Must be called before `runtime.start()`.
 
 ```js
-import { setup } from 'mikser-io'
+import { setup, documents, layouts } from 'mikser-io'
 
 const runtime = await setup({
   workingFolder: './my-project',
-  plugins: ['documents', 'layouts'],
+  plugins: [documents(), layouts()],
   outputFolder: 'dist',
   mode: 'production',
   threads: 8,
-  clear: true
+  clear: true,
 })
 
 await runtime.start()
@@ -34,7 +34,7 @@ await runtime.start()
 | `workingFolder` | string | `'./'` | Root folder of the project |
 | `outputFolder` | string | `'out'` | Output folder |
 | `runtimeFolder` | string | `'runtime'` | Temp files folder (engine sqlite lives here) |
-| `plugins` | string[] | `[]` | Plugin names to load |
+| `plugins` | factory-call[] | `[]` | Factory-return values: lifecycle plugin closures and renderer / postprocessor descriptors. Import the factory by name and call it (ADR-0010). |
 | `config` | string | `'./mikser.config.js'` | Config file path |
 | `mode` | string | `'development'` | Runtime mode |
 | `clear` | boolean | `false` | Clear output before run |

@@ -11,21 +11,22 @@ import { promisify } from 'util'
 import isUrl from 'is-url'
 import map from 'p-map'
 
-export default ({
-    useLogger,
-    useJournal,
-    onLoaded,
-    runtime,
-    stopProgress,
-    createEntity,
-    onProcessed,
-    onFinalize,
-    checksum,
-    trackProgress,
-    updateProgress,
-    matchEntity,
-    constants: { OPERATION },
-}) => {
+export function resources(options = {}) {
+    return ({
+        useLogger,
+        useJournal,
+        onLoaded,
+        runtime,
+        stopProgress,
+        createEntity,
+        onProcessed,
+        onFinalize,
+        checksum,
+        trackProgress,
+        updateProgress,
+        matchEntity,
+        constants: { OPERATION },
+    }) => {
     const collection = 'resources'
     const type = 'resource'
 
@@ -36,21 +37,21 @@ export default ({
     onLoaded(async () => {
         const logger = useLogger()
 
-        const resourcesName = runtime.config.resources?.resourcesFolder || collection
+        const resourcesName = options.resourcesFolder || collection
         runtime.state.resources = {
             resourceLib: {},
             resourceMap: {},
-            resourcesFolder: runtime.config.resources?.outputFolder
-                ? path.join(runtime.config.resources.outputFolder, resourcesName)
+            resourcesFolder: options.outputFolder
+                ? path.join(options.outputFolder, resourcesName)
                 : resourcesName,
         }
 
-        runtime.options.resources = runtime.config.resources?.resourcesFolder || collection
+        runtime.options.resources = options.resourcesFolder || collection
         runtime.options.resourcesFolder = path.join(runtime.options.workingFolder, runtime.options.resources)
         logger.debug('Resources folder: %s', runtime.options.resourcesFolder)
 
-        for (let library in (runtime.config.resources?.libraries || [])) {
-            let resource = runtime.config.resources.libraries[library]
+        for (let library in (options.libraries || [])) {
+            let resource = options.libraries[library]
             runtime.state.resources.resourceLib[resource.match || escapeStringRegexp(resource.url)] = library
         }
     })
@@ -126,7 +127,7 @@ export default ({
             trackProgress('Resources download', downloads.length)
             await mkdir(runtime.options.resourcesFolder, { recursive: true })
             let link = path.join(runtime.options.outputFolder, runtime.options.resources)
-            if (runtime.config.resources?.outputFolder) link = path.join(runtime.options.outputFolder, runtime.config.resources?.outputFolder, runtime.options.resources)
+            if (options.outputFolder) link = path.join(runtime.options.outputFolder, options.outputFolder, runtime.options.resources)
             try {
                 await mkdir(path.dirname(link), { recursive: true })
                 await symlink(path.resolve(runtime.options.resourcesFolder), link, 'dir')
@@ -146,7 +147,7 @@ export default ({
                 if (!resourceFilesMap.has(path.join(library, pathname))) {
                     const resourceTemp = path.join(runtime.options.resourcesFolder, library, pathname + '.temp')
                     logger.debug('Downloading resource: %s %s', entity.id, url)
-                    const config = runtime.config.resources.libraries[library]
+                    const config = options.libraries[library]
                     const request = {
                         method: 'get',
                         ...config,
@@ -207,8 +208,9 @@ export default ({
         }
     })
 
-    return {
-        collection,
-        type
+        return {
+            collection,
+            type,
+        }
     }
 }

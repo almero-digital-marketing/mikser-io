@@ -1,12 +1,12 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
-import validatorPlugin from '../../../src/plugins/validator.js'
+import { validator } from '../../../src/plugins/validator.js'
 import { createHarness } from '../plugin-harness.js'
 
 function setup(validators) {
-    const h = createHarness({ config: { validator: { validators } } })
-    validatorPlugin(h.core)
+    const h = createHarness()
+    validator({ validators })(h.core)
     return h
 }
 

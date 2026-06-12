@@ -1,72 +1,111 @@
 import { useLogger } from './engine.js'
 import { onLoad } from './lifecycle.js'
 import runtime from './runtime.js'
-import path from 'node:path'
-import fs from 'fs'
-import { createRequire } from 'node:module'
 
 import * as core from '../index.js'
 
-export async function loadPlugin(pluginName) {
+// Dispatch v9-shaped plugin entries. The consumer's `plugins: [...]`
+// carries the return values of factory calls — never strings, never the
+// factories themselves. Three return shapes are recognized:
+//
+//   - function          → lifecycle plugin; called with `core` so it can
+//                         register hooks (onLoaded, onBeforeRender, etc.)
+//   - { name, load? }   → renderer descriptor; stored in
+//     | { name, render? }   `runtime.renderers` for src/render.js to
+//                         look up by name at dispatch time.
+//   - { name, postprocess } → postprocessor descriptor; stored in
+//                             `runtime.postprocessors`. Typically also
+//                             carries `output` declaring the destination
+//                             extension.
+//
+// Strings are explicit v8 → v9 migration errors with a pointer at the
+// new shape (see ADR-0010).
+onLoad(() => {
     const logger = useLogger()
 
-    const require = createRequire(path.join(runtime.options.workingFolder, 'package.json'))
-    let nodeModulesResolved
-    try {
-        nodeModulesResolved = require.resolve(`mikser-io-${pluginName}`)
-    } catch { }
+    runtime.options.plugins = (runtime.options.plugins ?? [])
+        .concat(runtime.config.plugins ?? [])
+        .filter(Boolean)
 
-    const resolveLocations = [
-        path.join(path.dirname(import.meta.url), 'plugins', `${pluginName}.js`),
-        path.join(runtime.options.workingFolder, 'plugins', `${pluginName}.js`),
-        path.join(runtime.options.workingFolder, 'node_modules', `mikser-io-${pluginName}`, 'index.js'),
-        nodeModulesResolved,
-    ].filter(Boolean)
-    for (let index = 0; index < resolveLocations.length; index++) {
-        const resolveLocation = resolveLocations[index]
-        if (fs.existsSync(resolveLocation.replace('file:', ''))) {
-            try {
-                const plugin = await import(resolveLocation)
-                if (typeof plugin.default !== 'function') {
-                    logger.error('Plugin %s loaded from %s but does not export a default factory function', pluginName, resolveLocation)
-                    return
-                }
-                const pluginRuntime = plugin.default(core)
-                runtime.engine[pluginName] = pluginRuntime
-                if (pluginRuntime) {
-                    logger.trace('Loaded %s plugin: %s', pluginName, pluginRuntime)
-                } else {
-                    logger.trace('Loaded %s plugin', pluginName)
-                }
-                return
-            } catch (err) {
-                // ERR_MODULE_NOT_FOUND here means the plugin file resolved
-                // but one of its imports didn't — a real bug worth surfacing.
-                if (err.code === 'ERR_MODULE_NOT_FOUND') {
-                    logger.error('Plugin %s found at %s but its dependencies are missing: %s', pluginName, resolveLocation, err.message)
-                } else {
-                    logger.error('Plugin %s failed to load (%s): %s', pluginName, resolveLocation, err.message)
-                }
-                return
-            }
+    // Initialize the registries up front so first-time access (even
+    // from render.js / postprocess.js before any descriptor lands)
+    // always sees a Map, never undefined.
+    runtime.renderers      = runtime.renderers      ?? new Map()
+    runtime.postprocessors = runtime.postprocessors ?? new Map()
+
+    const factoryEntries = []
+    let registeredRenderers = 0
+    let registeredPostprocessors = 0
+    for (const entry of runtime.options.plugins) {
+        if (typeof entry === 'function') {
+            factoryEntries.push(entry)
+            continue
         }
+        if (entry && typeof entry === 'object') {
+            // Renderer descriptor — has `name` and at least one of
+            // `load` (template-helper / runtime augmentation; the
+            // markdown / metatext / asset / href / file / resource
+            // wrappers are the canonical "load-only" cases) or
+            // `render` (the primary entity-to-output renderer).
+            if (typeof entry.render === 'function' || typeof entry.load === 'function') {
+                const name = entry.name
+                if (!name) {
+                    logger.error('Renderer descriptor missing `name`: %o', entry)
+                    continue
+                }
+                runtime.renderers.set(name, entry)
+                registeredRenderers++
+                continue
+            }
+            if (typeof entry.postprocess === 'function') {
+                const name = entry.name
+                if (!name) {
+                    logger.error('Postprocessor descriptor missing `name`: %o', entry)
+                    continue
+                }
+                runtime.postprocessors.set(name, entry)
+                registeredPostprocessors++
+                continue
+            }
+            logger.error(
+                'Plugin entry returned an unknown object shape (expected `render`, `load`, or `postprocess`): %o',
+                entry,
+            )
+            continue
+        }
+        if (typeof entry === 'string') {
+            logger.error(
+                'Plugin "%s" is a string. v9 requires plugins to be imported and called:\n' +
+                '  import { %s } from \'mikser-io\'\n' +
+                '  plugins: [%s()]\n' +
+                'See ADR-0010 for the new shape.',
+                entry, kebabToCamel(entry), kebabToCamel(entry),
+            )
+            continue
+        }
+        logger.error('Plugin entry must be a factory call result; got %s', typeof entry)
     }
-    logger.error('Plugin %s not found.', pluginName)
-}
 
-onLoad(async () => {
-    const logger = useLogger()
-
-    runtime.options.plugins = runtime.options.plugins.concat(runtime.config.plugins).filter(plugin => plugin)
-
-    const userPlugins = runtime.options.plugins.filter(plugin => plugin.indexOf('render-') != 0 && plugin.indexOf('post-') != 0)
-    if (!userPlugins.length) {
+    if (!factoryEntries.length && !registeredRenderers && !registeredPostprocessors) {
         logger.info('No plugins loaded')
-    } else {
-        logger.info('Loading plugins: %s', userPlugins.join(', '))
+        return
+    }
 
-        for (let plugin of userPlugins) {
-            await loadPlugin(plugin)
+    const parts = []
+    if (factoryEntries.length)    parts.push(`${factoryEntries.length} lifecycle`)
+    if (registeredRenderers)      parts.push(`${registeredRenderers} renderer${registeredRenderers === 1 ? '' : 's'}`)
+    if (registeredPostprocessors) parts.push(`${registeredPostprocessors} postprocessor${registeredPostprocessors === 1 ? '' : 's'}`)
+    logger.info('Loading plugins: %s', parts.join(', '))
+
+    for (const factoryReturn of factoryEntries) {
+        try {
+            factoryReturn(core)
+        } catch (err) {
+            logger.error('Plugin factory threw on registration: %s', err.message)
         }
     }
 })
+
+function kebabToCamel(s) {
+    return s.replace(/-([a-z])/g, (_, c) => c.toUpperCase())
+}

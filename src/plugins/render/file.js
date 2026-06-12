@@ -43,3 +43,7 @@ export function load({ runtime }) {
         return args
     }
 }
+
+export function renderFile(options = {}) {
+    return { name: options.name ?? 'file', options, load }
+}

@@ -1,12 +1,12 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
-import yamlPlugin from '../../../src/plugins/yaml.js'
+import { yaml } from '../../../src/plugins/yaml.js'
 import { createHarness } from '../plugin-harness.js'
 
 function setup(journal) {
     const h = createHarness({ journal })
-    yamlPlugin(h.core)
+    yaml()(h.core)
     return h
 }
 

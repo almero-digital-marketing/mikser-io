@@ -1,12 +1,12 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
-import frontMatterPlugin from '../../../src/plugins/front-matter.js'
+import { frontMatter } from '../../../src/plugins/front-matter.js'
 import { createHarness } from '../plugin-harness.js'
 
 function setup(journal) {
     const h = createHarness({ journal })
-    frontMatterPlugin(h.core)
+    frontMatter()(h.core)
     return h
 }
 

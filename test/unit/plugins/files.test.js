@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, rm, mkdir, readlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import filesPlugin from '../../../src/plugins/files.js'
+import { files } from '../../../src/plugins/files.js'
 import { createHarness } from '../plugin-harness.js'
 
 async function withTempWorking(fn) {
@@ -16,13 +16,13 @@ async function withTempWorking(fn) {
 describe('files plugin', () => {
     it('returns its collection identifier', () => {
         const h = createHarness()
-        const result = filesPlugin(h.core)
+        const result = files()(h.core)
         assert.deepEqual(result, { collection: 'files', type: 'file' })
     })
 
     it('registers onLoaded, onImport, and a files onSync handler', () => {
         const h = createHarness()
-        filesPlugin(h.core)
+        files()(h.core)
         assert.equal(h.hooks.loaded.length, 1)
         assert.equal(h.hooks.import.length, 1)
         assert.ok(h.sync.has('files'))
@@ -31,7 +31,7 @@ describe('files plugin', () => {
     it('computes filesFolder under workingFolder on onLoaded', async () => {
         await withTempWorking(async (workingFolder) => {
             const h = createHarness({ options: { workingFolder } })
-            filesPlugin(h.core)
+            files()(h.core)
             await h.runHook('loaded')
             assert.equal(h.runtime.options.filesFolder, path.join(workingFolder, 'files'))
         })
@@ -46,7 +46,7 @@ describe('files plugin', () => {
             await writeFile(path.join(filesFolder, 'app.js'), 'hi')
 
             const h = createHarness({ options: { workingFolder, filesFolder, outputFolder } })
-            filesPlugin(h.core)
+            files()(h.core)
             await h.runSync('files', { action: 'create', context: { relativePath: 'app.js' } })
 
             const creates = h.journal.filter(e => e.operation === 'create')
@@ -74,9 +74,8 @@ describe('files plugin', () => {
 
             const h = createHarness({
                 options: { workingFolder, filesFolder, outputFolder },
-                config: { files: { outputFolder: 'public' } },
             })
-            filesPlugin(h.core)
+            files({ outputFolder: 'public' })(h.core)
             await h.runSync('files', { action: 'create', context: { relativePath: 'main.css' } })
 
             const e = h.journal.find(j => j.operation === 'create').entity
@@ -94,7 +93,7 @@ describe('files plugin', () => {
             await writeFile(path.join(filesFolder, 'gone.txt'), 'x')
 
             const h = createHarness({ options: { workingFolder, filesFolder, outputFolder } })
-            filesPlugin(h.core)
+            files()(h.core)
             await h.runSync('files', { action: 'create', context: { relativePath: 'gone.txt' } })
             await h.runSync('files', { action: 'delete', context: { relativePath: 'gone.txt' } })
 
@@ -109,7 +108,7 @@ describe('files plugin', () => {
 
     it('onSync returns false when relativePath is missing', async () => {
         const h = createHarness()
-        filesPlugin(h.core)
+        files()(h.core)
         assert.equal(await h.runSync('files', { action: 'create', context: {} }), false)
     })
 })

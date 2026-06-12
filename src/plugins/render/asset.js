@@ -9,3 +9,7 @@ export function load({ runtime, entity, state, options }) {
         return { url: path.relative(from, destination) }
     }
 }
+
+export function renderAsset(options = {}) {
+    return { name: options.name ?? 'asset', options, load }
+}

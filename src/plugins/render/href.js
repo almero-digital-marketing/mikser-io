@@ -40,3 +40,7 @@ export function load({ entity, runtime, options }) {
     runtime.prev = entity.page > 1 ? entity.page - 1 : false
     runtime.next = entity.page + 1 < entity.pages ? entity.page + 1 : false
 }
+
+export function renderHref(options = {}) {
+    return { name: options.name ?? 'href', options, load }
+}

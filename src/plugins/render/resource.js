@@ -15,3 +15,7 @@ export function load({ runtime, entity, state, options }) {
         }
     }
 }
+
+export function renderResource(options = {}) {
+    return { name: options.name ?? 'resource', options, load }
+}

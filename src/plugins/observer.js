@@ -2,22 +2,23 @@ import path from 'path'
 import { hash } from 'hasha'
 import _ from 'lodash'
 
-export default ({
-    runtime,
-    useLogger,
-    onImport,
-    onLoaded,
-    onSync,
-    createEntity,
-    updateEntity,
-    deleteEntity,
-    findEntity,
-    findEntities,
-    schedule,
-    normalize,
-    trackProgress,
-    updateProgress,
-}) => {
+export function observer(options = {}) {
+    return ({
+        runtime,
+        useLogger,
+        onImport,
+        onLoaded,
+        onSync,
+        createEntity,
+        updateEntity,
+        deleteEntity,
+        findEntity,
+        findEntities,
+        schedule,
+        normalize,
+        trackProgress,
+        updateProgress,
+    }) => {
     const format = 'observer'
 
     async function syncEntities(observerName) {
@@ -28,7 +29,7 @@ export default ({
             type = 'document',
             readMany,
             uri = ''
-        } = runtime.config.observer[observerName]
+        } = options[observerName]
 
         let synced = 0
         let removed = 0
@@ -99,7 +100,7 @@ export default ({
             type = 'document',
             readOne,
             uri = ''
-        } = runtime.config.observer[observerName]
+        } = options[observerName]
 
         try {
             const id = path.join('/observer', collection, apiId.toString())
@@ -139,8 +140,8 @@ export default ({
 
     onLoaded(async () => {
         const logger = useLogger()
-        for (let observerName in runtime.config.observer || {}) {
-            const { cron } = runtime.config.observer[observerName]
+        for (let observerName in options || {}) {
+            const { cron } = options[observerName]
             if (cron) {
                 logger.info('Schedule observer: [%s] %s', observerName, cron)
                 schedule(observerName, cron)
@@ -154,7 +155,7 @@ export default ({
                 }
             })
 
-            const { origin } = new URL(runtime.config.observer[observerName].uri)
+            const { origin } = new URL(options[observerName].uri)
             onSync(origin, async ({ context }) => {
                 if (context.uri) {
                     logger.debug('Syncing observer: [%s] %s', observerName, context.uri)
@@ -165,12 +166,13 @@ export default ({
     })
 
     onImport(async () => {
-        for (let observerName in runtime.config.observer || {}) {
+        for (let observerName in options || {}) {
             await syncEntities(observerName)
         }
     })
 
-    return {
-        format
+        return {
+            format,
+        }
     }
 }

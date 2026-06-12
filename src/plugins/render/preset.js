@@ -11,3 +11,7 @@ export async function render({ entity, options, config, context, plugins, runtim
     await runtime.preset({ entity, options, config, context, plugins, runtime, state, logger })
     return entity.destination
 }
+
+export function renderPreset(options = {}) {
+    return { name: options.name ?? 'preset', options, load, render }
+}

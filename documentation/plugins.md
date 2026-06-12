@@ -4,87 +4,96 @@ Plugins are the primary way to extend Mikser. Every content source, transformati
 
 ## Loading Plugins
 
-Plugins are listed in the config under `plugins`:
+Plugins are imported by name and called as factories. Each entry in `plugins: []` is a factory-return value — the v9 plugin loader dispatches based on the return's shape (ADR-0010). There's no string-based resolution and no `--plugins` CLI flag.
 
 ```js
+import { documents, layouts, data } from 'mikser-io'
+import { myCustomPlugin } from 'mikser-io-my-custom-plugin'
+
 export default {
-  plugins: ['documents', 'layouts', 'data', 'my-custom-plugin']
+  plugins: [
+    documents(),
+    layouts({ autoLayouts: true }),
+    data(),
+    myCustomPlugin({ /* options */ }),
+  ],
 }
 ```
 
-Or passed as CLI arguments:
+### Plugin Resolution
 
-```bash
-mikser --plugins documents layouts data
-```
+Plugins are standard ESM imports. There's no name-based search path — whatever Node's import resolution finds for `'mikser-io-<name>'` (or whichever package you import from) is what gets loaded.
 
-### Resolution Order
+- Built-in plugins re-export from `mikser-io`'s root: `import { documents, layouts, ... } from 'mikser-io'`.
+- Sibling plugins each export a named factory: `import { vector } from 'mikser-io-vector'`.
+- Project-local plugins live anywhere — drop the file, import by relative path: `import myPlugin from './plugins/my-plugin.js'`.
 
-For each plugin name, Mikser looks in these locations, in order:
-
-1. `src/plugins/{name}.js` — built-in plugins
-2. `{workingFolder}/plugins/{name}.js` — project-local plugins
-3. `{workingFolder}/node_modules/mikser-io-{name}/index.js` — npm packages installed in the working folder
-4. Node module resolution (`createRequire`) starting from the working folder — finds `mikser-io-{name}` in any ancestor `node_modules`, matching how `import` works
-
-Render plugins (names starting with `render-`) follow the same four-step resolution but are loaded by the render worker, not the core. They aren't listed in `plugins`.
+Renderer and postprocessor packages **are** listed in `plugins: []` alongside lifecycle plugins. They return descriptors (`{ name, options, load?, render? }` or `{ name, options, postprocess, ... }`) instead of `(core) => void` closures; the loader stores them in `runtime.renderers` / `runtime.postprocessors` and the dispatcher picks them up by name when a layout requests them.
 
 ---
 
 ## Writing a Custom Plugin
 
-A plugin is a JS module that exports a default factory function. The factory receives the full Mikser API and returns an optional object of plugin exports.
+A plugin package exports a **named factory** in camelCase that matches the export name. The factory takes options and returns one of three shapes:
+
+- **Lifecycle plugin** — returns `(core) => void`. Receives the full Mikser API and registers hooks.
+- **Renderer** — returns `{ name, options, load?, render? }`.
+- **Postprocessor** — returns `{ name, options, output?, setup?, postprocess, teardown? }`.
+
+### Lifecycle plugin shape
 
 ```js
-// plugins/my-plugin.js
-export default ({
-  runtime,
-  onLoaded,
-  onImport,
-  onProcess,
-  onFinalized,
-  createEntity,
-  updateEntity,
-  deleteEntity,
-  useJournal,
-  findEntity,
-  findEntities,
-  useLogger,
-  watch,
-  schedule,
-  checksum,
-  normalize,
-  matchEntity,
-  changeExtension,
-  trackProgress,
-  updateProgress,
-  stopProgress,
-  constants: { OPERATION, ACTION }
-}) => {
-  const collection = 'posts'
-  const type = 'post'
+// my-custom-plugin/index.js
+export function myCustomPlugin(options = {}) {
+  return ({
+    runtime,
+    onLoaded,
+    onImport,
+    onProcess,
+    onFinalized,
+    createEntity,
+    updateEntity,
+    deleteEntity,
+    useJournal,
+    findEntity,
+    findEntities,
+    useLogger,
+    watch,
+    schedule,
+    checksum,
+    normalize,
+    matchEntity,
+    changeExtension,
+    trackProgress,
+    updateProgress,
+    stopProgress,
+    constants: { OPERATION, ACTION },
+  }) => {
+    const collection = 'posts'
+    const type = 'post'
 
-  onLoaded(async () => {
-    const logger = useLogger()
-    logger.info('My plugin loaded')
-  })
-
-  onImport(async () => {
-    // Scan and import entities
-    await createEntity({
-      id: '/posts/hello',
-      collection,
-      type,
-      format: 'md',
-      name: 'hello',
-      meta: { title: 'Hello World' }
+    onLoaded(async () => {
+      const logger = useLogger()
+      logger.info('My plugin loaded — folder=%s', options.folder ?? collection)
     })
-  })
 
-  // Export plugin's public API
-  return { collection, type }
+    onImport(async () => {
+      await createEntity({
+        id: '/posts/hello',
+        collection,
+        type,
+        format: 'md',
+        name: 'hello',
+        meta: { title: 'Hello World' },
+      })
+    })
+
+    return { collection, type }
+  }
 }
 ```
+
+`options` is whatever the consumer passed at the factory call site (`myCustomPlugin({ folder: 'blog' })`). The plugin reads it directly — there is **no** `runtime.config.<plugin>` channel under v9.
 
 ### Plugin Factory API
 
@@ -147,11 +156,11 @@ The factory function receives the complete Mikser API as a single destructured o
 
 Loads text documents from a folder. Suitable for Markdown, HTML, or any text format.
 
-**Config:**
+**Factory options:**
 ```js
-documents: {
-  documentsFolder: 'content'  // default: 'documents'
-}
+documents({
+  documentsFolder: 'content'  // default: 'documents',
+})
 ```
 
 **Entity properties set:**
@@ -173,12 +182,12 @@ documents: {
 
 Copies or symlinks static files to the output folder.
 
-**Config:**
+**Factory options:**
 ```js
-files: {
+files({
   filesFolder: 'static',   // default: 'files'
-  outputFolder: 'assets'   // default: root of outputFolder
-}
+  outputFolder: 'assets'   // default: root of outputFolder,
+})
 ```
 
 **Entity properties set:**
@@ -197,9 +206,9 @@ files: {
 
 Manages HTML/template layouts. Layouts are assigned to documents and used during rendering.
 
-**Config:**
+**Factory options:**
 ```js
-layouts: {
+layouts({
   layoutsFolder: 'layouts',    // default: 'layouts'
 
   // Explicit pattern-to-layout mapping
@@ -210,8 +219,8 @@ layouts: {
   },
 
   autoLayouts: true,           // Auto-match entity to layout within same directory namespace
-  cleanUrls: true              // /page.html → /page/index.html
-}
+  cleanUrls: true              // /page.html → /page/index.html,
+})
 ```
 
 **Auto-layout matching (`autoLayouts: true`):**
@@ -502,25 +511,28 @@ With this config:
 
 ```js
 // mikser.config.js
+import { files, resources, assets, api } from 'mikser-io'
+
 export default {
-    plugins: ['files', 'resources', 'assets', 'api'],
-
-    resources: {
-        libraries: {
-            'company-media': {
-                base:  'https://media.acme.internal/',
-                match: 'media.acme.internal',
-                headers: { authorization: `Bearer ${process.env.DAM_TOKEN}` },
+    plugins: [
+        files(),
+        resources({
+            libraries: {
+                'company-media': {
+                    base:  'https://media.acme.internal/',
+                    match: 'media.acme.internal',
+                    headers: { authorization: `Bearer ${process.env.DAM_TOKEN}` },
+                },
             },
-        },
-    },
-
-    assets: {
-        presets: {
-            'video-web': ['/resources/company-media/**/*.mp4'],
-            poster:     ['/resources/company-media/**/*.mp4'],
-        },
-    },
+        }),
+        assets({
+            presets: {
+                'video-web': ['/resources/company-media/**/*.mp4'],
+                poster:     ['/resources/company-media/**/*.mp4'],
+            },
+        }),
+        api(),
+    ],
 }
 ```
 
@@ -546,9 +558,9 @@ This is what makes assets + resources together unusual: **the pipeline is bounde
 
 Exports entity data to JSON files for use by front-end JavaScript or APIs.
 
-**Config:**
+**Factory options:**
 ```js
-data: {
+data({
   dataFolder: 'api',           // Output folder for JSON files
 
   // Export entity list to JSON during beforeRender
@@ -574,8 +586,8 @@ data: {
       query: entity => true,
       map: entity => ({ id: entity.id, title: entity.meta.title })
     }
-  }
-}
+  },
+})
 ```
 
 ---
@@ -584,9 +596,9 @@ data: {
 
 Synchronises data from external REST APIs into entities.
 
-**Config:**
+**Factory options:**
 ```js
-api: {
+api({
   products: {
     collection: 'products',
     type: 'product',
@@ -600,8 +612,8 @@ api: {
       return res.json()
     },
     cron: '*/30 * * * *'   // Refresh every 30 minutes (watch mode only)
-  }
-}
+  },
+})
 ```
 
 Each item returned by `readMany` becomes an entity. The entity's `meta` is set to the item data, and the `id` field of the item is used as the entity ID. Change detection is done via checksum — only changed items trigger UPDATE operations.
@@ -612,9 +624,9 @@ Each item returned by `readMany` becomes an entity. The entity's `meta` is set t
 
 Applies custom transformations to entities during the process phase.
 
-**Config:**
+**Factory options:**
 ```js
-mapper: {
+mapper({
   mappers: [
     {
       match: '@/blog/*',
@@ -624,8 +636,8 @@ mapper: {
         return entity
       }
     }
-  ]
-}
+  ],
+})
 ```
 
 ---
@@ -634,9 +646,9 @@ mapper: {
 
 Validates entities before they are added to the journal.
 
-**Config:**
+**Factory options:**
 ```js
-validator: {
+validator({
   validators: [
     {
       match: entity => entity.collection === 'posts',
@@ -646,8 +658,8 @@ validator: {
         if (!entry.entity.meta?.date) return 'Missing date'
       }
     }
-  ]
-}
+  ],
+})
 ```
 
 ---
@@ -656,15 +668,15 @@ validator: {
 
 Runs shell commands at lifecycle hooks.
 
-**Config:**
+**Factory options:**
 ```js
-commands: {
+commands({
   finalized: 'rsync -avz out/ user@server:/var/www/',
   load: ['echo "Loading"', 'node scripts/prebuild.js'],
   processed: async (runtime) => {
     return runtime.options.mode === 'production' ? 'npm run minify' : null
-  }
-}
+  },
+})
 ```
 
 Commands can be a string, an array of strings, or an async function returning a command string. Use `&` suffix for background execution.
@@ -675,14 +687,14 @@ Commands can be a string, an array of strings, or an async function returning a 
 
 Creates symlinks from directories into the output folder.
 
-**Config:**
+**Factory options:**
 ```js
-shares: {
+shares({
   locations: [
     'node_modules/alpinejs/dist',
     { source: 'vendor/icons', destination: 'icons' }
-  ]
-}
+  ],
+})
 ```
 
 ### `api`

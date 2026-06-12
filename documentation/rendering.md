@@ -76,16 +76,23 @@ render({
 })
 ```
 
-The `config` object passed to render contains only keys from `runtime.config` that start with `render-`, so plugins can have render-time configuration:
+The `config` object passed to a renderer's `load` / `render` is the same `options` the consumer passed at the factory call site. Renderer-specific config is set inline:
 
 ```js
 // mikser.config.js
+import { renderHbs } from 'mikser-io'
+
 export default {
-  'render-hbs': {
-    helpers: ['./helpers/custom.js']
-  }
+  plugins: [
+    renderHbs({
+      helpers: ['./helpers/custom.js'],
+    }),
+    // ...
+  ],
 }
 ```
+
+The renderer's factory stashes the options on the descriptor; the dispatcher passes them through as the `config` arg to `load` and `render` (ADR-0010).
 
 ## The Runtime Object in Templates
 
@@ -217,7 +224,7 @@ Plus two helpers registered directly by `render-hbs`:
 | `date` | [dayjs](https://www.npmjs.com/package/dayjs) | `{{date created "YYYY-MM-DD"}}` — format defaults to `YYYY-MM-DD` |
 | `url` | built-in | `{{url}}` (current context) or `{{url someObj}}` |
 
-`markdown` and `removeMarkdown` are not included by default. Add the [`mikser-io-render-markdown`](https://www.npmjs.com/package/mikser-io-render-markdown) plugin (in your `plugins` list as `'render-markdown'`) — its runtime functions become Handlebars helpers automatically: `{{{markdown meta.body}}}`, `{{removeMarkdown meta.body}}`.
+`markdown` and `removeMarkdown` are not included by default. Add the [`mikser-io-render-markdown`](https://www.npmjs.com/package/mikser-io-render-markdown) plugin: `import { renderMarkdown } from 'mikser-io-render-markdown'` and add `renderMarkdown()` to your plugins list. Its runtime functions become Handlebars helpers automatically: `{{{markdown meta.body}}}`, `{{removeMarkdown meta.body}}`.
 
 **Partials:** Any layout with a name starting with `partials` and `format: 'hbs'` is automatically registered as a Handlebars partial:
 ```

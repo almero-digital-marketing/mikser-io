@@ -1,12 +1,12 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
-import jsonPlugin from '../../../src/plugins/json.js'
+import { json } from '../../../src/plugins/json.js'
 import { createHarness } from '../plugin-harness.js'
 
 function setup(journal) {
     const h = createHarness({ journal })
-    jsonPlugin(h.core)
+    json()(h.core)
     return h
 }
 

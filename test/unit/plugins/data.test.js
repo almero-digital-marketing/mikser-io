@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import dataPlugin from '../../../src/plugins/data.js'
+import { data } from '../../../src/plugins/data.js'
 import { createHarness } from '../plugin-harness.js'
 
 async function withTempOutput(fn) {
@@ -20,7 +20,7 @@ async function withTempOutput(fn) {
 describe('data plugin', () => {
     it('registers core lifecycle hooks', () => {
         const h = createHarness()
-        dataPlugin(h.core)
+        data()(h.core)
         assert.ok(h.hooks.loaded.length >= 1)
         assert.ok(h.hooks.afterRender.length >= 1)
         assert.ok(h.hooks.finalize.length >= 1)
@@ -30,7 +30,7 @@ describe('data plugin', () => {
     it('computes dataFolder under outputFolder on onLoaded', async () => {
         await withTempOutput(async ({ workingFolder, outputFolder }) => {
             const h = createHarness({ options: { workingFolder, outputFolder } })
-            dataPlugin(h.core)
+            data()(h.core)
             await h.runHook('loaded')
             assert.equal(h.runtime.options.dataFolder, path.join(outputFolder, 'data'))
         })
@@ -40,19 +40,16 @@ describe('data plugin', () => {
         await withTempOutput(async ({ workingFolder, outputFolder }) => {
             const h = createHarness({
                 options: { workingFolder, outputFolder },
-                config: {
-                    data: {
-                        entities: {
-                            document: { query: () => true, token: 'tenant-a' },
-                        },
-                    },
-                },
                 journal: [{
                     entity: { id: '/d/post.md', collection: 'documents', name: 'post', type: 'document', time: Date.now() },
                     operation: 'create',
                 }],
             })
-            dataPlugin(h.core)
+            data({
+                entities: {
+                    document: { query: () => true, token: 'tenant-a' },
+                },
+            })(h.core)
             await h.runHook('loaded')
             await h.runHook('beforeRender')
 
@@ -67,19 +64,16 @@ describe('data plugin', () => {
         await withTempOutput(async ({ workingFolder, outputFolder }) => {
             const h = createHarness({
                 options: { workingFolder, outputFolder },
-                config: {
-                    data: {
-                        entities: {
-                            document: { query: () => true },
-                        },
-                    },
-                },
                 journal: [{
                     entity: { id: '/d/post.md', collection: 'documents', name: 'post', type: 'document', time: Date.now() },
                     operation: 'create',
                 }],
             })
-            dataPlugin(h.core)
+            data({
+                entities: {
+                    document: { query: () => true },
+                },
+            })(h.core)
             await h.runHook('loaded')
             await h.runHook('beforeRender')
 
@@ -91,20 +85,17 @@ describe('data plugin', () => {
         await withTempOutput(async ({ workingFolder, outputFolder }) => {
             const h = createHarness({
                 options: { workingFolder, outputFolder },
-                config: {
-                    data: {
-                        entities: {
-                            docs: { query: e => e.type === 'document', token: 'tenant-a' },
-                            layouts: { query: e => e.type === 'layout', token: 'tenant-b' },
-                        },
-                    },
-                },
                 journal: [
                     { entity: { id: '/d/post.md', name: 'post', type: 'document', time: Date.now() }, operation: 'create' },
                     { entity: { id: '/l/page.hbs', name: 'page', type: 'layout', time: Date.now() }, operation: 'create' },
                 ],
             })
-            dataPlugin(h.core)
+            data({
+                entities: {
+                    docs: { query: e => e.type === 'document', token: 'tenant-a' },
+                    layouts: { query: e => e.type === 'layout', token: 'tenant-b' },
+                },
+            })(h.core)
             await h.runHook('loaded')
             await h.runHook('beforeRender')
 
@@ -122,15 +113,12 @@ describe('data plugin', () => {
             const h = createHarness({
                 options: { workingFolder, outputFolder },
                 entities: documents,
-                config: {
-                    data: {
-                        catalog: {
-                            sitemap: { query: () => true, token: 'cat-namespace' },
-                        },
-                    },
-                },
             })
-            dataPlugin(h.core)
+            data({
+                catalog: {
+                    sitemap: { query: () => true, token: 'cat-namespace' },
+                },
+            })(h.core)
             await h.runHook('loaded')
             await h.runHook('finalize')
 
@@ -145,20 +133,17 @@ describe('data plugin', () => {
         await withTempOutput(async ({ workingFolder, outputFolder }) => {
             const h = createHarness({
                 options: { workingFolder, outputFolder },
-                config: {
-                    data: {
-                        context: {
-                            full: { query: () => true, token: 'ctx-ns' },
-                        },
-                    },
-                },
                 journal: [{
                     entity: { id: '/d/post.md', name: 'post', type: 'document', time: Date.now() },
                     operation: 'render',
                     context: { data: { hello: 'world' } },
                 }],
             })
-            dataPlugin(h.core)
+            data({
+                context: {
+                    full: { query: () => true, token: 'ctx-ns' },
+                },
+            })(h.core)
             await h.runHook('loaded')
             await h.runHook('afterRender')
 

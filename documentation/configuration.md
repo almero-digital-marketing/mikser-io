@@ -10,26 +10,31 @@ Mikser is configured via a `mikser.config.js` file in your working folder, plus 
 
 ## Config File
 
-The config file must be an ES module exporting either an object or an async function:
+The config file must be an ES module exporting either an object or an async function. Plugins are imported by name and called as factories; each entry in `plugins: []` is a factory return value (lifecycle plugin closure or renderer/postprocessor descriptor). Per-plugin options live at the factory call site — there are no `runtime.config.<plugin>` blocks anymore (ADR-0010).
 
 ```js
 // mikser.config.js — object form
+import { documents, layouts } from 'mikser-io'
+
 export default {
-  plugins: ['documents', 'layouts'],
-  layouts: {
-    cleanUrls: true
-  }
+  plugins: [
+    documents(),
+    layouts({ cleanUrls: true }),
+  ],
 }
 ```
 
 ```js
 // mikser.config.js — function form (receives the runtime singleton)
-export default async (runtime) => {
-  return {
-    plugins: ['documents', 'layouts'],
-    outputFolder: runtime.options.mode === 'production' ? 'dist' : 'out'
-  }
-}
+import { documents, layouts } from 'mikser-io'
+
+export default async (runtime) => ({
+  plugins: [
+    documents(),
+    layouts(),
+  ],
+  outputFolder: runtime.options.mode === 'production' ? 'dist' : 'out',
+})
 ```
 
 ## Core Options
@@ -41,7 +46,7 @@ These options are part of `runtime.options` and apply to the engine itself.
 | `workingFolder` | `-i, --working-folder` | string | `./` | Root folder of the project. All other paths are relative to this. |
 | `outputFolder` | `-o, --output-folder` | string | `out` | Folder where rendered output is written. |
 | `runtimeFolder` | `-e, --runtime-folder` | string | `runtime` | Folder for temporary files. The engine's sqlite substrate lives at `runtime/mikser.sqlite` (entities, refs, snapshots, journal, schema-version meta all in one file). |
-| `plugins` | `-p, --plugins` | string[] | `[]` | List of plugins to load. |
+| `plugins` | — | factory-call[] | `[]` | Array of factory returns. Import the factory by name and call it: `plugins: [documents(), layouts({ cleanUrls: true })]`. Config-only — there's no `--plugins` CLI flag under v9 because identifiers can't be passed via the command line (ADR-0010). |
 | `config` | `-c, --config` | string | `./mikser.config.js` | Path to the config file. |
 | `mode` | `-m, --mode` | string | `development` | Runtime mode, accessible as `runtime.options.mode`. |
 | `clear` | `-r, --clear` | boolean | `false` | Delete `outputFolder` and `runtimeFolder` before each run. |

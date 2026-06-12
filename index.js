@@ -16,3 +16,34 @@ export * from './src/logger.js'
 export * from './src/engine.js'
 export * from './src/render.js'
 export * from './src/source.js'
+
+// Built-in plugin factories. Each takes options and returns the
+// (core) => void closure the engine calls at onLoad time. See ADR-0010
+// for the v9 plugin shape.
+export { api }           from './src/plugins/api.js'
+export { assets }        from './src/plugins/assets.js'
+export { commands }      from './src/plugins/commands.js'
+export { data }          from './src/plugins/data.js'
+export { documents }     from './src/plugins/documents.js'
+export { files }         from './src/plugins/files.js'
+export { frontMatter }   from './src/plugins/front-matter.js'
+export { json }          from './src/plugins/json.js'
+export { layouts }       from './src/plugins/layouts.js'
+export { mapper }        from './src/plugins/mapper.js'
+export { observer }      from './src/plugins/observer.js'
+export { preview }       from './src/plugins/preview.js'
+export { resources }     from './src/plugins/resources.js'
+export { shares }        from './src/plugins/shares.js'
+export { validator }     from './src/plugins/validator.js'
+export { yaml }          from './src/plugins/yaml.js'
+
+// Built-in renderers. v9 factory shape returns the descriptor that the
+// loader stores in `runtime.renderers`; the same module also still
+// exports `load`/`render` at the top level so Piscina worker dispatch
+// can resolve via dynamic import. ADR-0010.
+export { renderAsset }    from './src/plugins/render/asset.js'
+export { renderFile }     from './src/plugins/render/file.js'
+export { renderHbs }      from './src/plugins/render/hbs.js'
+export { renderHref }     from './src/plugins/render/href.js'
+export { renderPreset }   from './src/plugins/render/preset.js'
+export { renderResource } from './src/plugins/render/resource.js'

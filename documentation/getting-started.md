@@ -41,18 +41,17 @@ Create `mikser.config.js` in the root of your project:
 
 ```js
 // mikser.config.js
+import { documents, layouts } from 'mikser-io'
+
 export default {
-  plugins: ['documents', 'layouts'],
-
-  documents: {
-    documentsFolder: 'content'
-  },
-
-  layouts: {
-    layoutsFolder: 'layouts',
-    autoLayouts: true,
-    cleanUrls: true
-  }
+  plugins: [
+    documents({ documentsFolder: 'content' }),
+    layouts({
+      layoutsFolder: 'layouts',
+      autoLayouts: true,
+      cleanUrls: true,
+    }),
+  ],
 }
 ```
 
@@ -125,13 +124,13 @@ mikser [options]
 ## Using Mikser Programmatically
 
 ```js
-import { setup } from 'mikser-io'
+import { setup, documents, layouts } from 'mikser-io'
 
 const runtime = await setup({
   workingFolder: './my-project',
-  plugins: ['documents', 'layouts'],
+  plugins: [documents(), layouts()],
   outputFolder: 'dist',
-  mode: 'production'
+  mode: 'production',
 })
 
 await runtime.start()
@@ -162,17 +161,17 @@ needing the API plugin itself:
 
 ```js
 import {
-  setup,
-  runtime,
-  findEntities,
-  useRenderer,
-  useCollection,
+  setup, runtime, findEntities, useRenderer, useCollection,
+  documents, frontMatter, yaml, layouts, renderHbs,
 } from 'mikser-io'
+import { postPdf } from 'mikser-io-post-pdf'
 
 await setup({
   workingFolder: './content',
-  plugins: ['documents', 'front-matter', 'yaml', 'layouts',
-            'render-hbs', 'post-pdf'],
+  plugins: [
+    documents(), frontMatter(), yaml(), layouts(),
+    renderHbs(), postPdf(),
+  ],
 })
 await runtime.start()
 

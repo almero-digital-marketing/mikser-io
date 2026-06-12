@@ -312,18 +312,19 @@ function sseSend(res, eventName, payload) {
     } catch { /* connection dropped — cleanup runs via 'close' */ }
 }
 
-export default ({
-    runtime,
-    onLoaded,
-    onFinalize,
-    useLogger,
-    useJournal,
-    constants: { OPERATION },
-}) => {
+export function api(options = {}) {
+    return ({
+        runtime,
+        onLoaded,
+        onFinalize,
+        useLogger,
+        useJournal,
+        constants: { OPERATION },
+    }) => {
     // Shared between onLoaded (populates) and onFinalize (consumes).
     // Hoisted so the lifecycle hooks see the same registry; the body
     // inside onLoaded is what actually fills it in based on
-    // runtime.config.api.endpoints.
+    // `options.endpoints`.
     let apiBase = '/api'
     const cachedEndpoints = []
 
@@ -343,9 +344,9 @@ export default ({
             )
         }
 
-        const endpoints = runtime.config.api?.endpoints
+        const endpoints = options.endpoints
         if (!endpoints || !Object.keys(endpoints).length) {
-            logger.warn('Api plugin loaded but no endpoints configured (api.endpoints) — nothing to mount')
+            logger.warn('Api plugin loaded but no endpoints configured (pass { endpoints: {...} } to api()) — nothing to mount')
             return
         }
 
@@ -353,10 +354,10 @@ export default ({
             throw new Error('Express is required for the api plugin — run: npm install express')
         })
 
-        apiBase = runtime.config.api?.base ?? '/api'
+        apiBase = options.base ?? '/api'
         const base = apiBase   // alias so existing local references still work
-        const globalPageSize = runtime.config.api?.pageSize ?? 10
-        const globalRenderTimeout = runtime.config.api?.renderTimeout ?? 30_000
+        const globalPageSize = options.pageSize ?? 10
+        const globalRenderTimeout = options.renderTimeout ?? 30_000
 
         // Preview workflow (render → cache → URL) lives in its own
         // plugin (src/plugins/preview.js) as of v7.3.0. The api plugin
@@ -916,4 +917,5 @@ export default ({
             }
         }
     })
+    }
 }

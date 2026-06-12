@@ -125,3 +125,17 @@ export async function render({ entity, runtime, track }) {
         throw err
     }
 }
+
+// v9 factory shape — returns a renderer descriptor that the v9
+// loader (src/plugins.js) registers under `runtime.renderers`. The
+// top-level `load`/`render` exports above stay too so render workers
+// (Piscina) can still resolve via dynamic import without going
+// through the registry. ADR-0010.
+export function renderHbs(options = {}) {
+    return {
+        name: options.name ?? 'hbs',
+        options,
+        load,
+        render,
+    }
+}

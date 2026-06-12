@@ -6,7 +6,7 @@ import { globby } from 'globby'
 import _ from 'lodash'
 import map from 'p-map'
 
-// Normalize a `runtime.config.assets.presets[name]` value to a consistent
+// Normalize a `options.presets[name]` value to a consistent
 // { matches, options } shape so callers don't have to inspect which form
 // the config used.
 //
@@ -48,35 +48,36 @@ export function normalizePresetConfig(value) {
     return { matches: [value], options: {} }
 }
 
-export default ({
-    runtime,
-    onLoaded,
-    useLogger,
-    onImport,
-    watch,
-    onProcessed,
-    onBeforeRender,
-    useJournal,
-    createEntity,
-    updateEntity,
-    deleteEntity,
-    renderEntities,
-    onComplete,
-    onSync,
-    onFinalize,
-    findEntity,
-    matchEntity,
-    changeExtension,
-    constants: { ACTION, OPERATION },
-}) => {
+export function assets(options = {}) {
+    return ({
+        runtime,
+        onLoaded,
+        useLogger,
+        onImport,
+        watch,
+        onProcessed,
+        onBeforeRender,
+        useJournal,
+        createEntity,
+        updateEntity,
+        deleteEntity,
+        renderEntities,
+        onComplete,
+        onSync,
+        onFinalize,
+        findEntity,
+        matchEntity,
+        changeExtension,
+        constants: { ACTION, OPERATION },
+    }) => {
     const collection = 'presets'
     const type = 'preset'
     const checksumMap = new Set()
 
     async function getEntityPresets(entity) {
         const entityPresets = []
-        for (let preset in (runtime.config.assets?.presets || {})) {
-            const { matches } = normalizePresetConfig(runtime.config.assets.presets[preset])
+        for (let preset in (options.presets || {})) {
+            const { matches } = normalizePresetConfig(options.presets[preset])
             for (let match of matches) {
                 if (matchEntity(entity, match)) {
                     entityPresets.push(preset)
@@ -178,7 +179,7 @@ export default ({
                 // picked up on the next cycle without rebuilding the
                 // preset entity from its module.
                 const { options: configOptions } = normalizePresetConfig(
-                    runtime.config.assets?.presets?.[entityPreset]
+                    options.presets?.[entityPreset]
                 )
                 let destination = entity.name
                 if (entity.preset.format) {
@@ -204,27 +205,27 @@ export default ({
     onLoaded(async () => {
         const logger = useLogger()
 
-        const assetsName = runtime.config.assets?.assetsFolder || 'assets'
+        const assetsName = options.assetsFolder || 'assets'
         runtime.state.assets = {
             presets: {},
             assetsMap: {},
-            assetsFolder: runtime.config.assets?.outputFolder
-                ? path.join(runtime.config.assets.outputFolder, assetsName)
+            assetsFolder: options.outputFolder
+                ? path.join(options.outputFolder, assetsName)
                 : assetsName,
         }
 
-        runtime.options.presets = runtime.config.presets?.presetsFolder || collection
+        runtime.options.presets = options.presetsFolder || collection
         runtime.options.presetsFolder = path.join(runtime.options.workingFolder, runtime.options.presets)
         logger.debug('Presets folder: %s', runtime.options.presetsFolder)
         await mkdir(runtime.options.presetsFolder, { recursive: true })
 
-        runtime.options.assets = runtime.config.assets?.assetsFolder || 'assets'
+        runtime.options.assets = options.assetsFolder || 'assets'
         runtime.options.assetsFolder = path.join(runtime.options.workingFolder, runtime.options.assets)
         logger.debug('Assets folder: %s', runtime.options.assetsFolder)
         await mkdir(runtime.options.assetsFolder, { recursive: true })
 
         let link = path.join(runtime.options.outputFolder, runtime.options.assets)
-        if (runtime.config.assets?.outputFolder) link = path.join(runtime.options.outputFolder, runtime.config.assets?.outputFolder, runtime.options.assets)
+        if (options.outputFolder) link = path.join(runtime.options.outputFolder, options.outputFolder, runtime.options.assets)
         try {
             await mkdir(path.dirname(link), { recursive: true })
             await symlink(path.resolve(runtime.options.assetsFolder), link, 'dir')
@@ -317,7 +318,7 @@ export default ({
         // `mikser-io-preset-<name>`. Config is the source of truth for
         // which presets a project uses; this fills the names a folder
         // scan can't (the code lives in node_modules, not presets/).
-        for (const name of Object.keys(runtime.config.assets?.presets || {})) {
+        for (const name of Object.keys(options.presets || {})) {
             if (presets[name]) continue   // a local file already loaded it
             const resolved = resolvePreset(name)
             if (!resolved) {
@@ -430,8 +431,9 @@ export default ({
         }
     })
 
-    return {
-        collection,
-        type
+        return {
+            collection,
+            type,
+        }
     }
 }

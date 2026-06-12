@@ -30,22 +30,21 @@
 
 import sift from 'sift'
 
-export default ({ runtime, onLoaded, onPersist, useJournal, useLogger, constants: { OPERATION } }) => {
+export function preview(options = {}) {
+    return ({ runtime, onLoaded, onPersist, useJournal, useLogger, constants: { OPERATION } }) => {
     // Factory-scope cache. One per engine instance. Module-scope would
     // share across multiple engines in the same Node process, which is
     // a scenario mikser doesn't really support.
     const previews = new Map()   // filename → { bytes, mime, expiresAt, size, deps? }
     let bytesInUse = 0
 
-    // Config knobs with sensible defaults. The defaults match the
-    // values 7.2.x shipped under the api plugin so existing callers
-    // see no change in behavior — just a different plugin owner.
+    // Config knobs with sensible defaults.
     const config = () => ({
-        maxBytes:    runtime.config.preview?.maxBytes    ?? (100 * 1024 * 1024),
-        defaultTtl:  runtime.config.preview?.defaultTtl  ?? 600,
-        ttlMin:      runtime.config.preview?.ttlMin      ?? 30,
-        ttlMax:      runtime.config.preview?.ttlMax      ?? 3600,
-        path:        runtime.config.preview?.path        ?? '/preview',
+        maxBytes:    options.maxBytes    ?? (100 * 1024 * 1024),
+        defaultTtl:  options.defaultTtl  ?? 600,
+        ttlMin:      options.ttlMin      ?? 30,
+        ttlMax:      options.ttlMax      ?? 3600,
+        path:        options.path        ?? '/preview',
     })
 
     // Three primitives the rest of the plugin (and library-mode /
@@ -177,4 +176,5 @@ export default ({ runtime, onLoaded, onPersist, useJournal, useLogger, constants
     })
 
     return { name: 'preview' }
+    }
 }

@@ -8,18 +8,19 @@ import { useSource } from '../source.js'
 // Implementation moved to useSource — what's left here is the
 // plugin-specific declaration: collection name, folder config, file
 // content reading, import-phase scanning.
-export default (core) => {
-    const { runtime } = core
-    const collection = 'documents'
-    const type = 'document'
+export function documents(options = {}) {
+    return (core) => {
+        const collection = 'documents'
+        const type = 'document'
 
-    useSource(core, {
-        collection,
-        type,
-        folder: runtime.config.documents?.documentsFolder ?? collection,
-        content: true,
-        phase: 'import',
-    })
+        useSource(core, {
+            collection,
+            type,
+            folder: options.documentsFolder ?? collection,
+            content: true,
+            phase: 'import',
+        })
 
-    return { collection, type }
+        return { collection, type }
+    }
 }

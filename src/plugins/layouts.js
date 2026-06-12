@@ -83,29 +83,30 @@ function parseTemplateReferences(source) {
     }
 }
 
-export default ({
-    runtime,
-    onLoaded,
-    useLogger,
-    onImport,
-    createEntity,
-    updateEntity,
-    deleteEntity,
-    watch,
-    onProcessed,
-    onBeforeRender,
-    useJournal,
-    renderEntities,
-    onComplete,
-    onSync,
-    matchEntity,
-    changeExtension,
-    getFormatInfo,
-    findById,
-    findEntity,
-    findEntities,
-    constants: { ACTION, OPERATION, TASKS },
-}) => {
+export function layouts(options = {}) {
+    return ({
+        runtime,
+        onLoaded,
+        useLogger,
+        onImport,
+        createEntity,
+        updateEntity,
+        deleteEntity,
+        watch,
+        onProcessed,
+        onBeforeRender,
+        useJournal,
+        renderEntities,
+        onComplete,
+        onSync,
+        matchEntity,
+        changeExtension,
+        getFormatInfo,
+        findById,
+        findEntity,
+        findEntities,
+        constants: { ACTION, OPERATION, TASKS },
+    }) => {
     const collection = 'layouts'
     const type = 'layout'
 
@@ -268,7 +269,7 @@ export default ({
         // path. No need to keep the bare folder-name string on
         // runtime.options — runtime.options.layoutsFolder is the only
         // useful form downstream.
-        const layoutsFolderName = runtime.config.layouts?.layoutsFolder || collection
+        const layoutsFolderName = options.layoutsFolder || collection
         runtime.options.layoutsFolder = path.join(runtime.options.workingFolder, layoutsFolderName)
         runtime.options.layoutsStateFolder = path.join(runtime.options.outputFolder, 'state')
 
@@ -377,9 +378,9 @@ export default ({
                 case OPERATION.CREATE:
                 case OPERATION.UPDATE:
                     if (!entity.meta?.layout) {
-                        for (let pattern in runtime.config.layouts?.match || []) {
+                        for (let pattern in options.match || []) {
                             if (matchEntity(entity, pattern)) {
-                                const layoutName = runtime.config.layouts?.match[pattern]
+                                const layoutName = options.match[pattern]
                                 entity.layout = await resolveLayout(layoutName)
                                 // Mirror the resolved layout name into
                                 // meta.layout so the catalog's indexed
@@ -395,7 +396,7 @@ export default ({
                                 break
                             }
                         }
-                        if (!entity.layout && runtime.config.layouts?.autoLayouts && entity.id) {
+                        if (!entity.layout && options.autoLayouts && entity.id) {
                             const lookupBase = entity.id.replace(`/${entity.collection}/`,'')
                             const dir = path.dirname(lookupBase)
                             const base = path.basename(lookupBase)
@@ -672,14 +673,14 @@ export default ({
                                 }
                             }
 
-                            if (runtime.config.layouts?.cleanUrls && entity.layout.format == 'html') {
+                            if (options.cleanUrls && entity.layout.format == 'html') {
                                 pageEntity.destination = path.join(entity.destination.replace('index', ''), pageEntity.page.toString(), `index.${entity.layout.format}`)
                             } else {
                                 pageEntity.destination += page ? `.${pageEntity.page}.${entity.layout.format}` : `.${entity.layout.format}`
                             }
                         } else {
                             pageEntity.page = 1
-                            if (runtime.config.layouts?.cleanUrls && !_.endsWith(entity.name, 'index') && entity.layout.format == 'html') {
+                            if (options.cleanUrls && !_.endsWith(entity.name, 'index') && entity.layout.format == 'html') {
                                 pageEntity.destination = path.join(entity.destination, `index.${entity.layout.format}`)
                             } else {
                                 pageEntity.destination += `.${entity.layout.format}`
@@ -698,7 +699,20 @@ export default ({
                 }
             } else {
                 if (!_.endsWith(entity.name, entity.format)) {
-                    if (runtime.config.layouts?.cleanUrls && !_.endsWith(entity.name, 'index') && entity.layout.format == 'html') {
+                    // cleanUrls turns `foo` into `foo/index.html` so the
+                    // served URL is `/foo/`. Skip the transform when the
+                    // layout declares a postprocessor — the HTML render
+                    // is a throwaway stepping stone (a PDF stepping
+                    // stone has no served URL), and leaving it flat
+                    // means engine.onPostprocess's plain extension swap
+                    // produces `/foo.<ext>` naturally. Postprocess is
+                    // decoupled from cleanUrls by where the decision
+                    // gets made — not by the engine knowing about it.
+                    if (options.cleanUrls
+                        && !_.endsWith(entity.name, 'index')
+                        && entity.layout.format == 'html'
+                        && !entity.layout.postprocessor
+                    ) {
                         entity.destination = path.join(entity.destination, `index.${entity.layout.format}`)
                     } else {
                         entity.destination += `.${entity.layout.format}`
@@ -798,6 +812,7 @@ export default ({
 
     return {
         collection,
-        type
+        type,
+    }
     }
 }

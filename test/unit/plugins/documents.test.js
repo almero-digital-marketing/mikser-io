@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import documentsPlugin from '../../../src/plugins/documents.js'
+import { documents } from '../../../src/plugins/documents.js'
 import { createHarness } from '../plugin-harness.js'
 
 async function withTempWorking(fn) {
@@ -16,13 +16,13 @@ async function withTempWorking(fn) {
 describe('documents plugin', () => {
     it('exposes the documents collection identifier', () => {
         const h = createHarness()
-        const result = documentsPlugin(h.core)
+        const result = documents()(h.core)
         assert.deepEqual(result, { collection: 'documents', type: 'document' })
     })
 
     it('registers onLoaded, onImport, and a documents onSync handler', () => {
         const h = createHarness()
-        documentsPlugin(h.core)
+        documents()(h.core)
         assert.equal(h.hooks.loaded.length, 1)
         assert.equal(h.hooks.import.length, 1)
         assert.ok(h.sync.has('documents'))
@@ -31,7 +31,7 @@ describe('documents plugin', () => {
     it('on onLoaded, computes documentsFolder under workingFolder', async () => {
         await withTempWorking(async (workingFolder) => {
             const h = createHarness({ options: { workingFolder }, config: {} })
-            documentsPlugin(h.core)
+            documents()(h.core)
             await h.runHook('loaded')
             assert.equal(h.runtime.options.documentsFolder, path.join(workingFolder, 'documents'))
             assert.deepEqual(h.watchers, [{ name: 'documents', folder: path.join(workingFolder, 'documents') }])
@@ -42,9 +42,8 @@ describe('documents plugin', () => {
         await withTempWorking(async (workingFolder) => {
             const h = createHarness({
                 options: { workingFolder },
-                config: { documents: { documentsFolder: 'content' } },
             })
-            documentsPlugin(h.core)
+            documents({ documentsFolder: 'content' })(h.core)
             await h.runHook('loaded')
             assert.equal(h.runtime.options.documentsFolder, path.join(workingFolder, 'content'))
         })
@@ -56,7 +55,7 @@ describe('documents plugin', () => {
             const h = createHarness({
                 options: { workingFolder, documentsFolder: docsFolder },
             })
-            documentsPlugin(h.core)
+            documents()(h.core)
             await h.runHook('loaded')
 
             await writeFile(path.join(docsFolder, 'post.md'), '# hi')
@@ -78,7 +77,7 @@ describe('documents plugin', () => {
         await withTempWorking(async (workingFolder) => {
             const docsFolder = path.join(workingFolder, 'documents')
             const h = createHarness({ options: { workingFolder, documentsFolder: docsFolder } })
-            documentsPlugin(h.core)
+            documents()(h.core)
             await h.runHook('loaded')
 
             await writeFile(path.join(docsFolder, 'post.md'), 'changed')
@@ -96,7 +95,7 @@ describe('documents plugin', () => {
         // forwards id/collection/type, by design — DELETE entries are
         // intentionally sparse.
         const h = createHarness({ options: { documentsFolder: '/tmp/x' } })
-        documentsPlugin(h.core)
+        documents()(h.core)
         await h.runSync('documents', { action: 'delete', context: { relativePath: 'gone.md' } })
         const deletes = h.journal.filter(e => e.operation === 'delete')
         assert.equal(deletes.length, 1)
@@ -109,7 +108,7 @@ describe('documents plugin', () => {
 
     it('onSync returns false when relativePath is missing', async () => {
         const h = createHarness()
-        documentsPlugin(h.core)
+        documents()(h.core)
         const result = await h.runSync('documents', { action: 'create', context: {} })
         assert.equal(result, false)
     })
@@ -119,7 +118,7 @@ describe('documents plugin', () => {
             const docsFolder = path.join(workingFolder, 'documents')
             await rm(docsFolder, { recursive: true, force: true })
             const h = createHarness({ options: { workingFolder } })
-            documentsPlugin(h.core)
+            documents()(h.core)
             await h.runHook('loaded') // creates the folder
             await writeFile(path.join(docsFolder, 'a.md'), 'A')
             await writeFile(path.join(docsFolder, 'b.md'), 'B')

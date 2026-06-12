@@ -3,22 +3,23 @@ import { mkdir, writeFile, unlink, open } from 'fs/promises'
 import _ from 'lodash'
 import sift from 'sift'
 
-export default ({
-    onLoaded,
-    useLogger,
-    runtime,
-    useJournal,
-    normalize,
-    findEntities,
-    iterateEntities,
-    onAfterRender,
-    onFinalize,
-    onBeforeRender,
-    constants: { OPERATION },
-}) => {
+export function data(options = {}) {
+    return ({
+        onLoaded,
+        useLogger,
+        runtime,
+        useJournal,
+        normalize,
+        findEntities,
+        iterateEntities,
+        onAfterRender,
+        onFinalize,
+        onBeforeRender,
+        constants: { OPERATION },
+    }) => {
     onLoaded(async () => {
         const logger = useLogger()
-        runtime.options.data = runtime.config.data?.dataFolder || 'data'
+        runtime.options.data = options.dataFolder || 'data'
         runtime.options.dataFolder = path.join(runtime.options.outputFolder, runtime.options.data)
 
         logger.debug('Data folder: %s', runtime.options.dataFolder)
@@ -28,7 +29,7 @@ export default ({
     onBeforeRender(async () => {
         const logger = useLogger()
 
-        let entitiesConfig = runtime.config.data?.entities
+        let entitiesConfig = options.entities
         if (entitiesConfig === undefined) {
             entitiesConfig = {
                 document: {
@@ -102,7 +103,7 @@ export default ({
     onAfterRender(async () => {
         const logger = useLogger()
 
-        let contextConfig = runtime.config.data?.context
+        let contextConfig = options.context
         if (contextConfig === undefined) {
             contextConfig = {
                 context: {
@@ -142,13 +143,13 @@ export default ({
 
     onFinalize(async () => {
         const logger = useLogger()
-        for (let catalogName in runtime.config.data?.catalog || {}) {
+        for (let catalogName in options.catalog || {}) {
             // Per-config namespacing token — see the entities loop above.
-            const token = runtime.config.data?.catalog[catalogName].token
+            const token = options.catalog[catalogName].token
             const targetFolder = token
                 ? path.join(runtime.options.dataFolder, token)
                 : runtime.options.dataFolder
-            const cfg = runtime.config.data?.catalog[catalogName]
+            const cfg = options.catalog[catalogName]
             const catalogFilter = cfg.query ?? { type: 'document' }
             const mapEntity = cfg.map ?? (entity => entity)
             const pick = cfg.pick
@@ -200,4 +201,5 @@ export default ({
             }
         }
     })
+    }
 }

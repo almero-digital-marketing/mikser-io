@@ -3,6 +3,7 @@ import { createRequire } from 'node:module'
 import { existsSync } from 'node:fs'
 import _ from 'lodash'
 import { useLogger } from './engine.js'
+import engineRuntime from './runtime.js'
 
 export async function loadPlugin(pluginName, workingFolder, loggerOverride) {
     // Worker contexts don't have access to the engine's pino instance
@@ -10,6 +11,14 @@ export async function loadPlugin(pluginName, workingFolder, loggerOverride) {
     // their port-forwarded logger explicitly so plugin-load failures
     // surface back in the engine's log stream instead of disappearing.
     const logger = loggerOverride ?? useLogger()
+
+    // v9 registry first. Same shape as render.js — descriptors stored
+    // under their name, keyed without the `post-` prefix. Workers see
+    // empty registry and fall through to dynamic import.
+    const stripped = pluginName.replace(/^post-/, '')
+    const registered = engineRuntime.postprocessors?.get(stripped)
+    if (registered) return registered
+
     const require = createRequire(path.join(workingFolder, 'package.json'))
     let nodeModulesResolved
     try {
@@ -66,28 +75,28 @@ export default async ({ entity, options, config, context, state, logger, port })
         pluginsToLoad.push(...entity.meta.plugins)
     }
     pluginsToLoad.push(...options.plugins)
-    pluginsToLoad = _.uniq(pluginsToLoad.filter(pluginName => pluginName && pluginName.indexOf('post-') == 0))
+    // `context.plugins` / `entity.meta.plugins` carry string
+    // identifiers; `options.plugins` carries factory returns. Project
+    // descriptors to their `post-${name}` identifier so loadPlugin()
+    // can resolve them uniformly.
+    pluginsToLoad = _.uniq(pluginsToLoad
+        .map(p => {
+            if (typeof p === 'string') return p
+            if (p && typeof p === 'object' && typeof p.postprocess === 'function') {
+                return `post-${p.name}`
+            }
+            return null
+        })
+        .filter(p => p && p.indexOf('post-') == 0))
 
-    const runtime = {
-        [entity.type]: entity,
-        entity,
-        plugins,
-        config: config[`post-${postprocessor}`],
-        data: context.data,
-    }
-
+    // Resolve all plugins up front so we can populate `runtime.config`
+    // (the worker-side mini-runtime built below) with the requested
+    // postprocessor's own options — same channel the legacy v8 path
+    // populated via `runtime.config['post-pdf']`.
     for (let pluginName of pluginsToLoad) {
         const plugin = await loadPlugin(pluginName, options.workingFolder, logger)
         if (!plugin) continue // loadPlugin already logged the "not found" path
         plugins[pluginName] = plugin
-        if (plugin.load) {
-            try {
-                await plugin.load({ entity, options, config: config[pluginName], context, runtime, state, logger })
-            } catch (err) {
-                logger.error('Postprocess plugin %s load() failed: %s', pluginName, err.message)
-                throw err
-            }
-        }
     }
 
     const postprocessorPlugin = plugins[`post-${postprocessor}`]
@@ -97,5 +106,24 @@ export default async ({ entity, options, config, context, state, logger, port })
     if (typeof postprocessorPlugin.postprocess !== 'function') {
         throw new Error(`Plugin "post-${postprocessor}" does not export a postprocess() function`)
     }
-    return await postprocessorPlugin.postprocess({ entity, options, config, context, plugins, runtime, state, logger })
+
+    const runtime = {
+        [entity.type]: entity,
+        entity,
+        plugins,
+        config: postprocessorPlugin.options,
+        data: context.data,
+    }
+
+    for (const [pluginName, plugin] of Object.entries(plugins)) {
+        if (!plugin?.load) continue
+        try {
+            await plugin.load({ entity, options, config: plugin.options, context, runtime, state, logger })
+        } catch (err) {
+            logger.error('Postprocess plugin %s load() failed: %s', pluginName, err.message)
+            throw err
+        }
+    }
+
+    return await postprocessorPlugin.postprocess({ entity, options, config: postprocessorPlugin.options, context, plugins, runtime, state, logger })
 }

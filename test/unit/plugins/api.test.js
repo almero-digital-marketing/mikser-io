@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import apiPlugin, { sendRenderOutput } from '../../../src/plugins/api.js'
+import { api, sendRenderOutput } from '../../../src/plugins/api.js'
 import { createHarness } from '../plugin-harness.js'
 
 // Lightweight fake of the Express `res` object — captures enough state for
@@ -91,7 +91,7 @@ describe('api plugin: sendRenderOutput', () => {
 describe('api plugin: registration', () => {
     it('loads and registers onLoaded without requiring express up front', () => {
         const h = createHarness()
-        assert.doesNotThrow(() => apiPlugin(h.core))
+        assert.doesNotThrow(() => api()(h.core))
         assert.equal(h.hooks.loaded.length, 1)
     })
 
@@ -99,13 +99,13 @@ describe('api plugin: registration', () => {
         const { default: express } = await import('express')
         const app = express()
         const h = createHarness({ options: { app } })
-        apiPlugin(h.core)
+        api()(h.core)
         await assert.doesNotReject(() => h.runHook('loaded'))
     })
 
     it('fails fast with an actionable error if no runtime.options.app is present', async () => {
         const h = createHarness()                       // no `app` on options
-        apiPlugin(h.core)
+        api()(h.core)
         await assert.rejects(
             () => h.runHook('loaded'),
             /API plugin requires runtime\.options\.app.*--server.*setup/s,
@@ -127,7 +127,6 @@ describe('api plugin: /render endpoint (integration)', () => {
                 workingFolder: '/tmp/mikser-rest-pdf',
                 outputFolder: '/tmp/mikser-rest-pdf/out',
             },
-            config: { api: { endpoints: { default: { operations: ['render'] } } } },
         })
 
         // The API `/render` handler kicks off `runtime.process()` and waits
@@ -150,7 +149,7 @@ describe('api plugin: /render endpoint (integration)', () => {
         // fake process() see the same registrations.
         h.runtime.hooks.completed = h.runtime.hooks.complete
 
-        apiPlugin(h.core)
+        api({ endpoints: { default: { operations: ['render'] } } })(h.core)
         await h.runHook('loaded')
 
         const server = await new Promise((resolve) => {
@@ -186,7 +185,6 @@ describe('api plugin: /render endpoint (integration)', () => {
                 workingFolder: '/tmp/mikser-rest-batch',
                 outputFolder: '/tmp/mikser-rest-batch/out',
             },
-            config: { api: { endpoints: { default: { operations: ['render'] } } } },
         })
 
         // The plugin pipelines requests into the *next* cycle: anything
@@ -213,7 +211,7 @@ describe('api plugin: /render endpoint (integration)', () => {
         }
         h.runtime.hooks.completed = h.runtime.hooks.complete
 
-        apiPlugin(h.core)
+        api({ endpoints: { default: { operations: ['render'] } } })(h.core)
         await h.runHook('loaded')
 
         const server = await new Promise((resolve) => {
@@ -257,14 +255,13 @@ describe('api plugin: /render endpoint (integration)', () => {
                 workingFolder: '/tmp/mikser-rest-to',
                 outputFolder: '/tmp/mikser-rest-to/out',
             },
-            config: { api: { renderTimeout: 50, endpoints: { default: { operations: ['render'] } } } },
         })
         // process() never resolves — simulates a hung cycle. Per-request
         // timer fires first and rejects the promise with "Render timeout".
         h.runtime.process = () => new Promise(() => { })
         h.runtime.hooks.completed = h.runtime.hooks.complete
 
-        apiPlugin(h.core)
+        api({ renderTimeout: 50, endpoints: { default: { operations: ['render'] } } })(h.core)
         await h.runHook('loaded')
 
         const server = await new Promise((resolve) => {
@@ -294,7 +291,6 @@ describe('api plugin: /render endpoint (integration)', () => {
                 workingFolder: '/tmp/mikser-rest-options',
                 outputFolder: '/tmp/mikser-rest-options/out',
             },
-            config: { api: { endpoints: { default: { operations: ['render'] } } } },
         })
 
         // Capture the entity that the renderer was actually asked to
@@ -312,7 +308,7 @@ describe('api plugin: /render endpoint (integration)', () => {
         }
         h.runtime.hooks.completed = h.runtime.hooks.complete
 
-        apiPlugin(h.core)
+        api({ endpoints: { default: { operations: ['render'] } } })(h.core)
         await h.runHook('loaded')
 
         const server = await new Promise(r => { const s = app.listen(0, () => r(s)) })
@@ -346,7 +342,6 @@ describe('api plugin: /render endpoint (integration)', () => {
                 workingFolder: '/tmp/mikser-rest-nc',
                 outputFolder: '/tmp/mikser-rest-nc/out',
             },
-            config: { api: { endpoints: { default: { operations: ['render'] } } } },
         })
         // Cycle finishes immediately, but the completed hook is never fired
         // for this entity (e.g. no layout matched). useRenderer rejects with
@@ -354,7 +349,7 @@ describe('api plugin: /render endpoint (integration)', () => {
         h.runtime.process = async () => { /* no-op */ }
         h.runtime.hooks.completed = h.runtime.hooks.complete
 
-        apiPlugin(h.core)
+        api({ endpoints: { default: { operations: ['render'] } } })(h.core)
         await h.runHook('loaded')
 
         const server = await new Promise((resolve) => {
@@ -389,10 +384,9 @@ describe('api plugin: per-endpoint auth + scope', () => {
         const app = express()
         const h = createHarness({
             options: { app, workingFolder: '/tmp/mikser-rest-ep', outputFolder: '/tmp/mikser-rest-ep/out' },
-            config: { api: { endpoints } },
             entities,
         })
-        apiPlugin(h.core)
+        api({ endpoints })(h.core)
         await h.runHook('loaded')
         const server = await new Promise((resolve) => {
             const s = app.listen(0, () => resolve(s))
@@ -542,10 +536,9 @@ describe('api plugin: rich queries (GET operators + POST /entities/query)', () =
         const app = express()
         const h = createHarness({
             options: { app, workingFolder: '/tmp/mikser-rest-q', outputFolder: '/tmp/mikser-rest-q/out' },
-            config: { api: { endpoints } },
             entities,
         })
-        apiPlugin(h.core)
+        api({ endpoints })(h.core)
         await h.runHook('loaded')
         const server = await new Promise((resolve) => {
             const s = app.listen(0, () => resolve(s))
@@ -641,10 +634,9 @@ describe('api plugin: expand parameter', () => {
         const app = express()
         const h = createHarness({
             options: { app, workingFolder: '/tmp/mikser-expand', outputFolder: '/tmp/mikser-expand/out' },
-            config: { api: { endpoints: { open: {} } } },
             entities,
         })
-        apiPlugin(h.core)
+        api({ endpoints: { open: {} } })(h.core)
         await h.runHook('loaded')
         const server = await new Promise((resolve) => {
             const s = app.listen(0, () => resolve(s))
@@ -869,21 +861,13 @@ describe('api plugin: expand-cache invalidation (ADR-0007 B9)', () => {
                 workingFolder: tmpRoot,
                 outputFolder:  tmpRoot,
             },
-            config: {
-                api: {
-                    endpoints: {
-                        // public endpoint with cache enabled
-                        public: { operations: ['list'], cache: true },
-                    },
-                },
-            },
             entities,
         })
         // Inject the refs mock into the harness's runtime so the api
         // plugin's subscribeGraph call uses our recorder.
         h.core.runtime.refs = refsMock
 
-        apiPlugin(h.core)
+        api({ endpoints: { public: { operations: ['list'], cache: true } } })(h.core)
         await h.runHook('loaded')
         const server = await new Promise((resolve) => {
             const s = app.listen(0, () => resolve(s))

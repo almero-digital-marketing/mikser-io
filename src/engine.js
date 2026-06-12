@@ -38,6 +38,24 @@ import { queryContext } from './database/query-context.js'
 function workerSafeOptions(opts) {
     const result = {}
     for (const [k, v] of Object.entries(opts)) {
+        // `plugins` is a mixed array of factory-return values — functions
+        // (lifecycle plugins; workers don't need them) and descriptor
+        // objects (renderers / postprocessors) carrying closures that
+        // can't survive structuredClone. Project descriptors to their
+        // `render-${name}` / `post-${name}` identifiers so the worker
+        // can resolve them via dynamic import.
+        if (k === 'plugins' && Array.isArray(v)) {
+            result[k] = v
+                .map(p => {
+                    if (p && typeof p === 'object' && typeof p.name === 'string'
+                        && (typeof p.load === 'function' || typeof p.render === 'function'))   return `render-${p.name}`
+                    if (p && typeof p === 'object' && typeof p.name === 'string'
+                        && typeof p.postprocess === 'function')                                return `post-${p.name}`
+                    return null
+                })
+                .filter(Boolean)
+            continue
+        }
         try {
             structuredClone(v)
             result[k] = v
@@ -89,7 +107,6 @@ export async function setup(options) {
     onInitialize(async () => {
         runtime.engine.commander?.version(packageInfo.version)
             .option('-i --working-folder <folder>', 'set mikser working folder', './')
-            .option('-p --plugins [plugins...]', 'list of mikser plugins to load', [])
             .option('-c --config <file>', 'set mikser mikser.config.js location', './mikser.config.js')
             .option('-m --mode <mode>', 'set mikser runtime mode', 'development')
             .option('-r --clear', 'clear current state before execution', false)
@@ -203,16 +220,6 @@ export async function setup(options) {
     onRender(async (signal) => {
         const logger = useLogger()
         const renderJobs = new Set()
-        // Computed once per cycle — runtime.config doesn't mutate
-        // mid-cycle, so every render gets the same filtered slice.
-        // Native key iteration + String#startsWith; was a per-render
-        // `_.pickBy(runtime.config, (v,k) => _.startsWith(k,'render-'))`
-        // which charged ~20 predicate calls + 1 object allocation per
-        // entry. Symmetric with onPostprocess's `config` below.
-        const renderConfig = {}
-        for (const key in runtime.config) {
-            if (key.startsWith('render-')) renderConfig[key] = runtime.config[key]
-        }
 
         // Collect this cycle's mutated entity ids/hrefs/entities so the
         // manifest skip check can re-render anything whose dependencies
@@ -326,7 +333,11 @@ export async function setup(options) {
                         ...runtime.options,
                         ...options,
                     },
-                    config: renderConfig,
+                    // Per-renderer options live on each renderer
+                    // descriptor (.options) and are picked up inside
+                    // render.js at dispatch time — no top-level config
+                    // channel anymore (ADR-0010).
+                    config: {},
                     context,
                     state: runtime.state,
                     track,
@@ -470,25 +481,13 @@ export async function setup(options) {
         for await (const { entity, options, context, output } of useJournal('Queuing postprocess', [OPERATION.RENDER], signal)) {
             if (output?.success && options.postprocessor) {
                 const ext = await resolveOutputExt(options.postprocessor)
-                let destination = changeExtension(entity.destination, ext)
-
-                // cleanUrls renders a non-index page `foo` to
-                // `foo/index.html` so the served URL is `/foo/`. A
-                // postprocessor that emits a *different* file type (e.g.
-                // PDF) shouldn't inherit that clean-URL folder — a
-                // downloadable artifact wants to be `foo.pdf`, not
-                // `foo/index.pdf`. Collapse the `/index` segment when the
-                // produced extension differs from the rendered page's.
-                // Genuine index documents (name ends in `index`) keep
-                // their path.
-                const originExt = path.extname(entity.destination).slice(1)
-                const isCleanUrlPage =
-                    runtime.config.layouts?.cleanUrls &&
-                    !_.endsWith(entity.name, 'index') &&
-                    path.basename(entity.destination, path.extname(entity.destination)) === 'index'
-                if (ext !== originExt && isCleanUrlPage) {
-                    destination = `${path.dirname(entity.destination)}.${ext}`
-                }
+                // Engine swaps the extension on whatever destination the
+                // entity carries. Routing semantics (cleanUrls folder
+                // structure, alternate placements, etc.) are whoever-set-
+                // entity.destination's responsibility — typically the
+                // layouts plugin during layout-match. The postprocess
+                // subsystem has no opinion about routing.
+                const destination = changeExtension(entity.destination, ext)
 
                 tasks.push({
                     entity: {
@@ -521,14 +520,23 @@ export async function setup(options) {
 
     onPostprocess(async (signal) => {
         const logger = useLogger()
-        const config = _.pickBy(runtime.config, (value, key) => _.startsWith(key, 'post-'))
 
+        // Collect every postprocessor descriptor in the plugins list
+        // and project to the `post-${name}` identifier the loader uses.
+        // Per-postprocessor options now live on each descriptor (.options)
+        // — no top-level `config['post-*']` channel anymore (ADR-0010).
+        const postPluginNames = []
+        for (const entry of runtime.options.plugins) {
+            if (entry && typeof entry === 'object' && typeof entry.postprocess === 'function' && typeof entry.name === 'string') {
+                postPluginNames.push(`post-${entry.name}`)
+            }
+        }
         const postPlugins = {}
-        for (const pluginName of runtime.options.plugins.filter(p => p.startsWith('post-'))) {
+        for (const pluginName of postPluginNames) {
             const plugin = await loadPostPlugin(pluginName, runtime.options.workingFolder)
             if (plugin) {
                 postPlugins[pluginName] = plugin
-                if (plugin.setup) await plugin.setup({ options: runtime.options, config: config[pluginName], state: runtime.state, logger })
+                if (plugin.setup) await plugin.setup({ options: runtime.options, config: plugin.options, state: runtime.state, logger })
             }
         }
 
@@ -546,7 +554,11 @@ export async function setup(options) {
                             ...runtime.options,
                             ...options,
                         },
-                        config,
+                        // Per-postprocessor options live on the descriptor
+                        // and are read inside postprocess.js at dispatch
+                        // time; the empty object here keeps the worker
+                        // arg shape stable.
+                        config: {},
                         context,
                         state: runtime.state
                     }
@@ -632,7 +644,7 @@ export async function setup(options) {
             postprocessJobs.size && logger.info('Postprocessed: %d', postprocessJobs.size)
         } finally {
             for (const [pluginName, plugin] of Object.entries(postPlugins)) {
-                if (plugin.teardown) await plugin.teardown({ options: runtime.options, config: config[pluginName], state: runtime.state, logger })
+                if (plugin.teardown) await plugin.teardown({ options: runtime.options, config: plugin.options, state: runtime.state, logger })
             }
         }
     })

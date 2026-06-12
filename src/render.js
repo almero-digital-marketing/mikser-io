@@ -6,6 +6,7 @@ import _ from 'lodash'
 import Database from 'better-sqlite3'
 import { useLogger } from './engine.js'
 import { formatLogArgs } from './utils.js'
+import engineRuntime from './runtime.js'
 
 // Worker-side sqlite handle. Opened lazily on first render task (we
 // only know the workingFolder/runtimeFolder once we receive a task —
@@ -78,6 +79,16 @@ export default async ({ entity, options, config, context, state, logger, port, t
     }
 
     async function loadPlugin(pluginName) {
+        // v9: check the runtime registry first. Renderers / postprocessors
+        // that came through `plugins: [renderHbs(), ...]` were stored at
+        // onLoad keyed by their descriptor name (e.g. 'hbs'). Strip the
+        // 'render-' prefix to match the registry key. Workers see an
+        // empty registry (separate process, separate runtime singleton)
+        // and fall through to the dynamic-import path below.
+        const stripped = pluginName.replace(/^render-/, '')
+        const registered = engineRuntime.renderers?.get(stripped)
+        if (registered) return registered
+
         const require = createRequire(path.join(options.workingFolder, 'package.json'))
         let nodeModulesResolved
         try {
@@ -120,7 +131,22 @@ export default async ({ entity, options, config, context, state, logger, port, t
         pluginsToLoad.push(...entity.meta.plugins)
     }
     pluginsToLoad.push(...options.plugins)
-    pluginsToLoad = _.uniq(pluginsToLoad.filter(pluginName => pluginName && pluginName.indexOf('render-') == 0))
+    // `context.plugins` and `entity.meta.plugins` carry string
+    // identifiers (frontmatter `plugins: ['render-href']` etc.).
+    // `options.plugins` carries factory-return values from the
+    // top-level config; renderer descriptors are projected to their
+    // identifier here. Lifecycle plugins (functions) and
+    // postprocessor descriptors get filtered out — the renderer path
+    // only cares about renderer-shaped entries.
+    pluginsToLoad = _.uniq(pluginsToLoad
+        .map(p => {
+            if (typeof p === 'string') return p
+            if (p && typeof p === 'object' && (typeof p.load === 'function' || typeof p.render === 'function')) {
+                return `render-${p.name}`
+            }
+            return null
+        })
+        .filter(p => p && p.indexOf('render-') == 0))
 
     ensureWorkerDb(options)
 
@@ -157,11 +183,11 @@ export default async ({ entity, options, config, context, state, logger, port, t
     for (let pluginName of pluginsToLoad) {
         const plugin = await loadPlugin(pluginName)
         plugins[pluginName] = plugin
-        if (plugin?.load) await plugin.load({ entity, options, config: config[pluginName], context, runtime, state, logger })
+        if (plugin?.load) await plugin.load({ entity, options, config: plugin.options, context, runtime, state, logger })
     }
 
     const rendererPlugin = plugins[`render-${renderer}`]
-    return await rendererPlugin?.render({ entity, options, config, context, plugins, runtime, state, logger, track })
+    return await rendererPlugin?.render({ entity, options, config: rendererPlugin?.options, context, plugins, runtime, state, logger, track })
 }
 
 // Build the error thrown when a submitted entity goes through a full

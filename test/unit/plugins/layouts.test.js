@@ -4,8 +4,8 @@ import { mkdtemp, rm, access, mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import layoutsPlugin from '../../../src/plugins/layouts.js'
-import frontMatterPlugin from '../../../src/plugins/front-matter.js'
+import { layouts } from '../../../src/plugins/layouts.js'
+import { frontMatter } from '../../../src/plugins/front-matter.js'
 import { createHarness } from '../plugin-harness.js'
 
 async function withTempWorking(fn) {
@@ -17,7 +17,7 @@ async function withTempWorking(fn) {
 describe('layouts plugin', () => {
     it('registers all the expected hooks', () => {
         const h = createHarness()
-        layoutsPlugin(h.core)
+        layouts()(h.core)
         // One onLoaded handler — state init only. The MCP wrapper
         // (mikser_layouts_inspect) moved to the mikser-io-mcp plugin
         // in 8.2.0 and reaches in via runtime.options.layouts.inspect.
@@ -36,7 +36,7 @@ describe('layouts plugin', () => {
     it('initializes runtime.state.layouts on onLoaded with empty maps', async () => {
         await withTempWorking(async (workingFolder) => {
             const h = createHarness({ options: { workingFolder, outputFolder: path.join(workingFolder, 'out') } })
-            layoutsPlugin(h.core)
+            layouts()(h.core)
             await h.runHook('loaded')
             // sitemap + uriIndex retired — sitemap is now backed by
             // the catalog's indexed meta_href column, queried via the
@@ -49,7 +49,7 @@ describe('layouts plugin', () => {
     it('onSync CREATE registers a layout in state.layouts and writes a journal entry', async () => {
         await withTempWorking(async (workingFolder) => {
             const h = createHarness({ options: { workingFolder, outputFolder: path.join(workingFolder, 'out') } })
-            layoutsPlugin(h.core)
+            layouts()(h.core)
             await h.runHook('loaded')
             await h.runSync('layouts', { action: 'create', context: { relativePath: 'post.hbs' } })
 
@@ -66,7 +66,7 @@ describe('layouts plugin', () => {
     it('onSync CREATE for a sidecar .js layout drops .js from id', async () => {
         await withTempWorking(async (workingFolder) => {
             const h = createHarness({ options: { workingFolder, outputFolder: path.join(workingFolder, 'out') } })
-            layoutsPlugin(h.core)
+            layouts()(h.core)
             await h.runHook('loaded')
             await h.runSync('layouts', { action: 'create', context: { relativePath: 'post.hbs.js' } })
             const entry = h.journal.find(e => e.operation === 'create')
@@ -77,7 +77,7 @@ describe('layouts plugin', () => {
     it('onSync DELETE removes the layout from state.layouts and writes a delete entry', async () => {
         await withTempWorking(async (workingFolder) => {
             const h = createHarness({ options: { workingFolder, outputFolder: path.join(workingFolder, 'out') } })
-            layoutsPlugin(h.core)
+            layouts()(h.core)
             await h.runHook('loaded')
             await h.runSync('layouts', { action: 'create', context: { relativePath: 'post.hbs' } })
             assert.ok(h.runtime.state.layouts.layouts['post'])
@@ -93,9 +93,8 @@ describe('layouts plugin', () => {
         await withTempWorking(async (workingFolder) => {
             const h = createHarness({
                 options: { workingFolder, outputFolder: path.join(workingFolder, 'out') },
-                config: { layouts: { autoLayouts: true } },
             })
-            layoutsPlugin(h.core)
+            layouts({ autoLayouts: true })(h.core)
             await h.runHook('loaded')
             // Seed a layout
             await h.runSync('layouts', { action: 'create', context: { relativePath: 'post.hbs' } })
@@ -125,9 +124,8 @@ describe('layouts plugin', () => {
         await withTempWorking(async (workingFolder) => {
             const h = createHarness({
                 options: { workingFolder, outputFolder: path.join(workingFolder, 'out') },
-                config: { layouts: { autoLayouts: true } },
             })
-            layoutsPlugin(h.core)
+            layouts({ autoLayouts: true })(h.core)
             await h.runHook('loaded')
 
             // A render-submitted entity: no meta.layout, name won't
@@ -156,9 +154,8 @@ describe('layouts plugin', () => {
         await withTempWorking(async (workingFolder) => {
             const h = createHarness({
                 options: { workingFolder, outputFolder: path.join(workingFolder, 'out') },
-                config: { layouts: { autoLayouts: true } },
             })
-            layoutsPlugin(h.core)
+            layouts({ autoLayouts: true })(h.core)
             await h.runHook('loaded')
 
             // Same shape, but NOT a render request — no correlationId.
@@ -191,8 +188,8 @@ describe('layouts plugin', () => {
                 '---\nmatch: "@/articles/*"\nmcpUi:\n  mode: preview\n  description: "Article preview"\n  actions: ["approve","reject"]\n---\n<article>{{title}}</article>\n')
 
             const h = createHarness({ options: { workingFolder, outputFolder: path.join(workingFolder, 'out') } })
-            layoutsPlugin(h.core)
-            frontMatterPlugin(h.core)
+            layouts()(h.core)
+            frontMatter()(h.core)
             await h.runHook('loaded')
             await h.runHook('import')
 
@@ -231,8 +228,8 @@ describe('layouts plugin', () => {
                 '---\nmatch: "@/articles/*"\nmcpUi:\n  mode: preview\n---\n<article>{{title}}</article>\n')
 
             const h = createHarness({ options: { workingFolder, outputFolder: path.join(workingFolder, 'out') } })
-            layoutsPlugin(h.core)
-            frontMatterPlugin(h.core)
+            layouts()(h.core)
+            frontMatter()(h.core)
             await h.runHook('loaded')
             await h.runHook('import')
 
@@ -271,8 +268,8 @@ describe('layouts plugin', () => {
                 '---\nmode: edit\n---\n<form>{{title}}</form>\n')
 
             const h = createHarness({ options: { workingFolder, outputFolder: path.join(workingFolder, 'out') } })
-            layoutsPlugin(h.core)
-            frontMatterPlugin(h.core)
+            layouts()(h.core)
+            frontMatter()(h.core)
             await h.runHook('loaded')
             await h.runSync('layouts', { action: 'create', context: { relativePath: 'card.hbs' } })
             await h.runHook('process')
@@ -291,7 +288,7 @@ describe('layouts plugin', () => {
         // throwing — downstream renderers surface the real issue.
         await withTempWorking(async (workingFolder) => {
             const h = createHarness({ options: { workingFolder, outputFolder: path.join(workingFolder, 'out') } })
-            layoutsPlugin(h.core)
+            layouts()(h.core)
             await h.runHook('loaded')
             await h.runSync('layouts', { action: 'create', context: { relativePath: 'ghost.hbs' } })
 
@@ -305,7 +302,7 @@ describe('layouts plugin', () => {
 
     it('onSync returns false when relativePath is missing', async () => {
         const h = createHarness()
-        layoutsPlugin(h.core)
+        layouts()(h.core)
         assert.equal(await h.runSync('layouts', { action: 'create', context: {} }), false)
     })
 
@@ -313,7 +310,7 @@ describe('layouts plugin', () => {
         await withTempWorking(async (workingFolder) => {
             const outputFolder = path.join(workingFolder, 'out')
             const h = createHarness({ options: { workingFolder, outputFolder } })
-            layoutsPlugin(h.core)
+            layouts()(h.core)
             await h.runHook('loaded')
 
             const entity = {
@@ -334,7 +331,7 @@ describe('layouts plugin', () => {
         await withTempWorking(async (workingFolder) => {
             const outputFolder = path.join(workingFolder, 'out')
             const h = createHarness({ options: { workingFolder, outputFolder } })
-            layoutsPlugin(h.core)
+            layouts()(h.core)
             await h.runHook('loaded')
 
             const entity = {
@@ -357,7 +354,7 @@ describe('layouts plugin', () => {
             const outputFolder = path.join(workingFolder, 'out')
             const previewFolder = path.join(workingFolder, 'runtime', 'preview')
             const h = createHarness({ options: { workingFolder, outputFolder, previewFolder } })
-            layoutsPlugin(h.core)
+            layouts()(h.core)
             await h.runHook('loaded')
 
             // Intermediate: postprocessor is configured, no origin yet

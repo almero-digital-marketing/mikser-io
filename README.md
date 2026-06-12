@@ -92,9 +92,11 @@ Plugins extend the tool surface the same way they mount HTTP routes; install the
 
 ```js
 // mikser.config.js
+import { mcp } from 'mikser-io-mcp'
+
 export default {
-    plugins: ['mcp', /* … */],
-    // optional: mcp: { path: '/mcp', endpoints: { … } }
+    plugins: [mcp(), /* … */],
+    // mcp({ path: '/mcp', endpoints: { … } }) when options are needed
 }
 ```
 
