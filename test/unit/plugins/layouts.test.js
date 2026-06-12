@@ -349,6 +349,85 @@ describe('layouts plugin', () => {
         })
     })
 
+    // The cleanUrls × postprocess interaction lives in onBeforeRender's
+    // destination-assignment block. The engine's postprocess queue is
+    // now a plain changeExtension swap (no peek at runtime.config.layouts);
+    // the layouts plugin compensates by leaving destination flat
+    // (`/foo.html`) when the layout declares a postprocessor, so the
+    // engine's swap naturally produces `/foo.pdf`. If layouts ever goes
+    // back to writing `/foo/index.html` for a postprocessor-bearing
+    // layout, the engine emits `/foo/index.pdf` and the served-URL
+    // contract breaks. This test pins the decoupling.
+    describe('cleanUrls × postprocess destination assignment', () => {
+        // Harness for driving onBeforeRender against a single seeded
+        // entity. Stubs the refs surface so the incremental dispatch
+        // path picks the entity up via inverseClosureOf instead of the
+        // SQL --force path (which would need useDatabase).
+        async function runBeforeRender({ cleanUrls, postprocessor }) {
+            return withTempWorking(async (workingFolder) => {
+                const entity = {
+                    id: '/documents/foo.md',
+                    collection: 'documents',
+                    type: 'document',
+                    name: 'foo',
+                    format: 'md',
+                    time: 1,
+                    meta: {},
+                    layout: {
+                        name: 'page',
+                        template: 'hbs',
+                        format: 'html',
+                        ...(postprocessor ? { postprocessor } : {}),
+                    },
+                }
+                const h = createHarness({
+                    options: {
+                        workingFolder,
+                        outputFolder: path.join(workingFolder, 'out'),
+                        force: false,
+                    },
+                    entities: [entity],
+                })
+                // Incremental-dispatch path: refs.inverseClosureOf returns
+                // the seed set; manifest is left undefined (the ?. chains
+                // tolerate it).
+                h.runtime.refs = {
+                    inverseClosureOf: () => new Set([entity.id]),
+                }
+                layouts({ cleanUrls })(h.core)
+                await h.runHook('loaded')
+                // Seed a journal mutation so the incremental dispatch's
+                // useJournal walk finds it.
+                h.journal.push({
+                    id: 99,
+                    entity,
+                    operation: 'create',
+                    context: {},
+                    options: {},
+                    output: null,
+                })
+                await h.runHook('beforeRender', { aborted: false })
+                assert.equal(h.renderTasks.length, 1, 'expected one render task to be queued')
+                return h.renderTasks[0].entity.destination
+            })
+        }
+
+        it('cleanUrls on, no postprocessor → /foo/index.html (folder transform applied)', async () => {
+            const dest = await runBeforeRender({ cleanUrls: true, postprocessor: null })
+            assert.equal(dest, path.join('/foo', 'index.html'))
+        })
+
+        it('cleanUrls on, layout has postprocessor → /foo.html (folder transform skipped so engine swap yields /foo.<ext>)', async () => {
+            const dest = await runBeforeRender({ cleanUrls: true, postprocessor: 'pdf' })
+            assert.equal(dest, '/foo.html')
+        })
+
+        it('cleanUrls off, layout has postprocessor → /foo.html (basic shape, cleanUrls irrelevant)', async () => {
+            const dest = await runBeforeRender({ cleanUrls: false, postprocessor: 'pdf' })
+            assert.equal(dest, '/foo.html')
+        })
+    })
+
     it('onComplete writes the intermediate to previewFolder (not outputFolder) when options.save:false and a postprocessor is configured', async () => {
         await withTempWorking(async (workingFolder) => {
             const outputFolder = path.join(workingFolder, 'out')

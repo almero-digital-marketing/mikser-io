@@ -160,6 +160,10 @@ export function createHarness({
             if (typeof query === 'function') return entities.find(query)
             return entities.find(e => Object.entries(query).every(([k, v]) => e[k] === v))
         },
+        // Synchronous PK lookup mirroring catalog.js's findById. Layouts'
+        // onBeforeRender hydrates dispatch ids through this — the harness
+        // serves from the same in-memory entities array.
+        findById: (id) => entities.find(e => e?.id === id) ?? catalogStub.byId.get(id),
         findEntities: async (query) => {
             if (!query) return [...entities]
             if (typeof query === 'function') return entities.filter(query)

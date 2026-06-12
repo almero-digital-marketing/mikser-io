@@ -33,14 +33,20 @@ The rest of this document is about the second row.
 Set `cache: true` on the api endpoint:
 
 ```js
-api: {
-    endpoints: {
-        public: {
-            query: e => e.type === 'document' && e.meta?.published,
-            operations: ['list', 'subscribe'],
-            cache: true,                    // ← engages the per-query disk cache
-        },
-    },
+import { api } from 'mikser-io'
+
+export default {
+    plugins: [
+        api({
+            endpoints: {
+                public: {
+                    query: e => e.type === 'document' && e.meta?.published,
+                    operations: ['list', 'subscribe'],
+                    cache: true,            // ← engages the per-query disk cache
+                },
+            },
+        }),
+    ],
 }
 ```
 

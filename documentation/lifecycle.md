@@ -103,14 +103,17 @@ onInitialized(async () => {
 Config loading and plugin instantiation happen here.
 
 ```js
+import { myPlugin } from 'mikser-io-my-plugin'
+
 onLoad(async () => {
   // config.js has not yet been read
-  // Useful for adding plugins programmatically
-  runtime.options.plugins.push('my-plugin')
+  // Useful for adding plugins programmatically — push factory returns,
+  // never strings (ADR-0010).
+  runtime.options.plugins.push(myPlugin({ /* options */ }))
 })
 
 onLoaded(async () => {
-  // runtime.config is fully populated
+  // runtime.config holds engine-level keys + the plugins array
   // The engine sqlite database is open at runtime/mikser.sqlite
   // All plugins have been loaded and their hooks registered
 })
@@ -118,7 +121,10 @@ onLoaded(async () => {
 
 **What Mikser does here:**
 - Loads and evaluates `mikser.config.js` (and `config/*.config.js` files)
-- Calls `loadPlugin()` for each plugin in `runtime.options.plugins`
+- Dispatches each entry in `runtime.options.plugins` by shape — function
+  entries are lifecycle plugins (called with `core`), descriptor objects
+  are renderers or postprocessors stashed in `runtime.renderers` /
+  `runtime.postprocessors`
 - Opens `runtime/mikser.sqlite` and applies every registered schema
   (`mikser_entities`, `mikser_refs`, `mikser_snapshots`, plus any
   plugin-registered tables)
