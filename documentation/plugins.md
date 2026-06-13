@@ -204,28 +204,48 @@ files({
 
 ### `layouts`
 
-Manages HTML/template layouts. Layouts are assigned to documents and used during rendering.
+Manages HTML/template layouts. Every layout whose pattern hits an entity contributes a render task — multi-match by default, no "best match wins" tiebreaker. One source entity can produce multiple outputs of different formats simply by being matched by multiple layouts.
 
 **Factory options:**
 ```js
 layouts({
   layoutsFolder: 'layouts',    // default: 'layouts'
 
-  // Explicit pattern-to-layout mapping
+  // Each pattern that matches contributes a render task. Multi-match:
+  // an entity at /blog/welcome.md matches both '@/blog/*' (post) AND
+  // '@/**' (default) → two render tasks, one per layout.
   match: {
-    '@/blog/*': 'blog.hbs',
-    '@/pages/*': 'page.hbs',
-    '@/**': 'default.hbs'      // Fallback
+    '@/blog/*':  'post',
+    '@/pages/*': 'page',
+    '@/**':      'default',
   },
 
-  autoLayouts: true,           // Auto-match entity to layout within same directory namespace
-  cleanUrls: true              // /page.html → /page/index.html,
+  autoLayouts: true,           // Auto-match by name (single-match fallback; see below)
+  cleanUrls: true              // /page.html → /page/index.html
 })
 ```
 
-**Auto-layout matching (`autoLayouts: true`):**
+**Per-entity selection — `meta.layout` / `meta.layouts`:**
 
-For each entity, Mikser tries lookups in the entity's directory namespace, peeling trailing dot-segments off the basename. The first candidate that names an existing layout wins:
+An entity can override match-based assignment via frontmatter:
+
+```yaml
+---
+layout: post              # single — pick exactly one
+---
+```
+
+```yaml
+---
+layouts: [post, post-email]   # multiple — render the entity through each
+---
+```
+
+`layout` and `layouts` are mutually exclusive — both set is an error. When neither is set, the plugin falls back to `options.match` (multi-match) then `autoLayouts` (single-match peel ladder, see below).
+
+**Auto-layout matching (`autoLayouts: true`) — single-match fallback:**
+
+Only runs when no `options.match` pattern hit the entity. The peel ladder is a most-specific-name search by design and stays first-wins (not multi-match):
 
 | Entity (`entity.name`) | Candidates tried in order | Matches if layout exists at |
 |---|---|---|
@@ -235,10 +255,53 @@ For each entity, Mikser tries lookups in the entity's directory namespace, peeli
 
 Cross-directory auto-matching is intentionally not supported — pair `posts/article.md` with a top-level `article.eta` via `meta.layout: 'article'` or a `layouts.match` rule.
 
+**Per-layout destination override:**
+
+A layout's frontmatter can declare a `destination:` template. The template is Handlebars (path-shaped — substitutions only, no body rendering); it gets `{ entity }` as the context, is compiled once and cached, and the result is path-sanitized (`..` segments rejected). This fully overrides the default `entity.name + .format` derivation (and the cleanUrls folder transform).
+
+```yaml
+# layouts/post-card.html.hbs
+---
+match: '@/blog/*'
+destination: '/cards/{{entity.name}}.html'
+---
+```
+
+```yaml
+# Pull from meta
+---
+destination: '/{{entity.meta.year}}/{{entity.name}}.summary.html'
+---
+```
+
+```yaml
+# Use pagination context (when the sidecar paginates)
+---
+destination: '/archive/page-{{entity.page}}.html'
+---
+```
+
+**Destination collisions — fail-fast:**
+
+When two layouts match the same entity AND resolve to the same destination, the plugin logs a named-names error and drops every render task for that entity for the cycle. No winner — disambiguation is the author's call. The build continues for other entities.
+
+```
+Layout collision for /documents/blog/welcome.md:
+  - post → /blog/welcome.html
+  - post-card → /blog/welcome.html
+Set a `destination:` override on one of them, or change one's format.
+Skipping this entity for the cycle.
+```
+
+The common cases that hit this are:
+1. Two layouts produce the same format (`.html` from both `post.html.hbs` and `post-card.html.hbs`). Fix: set `destination:` on one.
+2. Two layouts with the same name in the same directory — file-system collision, not engine collision. Rename one.
+
 **Entity properties set on documents:**
-- `layout`: The matched layout entity object
-- `destination`: Resolved output path (applying cleanUrls)
-- `page` / `pages`: Pagination info (if layout provides pages data)
+- `layout`: The first matched layout (back-compat alias).
+- `layouts`: Array of all matched layouts (canonical under multi-match).
+- `destination`: Resolved output path — per-task; iterating `entity.layouts` lets you see each.
+- `page` / `pages`: Pagination info (if the layout's sidecar provides pages data).
 
 **Entity properties set on layouts:**
 - `id`, `uri`, `source`: Path info

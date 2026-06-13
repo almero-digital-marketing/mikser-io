@@ -144,8 +144,17 @@ brevity.
 ## Plugin map (`src/plugins/`)
 
 - `documents` — file→entity sync for the documents collection
-- `layouts` — layout matching + sitemap + `inspect()` primitive
-  (exposed at `runtime.options.layouts.inspect`)
+- `layouts` — multi-match layout assignment, sitemap, `inspect()`
+  primitive (at `runtime.options.layouts.inspect`). Every layout
+  whose pattern hits an entity contributes a render task (no
+  "best match wins"); `meta.layout: 'name'` / `meta.layouts: [...]`
+  is the per-entity opt-in override (dual key, both set → error).
+  `autoLayouts` peel ladder stays first-wins as a fallback.
+  Frontmatter `destination:` on a layout is a Handlebars template
+  (compiled-once cache, rendered with `{entity}`, path-sanitized)
+  that overrides the default `entity.name + .format` destination.
+  Two layouts resolving to the same destination → error logged with
+  both names, every task for that entity dropped for the cycle.
 - `files` — file→entity sync for the files collection
 - `assets` — asset references and copy
 - `resources` — resource references

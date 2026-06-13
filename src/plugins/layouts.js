@@ -712,9 +712,16 @@ export function layouts(options = {}) {
             const destinationsForEntity = new Map() // destination → layout.name
             let collisionFound = false
 
-            for (const layout of layoutsForEntity) {
+            for (const staleLayout of layoutsForEntity) {
                 if (collisionFound) break
                 if (signal.aborted) return
+
+            // Re-fetch the layout from the catalog. Front-matter
+            // mutations to layout entities (e.g. `meta.destination`)
+            // landed during onProcess but the snapshot stored on
+            // `entity.layouts` at onProcessed time can be stale; the
+            // catalog has the latest by onBeforeRender.
+            const layout = (await findEntity({ id: staleLayout.id })) || staleLayout
 
             const entity = _.cloneDeep(original)
             // Per-task: pin entity.layout to the layout being processed
