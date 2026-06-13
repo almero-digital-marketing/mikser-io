@@ -3,12 +3,38 @@ import { mkdir, writeFile, unlink, rmdir, readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { globby } from 'globby'
 import _ from 'lodash'
+import handlebars from 'handlebars'
 import { inputHashOf } from '../utils.js'
 import { createTrack } from '../track.js'
 import { queryContext } from '../catalog.js'
 import { gateChecksum, sweepDeleted, scanSummary } from '../source.js'
 import { checksumsByCollection } from '../catalog.js'
 import { useDatabase } from '../database/index.js'
+
+// Compile-once cache for per-layout `destination:` frontmatter
+// templates. Keyed by the template source string so multiple layouts
+// sharing the same template share the compiled function.
+const destinationTemplateCache = new Map()
+function compileDestinationTemplate(template) {
+    if (!destinationTemplateCache.has(template)) {
+        destinationTemplateCache.set(template, handlebars.compile(template))
+    }
+    return destinationTemplateCache.get(template)
+}
+
+// Path-traversal sanitization for destinations resolved from
+// frontmatter templates. Rejects anything that would escape the output
+// folder via `..` segments. Matches the forms-plugin sanitizer.
+function sanitizeDestination(p) {
+    if (p == null) return null
+    const s = String(p).replace(/\\/g, '/')
+    const leading = s.startsWith('/') ? '/' : ''
+    const normalized = path.posix.normalize(s.replace(/^\/+/, ''))
+    if (normalized === '..' || normalized.startsWith('../')) {
+        throw new Error(`layouts: rejected path-traversal in destination: ${p}`)
+    }
+    return leading + normalized
+}
 
 // Liquid / Handlebars / Eta keywords we don't want surfaced as
 // "variables this layout references." Anything that looks like a path
@@ -372,87 +398,145 @@ export function layouts(options = {}) {
             return (await findEntity({ id: stateEntry.id })) || stateEntry
         }
 
+        // Resolve the set of layouts that should render `entity` this
+        // cycle. Returns an array — empty if none matched. Rules:
+        //   1. meta.layout (string) and meta.layouts (array) can't both
+        //      be set; if both → throw, caught and logged below.
+        //   2. Author-declared selection (meta.layout / meta.layouts)
+        //      wins: every named layout is resolved; unknown names get
+        //      a warning but don't break the rest.
+        //   3. No author selection → multi-match across options.match
+        //      patterns. Every matching pattern contributes a layout.
+        //   4. No pattern matched AND options.autoLayouts → fall back
+        //      to the existing peel ladder; first found wins (the
+        //      ladder is a search-by-priority by design, not a list of
+        //      independent matches).
+        async function resolveLayoutsForEntity(entity) {
+            if (entity.meta?.layout && entity.meta?.layouts) {
+                throw new Error(
+                    `Entity ${entity.id}: both 'meta.layout' and 'meta.layouts' are set — pick one.`
+                )
+            }
+            const declared = Array.isArray(entity.meta?.layouts)
+                ? entity.meta.layouts
+                : entity.meta?.layout
+                    ? [entity.meta.layout]
+                    : null
+
+            if (declared) {
+                const resolved = []
+                for (const name of declared) {
+                    const layout = await resolveLayout(name)
+                    if (layout) {
+                        if (!resolved.find(l => l.name === layout.name)) resolved.push(layout)
+                    } else {
+                        logger.warn('Layout not found for %s: %s', entity.collection, entity.id, name)
+                    }
+                }
+                return resolved
+            }
+
+            // Multi-match over config patterns.
+            const matched = []
+            for (const pattern in options.match || []) {
+                if (matchEntity(entity, pattern)) {
+                    const name = options.match[pattern]
+                    const layout = await resolveLayout(name)
+                    if (layout && !matched.find(l => l.name === layout.name)) {
+                        matched.push(layout)
+                    }
+                }
+            }
+
+            // Auto-layout: only as a fallback when no pattern matched.
+            // The peel ladder is intentionally first-wins — it's a
+            // most-specific-name search, not a multi-match.
+            if (matched.length === 0 && options.autoLayouts && entity.id) {
+                const lookupBase = entity.id.replace(`/${entity.collection}/`, '')
+                const dir = path.dirname(lookupBase)
+                const base = path.basename(lookupBase)
+                const chunks = base.split('.')
+                const candidates = []
+                for (let i = chunks.length; i > 0; i--) {
+                    const head = chunks.slice(0, i).join('.')
+                    candidates.push(dir && dir !== '.' ? path.join(dir, head) : head)
+                }
+                const autoLayout = candidates.find(name => layouts[name])
+                if (autoLayout) {
+                    const layout = await resolveLayout(autoLayout)
+                    if (layout) matched.push(layout)
+                    logger.debug('Auto layout matched %s -> %s for %s', entity.name, autoLayout, entity.id)
+                } else {
+                    logger.trace('Auto layout no match for %s tried: %s', entity.id, candidates.join(', '))
+                }
+            }
+
+            return matched
+        }
+
         for await (let { entity, operation } of useJournal('Layouts processing', [OPERATION.CREATE, OPERATION.UPDATE, OPERATION.DELETE], signal)) {
             if (entity.collection == collection) continue
             switch (operation) {
                 case OPERATION.CREATE:
                 case OPERATION.UPDATE:
-                    if (!entity.meta?.layout) {
-                        for (let pattern in options.match || []) {
-                            if (matchEntity(entity, pattern)) {
-                                const layoutName = options.match[pattern]
-                                entity.layout = await resolveLayout(layoutName)
-                                // Mirror the resolved layout name into
-                                // meta.layout so the catalog's indexed
-                                // `meta_layout` column finds this entity
-                                // when downstream code queries "everything
-                                // with a layout." Author-declared cases
-                                // already have meta.layout set; this
-                                // covers config-pattern matches.
-                                if (entity.layout) {
-                                    entity.meta = entity.meta || {}
-                                    entity.meta.layout = layoutName
-                                }
-                                break
-                            }
-                        }
-                        if (!entity.layout && options.autoLayouts && entity.id) {
-                            const lookupBase = entity.id.replace(`/${entity.collection}/`,'')
-                            const dir = path.dirname(lookupBase)
-                            const base = path.basename(lookupBase)
-                            const chunks = base.split('.')
-                            const candidates = []
-
-                            // Peel trailing chunks within the entity's directory only.
-                            // "nginx.conf" (dir=".") -> ["nginx.conf", "nginx"]
-                            // "styles/post.css" (dir="styles") -> ["styles/post.css", "styles/post"]
-                            for (let i = chunks.length; i > 0; i--) {
-                                const head = chunks.slice(0, i).join('.')
-                                candidates.push(dir && dir !== '.' ? path.join(dir, head) : head)
-                            }
-
-                            const autoLayout = candidates.find(name => layouts[name])
-                            if (autoLayout) {
-                                entity.layout = await resolveLayout(autoLayout)
-                                // Same mirror as the config-pattern
-                                // path above — stamp meta.layout so the
-                                // catalog's indexed query finds this
-                                // entity.
-                                if (entity.layout) {
-                                    entity.meta = entity.meta || {}
-                                    entity.meta.layout = autoLayout
-                                }
-                                logger.debug('Auto layout matched %s -> %s for %s', entity.name, autoLayout, entity.id)
-                            } else {
-                                logger.trace('Auto layout no match for %s tried: %s', entity.id, candidates.join(', '))
-                            }
-                        }
-                    } else {
-                        entity.layout = await resolveLayout(entity.meta.layout)
+                    try {
+                        entity.layouts = await resolveLayoutsForEntity(entity)
+                    } catch (err) {
+                        logger.error('Layout resolution for %s: %s', entity.id, err.message)
+                        entity.layouts = []
                     }
-                    if (entity.meta?.layout && !entity.layout) {
-                        logger.warn('Layout not found for %s: %s', entity.collection, entity.id)
+                    // Back-compat alias. Most existing downstream code
+                    // reads `entity.layout`; keep it pointing at the
+                    // first matched layout so it stays useful. The
+                    // onBeforeRender task-build phase iterates
+                    // entity.layouts and reassigns entity.layout per
+                    // task to the layout being processed.
+                    entity.layout = entity.layouts[0]
+
+                    // Mirror the matched name(s) into meta so the
+                    // catalog's `meta_layout` index can find this
+                    // entity via "anything with a layout" queries.
+                    // Author-declared cases already have meta.layout
+                    // (or meta.layouts) set; this covers the
+                    // pattern-match / auto-layout paths.
+                    if (entity.layouts.length && !entity.meta?.layout && !entity.meta?.layouts) {
+                        entity.meta = entity.meta || {}
+                        if (entity.layouts.length === 1) {
+                            entity.meta.layout = entity.layouts[0].name
+                        } else {
+                            entity.meta.layouts = entity.layouts.map(l => l.name)
+                        }
                     }
+
                     // A render-requested entity (carries useRenderer's
                     // correlationId) that resolved to no layout will
                     // silently produce nothing — the caller just gets
-                    // api.js's "did not complete". Surface the real reason
-                    // here, where we authoritatively know no layout matched.
-                    // Gated on correlationId so the thousands of normal
-                    // layout-less content files stay quiet.
-                    if (!entity.layout && entity.options?.correlationId) {
+                    // api.js's "did not complete". Surface the real
+                    // reason here, where we authoritatively know no
+                    // layout matched. Gated on correlationId so the
+                    // thousands of normal layout-less content files
+                    // stay quiet.
+                    if (entity.layouts.length === 0 && entity.options?.correlationId) {
                         logger.warn(
-                            'Render requested for %s but no layout matched — set meta.layout, add a layouts.match rule, or name it to match a layout (auto-layout). Entities without a layout are not rendered.',
+                            'Render requested for %s but no layout matched — set meta.layout / meta.layouts, add a layouts.match rule, or name it to match a layout (auto-layout). Entities without a layout are not rendered.',
                             entity.id,
                         )
                     }
 
-                    if (entity.layout && entity.meta?.postprocessor) {
-                        entity.layout.postprocessor = entity.meta.postprocessor
+                    // meta.postprocessor override applies to every
+                    // matched layout. Author opts into it; if they
+                    // really want different postprocessors per layout,
+                    // they put `postprocessor:` on each layout file.
+                    if (entity.layouts.length && entity.meta?.postprocessor) {
+                        for (const layout of entity.layouts) {
+                            layout.postprocessor = entity.meta.postprocessor
+                        }
                     }
 
-                    if (entity.layout) {
-                        logger.debug('Layout matched for %s: %s', entity.collection, entity.id)
+                    if (entity.layouts.length) {
+                        logger.debug('Layouts matched for %s (%d): %s',
+                            entity.id, entity.layouts.length,
+                            entity.layouts.map(l => l.name).join(', '))
                     } else if (entity.meta?.href) {
                         logger.trace('Layout missing for %s: %s', entity.collection, entity.id)
                     }
@@ -612,7 +696,31 @@ export function layouts(options = {}) {
             delete original.pages
             delete original.destination
 
+            // Multi-layouts: one render task per matched layout.
+            // entity.layouts is set in onProcessed; back-compat
+            // single-layout entities fall back to [entity.layout].
+            const layoutsForEntity = original.layouts?.length
+                ? original.layouts
+                : (original.layout ? [original.layout] : [])
+
+            // Per-entity destination set, to detect collisions across
+            // the layouts that match this same entity. On collision,
+            // log a named-names error and skip ALL tasks for this
+            // entity (no winner — fail-fast surfaces the design
+            // decision back to the author).
+            const tasksForEntity = []
+            const destinationsForEntity = new Map() // destination → layout.name
+            let collisionFound = false
+
+            for (const layout of layoutsForEntity) {
+                if (collisionFound) break
+                if (signal.aborted) return
+
             const entity = _.cloneDeep(original)
+            // Per-task: pin entity.layout to the layout being processed
+            // so downstream code (pagination, sidecar lookup, renderer
+            // dispatch) sees the single-layout shape it expects.
+            entity.layout = layout
             entity.destination = '/' + entity.name
             let data
             let load
@@ -649,6 +757,38 @@ export function layouts(options = {}) {
                 }
             }
 
+            // Capture a candidate task without queueing yet. Collisions
+            // (two layouts producing the same destination for the same
+            // entity) are detected after all layouts have been processed,
+            // and the whole entity's task set is dropped on the floor —
+            // no winner. See the collision check after the per-layout
+            // loop closes.
+            const queueTask = (taskEntity, taskOptions, taskContext) => {
+                if (destinationsForEntity.has(taskEntity.destination)) {
+                    const firstLayout = destinationsForEntity.get(taskEntity.destination)
+                    logger.error(
+                        'Layout collision for %s:\n  - %s → %s\n  - %s → %s\nSet a `destination:` override on one of them, or change one\'s format. Skipping this entity for the cycle.',
+                        original.id,
+                        firstLayout, taskEntity.destination,
+                        layout.name, taskEntity.destination,
+                    )
+                    collisionFound = true
+                    return
+                }
+                destinationsForEntity.set(taskEntity.destination, layout.name)
+                tasksForEntity.push({ entity: taskEntity, options: taskOptions, context: taskContext })
+            }
+
+            // Layout-owned destination template (frontmatter
+            // `destination:` field). When set, it FULLY overrides the
+            // default `entity.name + .format` (+ cleanUrls) derivation.
+            // The template gets `{ entity }` as context — including
+            // pagination fields (`entity.page`, `entity.pages`) when
+            // populated below.
+            const destinationTemplate = layout.meta?.destination
+                ? compileDestinationTemplate(layout.meta.destination)
+                : null
+
             if (data?.pages) {
                 if (!_.endsWith(entity.name, entity.format)) {
                     // Loop bound is `< data.pages` (not `data.pages - 1`).
@@ -672,33 +812,37 @@ export function layouts(options = {}) {
                                     pageEntity.meta.href = `/${entity.name}.${pageEntity.page}`
                                 }
                             }
+                        } else {
+                            pageEntity.page = 1
+                        }
 
+                        if (destinationTemplate) {
+                            pageEntity.destination = sanitizeDestination(destinationTemplate({ entity: pageEntity }))
+                        } else if (page) {
                             if (options.cleanUrls && entity.layout.format == 'html') {
                                 pageEntity.destination = path.join(entity.destination.replace('index', ''), pageEntity.page.toString(), `index.${entity.layout.format}`)
                             } else {
-                                pageEntity.destination += page ? `.${pageEntity.page}.${entity.layout.format}` : `.${entity.layout.format}`
+                                pageEntity.destination += `.${pageEntity.page}.${entity.layout.format}`
                             }
                         } else {
-                            pageEntity.page = 1
                             if (options.cleanUrls && !_.endsWith(entity.name, 'index') && entity.layout.format == 'html') {
                                 pageEntity.destination = path.join(entity.destination, `index.${entity.layout.format}`)
                             } else {
                                 pageEntity.destination += `.${entity.layout.format}`
                             }
                         }
-                        tasks.push({
-                            entity: pageEntity,
-                            options: {
-                                renderer: entity.layout.template,
-                                postprocessor: entity.layout.postprocessor,
-                                tasks: entity.meta?.task || TASKS.INLINE
-                            },
-                            context: { data, plugins, sidecarQueries: sidecarTrack.queries }
-                        })
+
+                        queueTask(pageEntity, {
+                            renderer: entity.layout.template,
+                            postprocessor: entity.layout.postprocessor,
+                            tasks: entity.meta?.task || TASKS.INLINE,
+                        }, { data, plugins, sidecarQueries: sidecarTrack.queries })
                     }
                 }
             } else {
-                if (!_.endsWith(entity.name, entity.format)) {
+                if (destinationTemplate) {
+                    entity.destination = sanitizeDestination(destinationTemplate({ entity }))
+                } else if (!_.endsWith(entity.name, entity.format)) {
                     // cleanUrls turns `foo` into `foo/index.html` so the
                     // served URL is `/foo/`. Skip the transform when the
                     // layout declares a postprocessor — the HTML render
@@ -719,25 +863,30 @@ export function layouts(options = {}) {
                     }
                 }
                 if (entity.destination) {
-                    tasks.push({
-                        entity,
-                        options: {
-                            renderer: entity.layout.template,
-                            postprocessor: entity.layout.postprocessor,
-                            tasks: entity.meta?.task || TASKS.INLINE
-                        },
-                        // sidecarQueries threads the sidecar load()'s
-                        // findEntities calls into manifest.collectEdges
-                        // as `{kind: 'query', filter}` refClosure entries.
-                        // Without it, aggregate layouts that don't
-                        // paginate (sitemap.xml, index pages, RSS feeds)
-                        // lose query-dep tracking and never invalidate
-                        // when matching entities are added/modified/
-                        // deleted. The paginated branch above already
-                        // does this.
-                        context: { data, plugins, sidecarQueries: sidecarTrack.queries }
-                    })
+                    queueTask(entity, {
+                        renderer: entity.layout.template,
+                        postprocessor: entity.layout.postprocessor,
+                        tasks: entity.meta?.task || TASKS.INLINE,
+                    },
+                    // sidecarQueries threads the sidecar load()'s
+                    // findEntities calls into manifest.collectEdges
+                    // as `{kind: 'query', filter}` refClosure entries.
+                    // Without it, aggregate layouts that don't
+                    // paginate (sitemap.xml, index pages, RSS feeds)
+                    // lose query-dep tracking and never invalidate
+                    // when matching entities are added/modified/
+                    // deleted. The paginated branch above already
+                    // does this.
+                    { data, plugins, sidecarQueries: sidecarTrack.queries })
                 }
+            }
+            } // end per-layout for-loop
+
+            // Commit this entity's tasks (only if no collision was
+            // hit). A collision drops EVERYTHING for the entity — no
+            // winner, no half-built output.
+            if (!collisionFound) {
+                tasks.push(...tasksForEntity)
             }
             await maybeFlush()
         }

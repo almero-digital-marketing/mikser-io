@@ -465,3 +465,250 @@ describe('layouts plugin', () => {
         })
     })
 })
+
+describe('layouts plugin: multi-layouts (matching)', () => {
+    it('meta.layouts array assigns multiple layouts to one entity', async () => {
+        await withTempWorking(async (workingFolder) => {
+            const h = createHarness({
+                options: { workingFolder, outputFolder: path.join(workingFolder, 'out') },
+            })
+            layouts()(h.core)
+            await h.runHook('loaded')
+            // Layout names are derived from the filename minus its
+            // template AND format extensions (see getFormatInfo). So
+            // `post.html.hbs` has name 'post'; `post-email.eml.hbs` has
+            // name 'post-email'. Distinct names → both land in the state
+            // map.
+            await h.runSync('layouts', { action: 'create', context: { relativePath: 'post.html.hbs' } })
+            await h.runSync('layouts', { action: 'create', context: { relativePath: 'post-email.eml.hbs' } })
+
+            const doc = {
+                id: '/documents/blog/welcome.md',
+                collection: 'documents',
+                name: 'blog/welcome',
+                format: 'md',
+                meta: { layouts: ['post', 'post-email'] },
+            }
+            h.journal.push({ id: 1, entity: doc, operation: 'create', context: {}, options: {}, output: null })
+            await h.runHook('processed', { aborted: false })
+
+            assert.equal(doc.layouts.length, 2)
+            assert.deepEqual(doc.layouts.map(l => l.name).sort(), ['post', 'post-email'])
+            assert.equal(doc.layout.name, 'post', 'entity.layout back-compat = first layout')
+        })
+    })
+
+    it('errors when both meta.layout and meta.layouts are set', async () => {
+        await withTempWorking(async (workingFolder) => {
+            const h = createHarness({
+                options: { workingFolder, outputFolder: path.join(workingFolder, 'out') },
+            })
+            layouts()(h.core)
+            await h.runHook('loaded')
+            await h.runSync('layouts', { action: 'create', context: { relativePath: 'post.hbs' } })
+
+            const doc = {
+                id: '/documents/blog/welcome.md',
+                collection: 'documents',
+                name: 'blog/welcome',
+                format: 'md',
+                meta: { layout: 'post', layouts: ['post'] },
+            }
+            h.journal.push({ id: 1, entity: doc, operation: 'create', context: {}, options: {}, output: null })
+            await h.runHook('processed', { aborted: false })
+
+            assert.deepEqual(doc.layouts, [], 'resolution failed → no layouts')
+            const erred = h.logs.some(l =>
+                l.level === 'error' && l.args.join(' ').includes('both \'meta.layout\' and \'meta.layouts\''))
+            assert.ok(erred, 'should log a clear error about the dual-key collision')
+        })
+    })
+
+    it('options.match patterns multi-match — every matching pattern contributes', async () => {
+        await withTempWorking(async (workingFolder) => {
+            const h = createHarness({
+                options: { workingFolder, outputFolder: path.join(workingFolder, 'out') },
+            })
+            layouts({ match: { '@/blog/*': 'post', '@/**': 'fallback' } })(h.core)
+            await h.runHook('loaded')
+            await h.runSync('layouts', { action: 'create', context: { relativePath: 'post.hbs' } })
+            await h.runSync('layouts', { action: 'create', context: { relativePath: 'fallback.hbs' } })
+
+            const doc = {
+                id: '/documents/blog/welcome.md',
+                collection: 'documents',
+                name: 'blog/welcome',
+                format: 'md',
+                meta: {},
+            }
+            h.journal.push({ id: 1, entity: doc, operation: 'create', context: {}, options: {}, output: null })
+            await h.runHook('processed', { aborted: false })
+
+            // Both patterns match `/documents/blog/welcome.md` — get both layouts.
+            assert.equal(doc.layouts.length, 2)
+            const names = doc.layouts.map(l => l.name).sort()
+            assert.deepEqual(names, ['fallback', 'post'])
+        })
+    })
+
+    it('autoLayouts stays single-match (no multi-match fanout)', async () => {
+        await withTempWorking(async (workingFolder) => {
+            const h = createHarness({
+                options: { workingFolder, outputFolder: path.join(workingFolder, 'out') },
+            })
+            layouts({ autoLayouts: true })(h.core)
+            await h.runHook('loaded')
+            // Single auto-layout candidate matches the entity name.
+            // The peel ladder is intentionally first-wins; the test
+            // verifies multi-match doesn't apply here (entity gets one
+            // layout, not many).
+            await h.runSync('layouts', { action: 'create', context: { relativePath: 'post.hbs' } })
+
+            const doc = {
+                id: '/documents/post.md',
+                collection: 'documents',
+                name: 'post',
+                format: 'md',
+                meta: {},
+            }
+            h.journal.push({ id: 1, entity: doc, operation: 'create', context: {}, options: {}, output: null })
+            await h.runHook('processed', { aborted: false })
+
+            assert.equal(doc.layouts.length, 1, 'autoLayouts is fallback-first-wins, not multi-match')
+            assert.equal(doc.layouts[0].name, 'post')
+        })
+    })
+})
+
+describe('layouts plugin: multi-layouts (collision)', () => {
+    it('drops both render tasks when two layouts produce the same destination', async () => {
+        await withTempWorking(async (workingFolder) => {
+            const outputFolder = path.join(workingFolder, 'out')
+            const doc = {
+                id: '/documents/blog/welcome.md',
+                collection: 'documents',
+                name: 'blog/welcome',
+                format: 'md',
+                meta: { layouts: ['post', 'post-card'] },
+            }
+            const h = createHarness({
+                options: { workingFolder, outputFolder },
+                entities: [doc],
+            })
+            // Incremental-dispatch path: refs.inverseClosureOf returns
+            // the seed; the dispatcher hydrates the entity by id.
+            h.runtime.refs = { inverseClosureOf: () => new Set([doc.id]) }
+            layouts()(h.core)
+            await h.runHook('loaded')
+            // Both layouts produce `.html` for the same entity name
+            // (post → /welcome.html and post-card → /welcome.html).
+            await h.runSync('layouts', { action: 'create', context: { relativePath: 'post.html.hbs' } })
+            await h.runSync('layouts', { action: 'create', context: { relativePath: 'post-card.html.hbs' } })
+
+            h.journal.push({ id: 1, entity: doc, operation: 'create', context: {}, options: {}, output: null })
+            await h.runHook('processed', { aborted: false })
+            await h.runHook('beforeRender', { aborted: false })
+
+            assert.equal(h.renderTasks.length, 0, 'collision must skip every task for the entity')
+            const erred = h.logs.some(l =>
+                l.level === 'error' && l.args.join(' ').includes('Layout collision'))
+            assert.ok(erred, 'should log the collision with both layout names')
+        })
+    })
+
+    it('no collision when two layouts produce different formats', async () => {
+        await withTempWorking(async (workingFolder) => {
+            const outputFolder = path.join(workingFolder, 'out')
+            const doc = {
+                id: '/documents/blog/welcome.md',
+                collection: 'documents',
+                name: 'blog/welcome',
+                format: 'md',
+                meta: { layouts: ['post', 'post-email'] },
+            }
+            const h = createHarness({
+                options: { workingFolder, outputFolder },
+                entities: [doc],
+            })
+            h.runtime.refs = { inverseClosureOf: () => new Set([doc.id]) }
+            layouts()(h.core)
+            await h.runHook('loaded')
+            await h.runSync('layouts', { action: 'create', context: { relativePath: 'post.html.hbs' } })
+            await h.runSync('layouts', { action: 'create', context: { relativePath: 'post-email.eml.hbs' } })
+
+            h.journal.push({ id: 1, entity: doc, operation: 'create', context: {}, options: {}, output: null })
+            await h.runHook('processed', { aborted: false })
+            await h.runHook('beforeRender', { aborted: false })
+
+            assert.equal(h.renderTasks.length, 2, 'one task per layout, different extensions')
+            const destinations = h.renderTasks.map(t => t.entity.destination).sort()
+            assert.deepEqual(destinations, ['/blog/welcome.eml', '/blog/welcome.html'])
+        })
+    })
+})
+
+describe('layouts plugin: multi-layouts (destination template)', () => {
+    it('frontmatter destination template overrides the default derivation', async () => {
+        await withTempWorking(async (workingFolder) => {
+            const outputFolder = path.join(workingFolder, 'out')
+            const doc = {
+                id: '/documents/blog/welcome.md',
+                collection: 'documents',
+                name: 'blog/welcome',
+                format: 'md',
+                meta: { layouts: ['post-card'] },
+            }
+            const h = createHarness({
+                options: { workingFolder, outputFolder },
+                entities: [doc],
+            })
+            h.runtime.refs = { inverseClosureOf: () => new Set([doc.id]) }
+            layouts()(h.core)
+            await h.runHook('loaded')
+            await h.runSync('layouts', { action: 'create', context: { relativePath: 'post-card.html.hbs' } })
+            // Inject meta.destination on the layout state entry (would
+            // normally come from the front-matter plugin processing the
+            // layout). resolveLayout falls back to stateEntry when the
+            // catalog mock doesn't have the layout row.
+            const cardLayout = h.runtime.state.layouts.layouts['post-card']
+            cardLayout.meta = { destination: '/cards/{{entity.name}}.html' }
+
+            h.journal.push({ id: 1, entity: doc, operation: 'create', context: {}, options: {}, output: null })
+            await h.runHook('processed', { aborted: false })
+            await h.runHook('beforeRender', { aborted: false })
+
+            assert.equal(h.renderTasks.length, 1)
+            assert.equal(h.renderTasks[0].entity.destination, '/cards/blog/welcome.html')
+        })
+    })
+
+    it('destination template that resolves to a path-traversal is rejected', async () => {
+        await withTempWorking(async (workingFolder) => {
+            const outputFolder = path.join(workingFolder, 'out')
+            const doc = {
+                id: '/documents/blog/x.md',
+                collection: 'documents',
+                name: 'blog/x',
+                format: 'md',
+                meta: { layouts: ['evil'] },
+            }
+            const h = createHarness({
+                options: { workingFolder, outputFolder },
+                entities: [doc],
+            })
+            h.runtime.refs = { inverseClosureOf: () => new Set([doc.id]) }
+            layouts()(h.core)
+            await h.runHook('loaded')
+            await h.runSync('layouts', { action: 'create', context: { relativePath: 'evil.html.hbs' } })
+            const evilLayout = h.runtime.state.layouts.layouts['evil']
+            evilLayout.meta = { destination: '../../../etc/passwd' }
+
+            h.journal.push({ id: 1, entity: doc, operation: 'create', context: {}, options: {}, output: null })
+            await h.runHook('processed', { aborted: false })
+            await assert.rejects(
+                () => h.runHook('beforeRender', { aborted: false }),
+                /path-traversal/,
+            )
+        })
+    })
+})
