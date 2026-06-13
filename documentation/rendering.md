@@ -453,6 +453,83 @@ Each item in `pages` triggers a separate render call. The entity gets `entity.pa
 
 ---
 
+## Postprocess
+
+A postprocess stage runs *after* a successful render, transforming the rendered file on disk. MJML → HTML, HTML → PDF, HTML → EML, anything that takes a file and produces a file. Each stage is a `mikser-io-post-<name>` package that returns `{ name, options, postprocess, output?, setup?, teardown? }` from its factory.
+
+### Single-stage opt-in
+
+The `layouts` plugin reads the postprocessor (or chain) from two places:
+
+- **Layout filename** — `<name>.<format>-<post1>[-<post2>...].<template>`. Each segment after the first `-` is a postprocessor name in chain order.
+- **Frontmatter** on the source entity — `postprocessor: mjml` or `postprocessors: [mjml]` (dual key, both set is an error).
+
+```
+layouts/welcome.html-mjml.hbs        # renderer writes MJML, post-mjml writes HTML
+documents/welcome.md                  # plain — opt-in lives on the layout
+```
+
+```yaml
+# documents/welcome.md — opt-in from the source
+---
+layout: newsletter
+postprocessor: mjml
+---
+```
+
+### Chains
+
+Filename and frontmatter both accept a *chain*. Stages run in order, threading file paths between them — never buffers; large outputs (PDFs especially) don't sit in memory between stages.
+
+```
+layouts/welcome.html-mjml-email.hbs   # renderer → MJML, post-mjml → HTML, post-email → EML
+```
+
+```yaml
+# Equivalent via frontmatter
+---
+postprocessors: [mjml, email]
+---
+```
+
+The final file's extension is the *last* stage's `output:` declaration (`email` → `eml`). Intermediate files land in `runtime/postprocess-scratch/<entity>/<stage-index>-<stage>.<ext>` and are cleaned up after the chain completes (or fails). The renderer's intermediate is also unlinked when the chain's final destination differs from it.
+
+### Stage contract
+
+Each postprocessor's `postprocess()` reads `entity.origin`, writes to `entity.destination`, and returns the path it wrote. Both paths are relative to `options.outputFolder`.
+
+```js
+export const output = 'html'    // declares the file extension this stage writes
+
+export async function postprocess({ entity, options, config, logger }) {
+  const inAbs  = path.join(options.outputFolder, entity.origin)
+  const outAbs = path.join(options.outputFolder, entity.destination)
+  const body   = await readFile(inAbs, 'utf8')
+
+  await mkdir(path.dirname(outAbs), { recursive: true })
+  await writeFile(outAbs, transform(body))
+
+  return { success: true, result: entity.destination }
+}
+```
+
+Return shapes the dispatcher accepts:
+
+- `{ success: true, result: '<output-path>' }` — preferred. `result` is the relative-to-outputFolder path the stage wrote.
+- `{ success: false, error: '...' }` — fails the chain. Every intermediate (and the final destination, if any) is unlinked.
+- `string` — treated as the output path; same as the preferred shape's `result`.
+- `Buffer` / bytes — legacy single-stage shape. The engine writes them to `entity.destination` and uses that as the next stage's origin. Useful for cheap transforms; not recommended for large files.
+
+### Failure semantics
+
+A chain is all-or-nothing. The first stage to throw or return `{success: false}` fails the entry; the dispatcher unlinks every intermediate it produced and the final destination, then re-throws. No partial output leaks.
+
+### Execution mode
+
+Postprocess inherits the layout's `task:` setting. `task: worker` routes both render and postprocess through the lazy Piscina pool (right for CPU-heavy stages: PDF, image compose, big MJML compilations). Default INLINE is right for everything else.
+
+---
+
 ## Render Output
 
 After rendering completes:

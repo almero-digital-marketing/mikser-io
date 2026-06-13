@@ -155,6 +155,11 @@ brevity.
   that overrides the default `entity.name + .format` destination.
   Two layouts resolving to the same destination → error logged with
   both names, every task for that entity dropped for the cycle.
+  Postprocess chain is parsed off the layout filename
+  (`name.html-mjml-email.hbs` → `postprocessors: ['mjml','email']`)
+  or the entity's `postprocessor`/`postprocessors` frontmatter (dual
+  key, mutually exclusive); the array is attached to the render
+  task's options. Engine-side dispatch lives in `postprocess.js`.
 - `files` — file→entity sync for the files collection
 - `assets` — asset references and copy
 - `resources` — resource references
