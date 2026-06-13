@@ -274,21 +274,31 @@ export function changeExtension(file, format) {
 
 // Decode a layout filename into its parts. `template` is the outer
 // extension (the renderer); `format` is the output format encoded as a
-// second extension (defaults to 'html'); `postprocessor`, if present,
-// is everything after the `-` in the format segment.
+// second extension (defaults to 'html'); `postprocessors`, if present,
+// is the array of postprocessor names from the format segment (split
+// on `-`), threaded as a chain at dispatch time. `postprocessor` is
+// the FIRST element of that chain — back-compat alias for code paths
+// that only need the head.
 //
 // Examples:
-//   foo.hbs                 -> { name:'foo',  format:'html', template:'hbs',  postprocessor:undefined }
-//   page.css.hbs            -> { name:'page', format:'css',  template:'hbs',  postprocessor:undefined }
-//   report.html-pdf.hbs     -> { name:'report', format:'html', template:'hbs', postprocessor:'pdf' }
-//   welcome.html-mjml.liquid-> { name:'welcome', format:'html', template:'liquid', postprocessor:'mjml' }
+//   foo.hbs                       -> { name:'foo',     format:'html', template:'hbs',    postprocessors:[],            postprocessor:undefined }
+//   page.css.hbs                  -> { name:'page',    format:'css',  template:'hbs',    postprocessors:[],            postprocessor:undefined }
+//   report.html-pdf.hbs           -> { name:'report',  format:'html', template:'hbs',    postprocessors:['pdf'],       postprocessor:'pdf' }
+//   welcome.html-mjml.liquid      -> { name:'welcome', format:'html', template:'liquid', postprocessors:['mjml'],      postprocessor:'mjml' }
+//   newsletter.html-mjml-email.hbs-> { name:'newsletter', format:'html', template:'hbs', postprocessors:['mjml','email'], postprocessor:'mjml' }
 export function getFormatInfo(relativePath) {
     const template = path.extname(relativePath).substring(1).toLowerCase()
     const withoutTemplate = relativePath.replace(path.extname(relativePath), '')
     const formatExt = path.extname(withoutTemplate).substring(1).toLowerCase()
-    const [format, postprocessor] = formatExt.split('-')
+    const [format, ...postprocessors] = formatExt.split('-')
     const name = formatExt ? withoutTemplate.replace(path.extname(withoutTemplate), '') : withoutTemplate
-    return { name, format: format || 'html', template, postprocessor }
+    return {
+        name,
+        format: format || 'html',
+        template,
+        postprocessors,
+        postprocessor: postprocessors[0],
+    }
 }
 
 // Flatten template-helper args into a single human-readable message.

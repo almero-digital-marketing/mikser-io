@@ -479,15 +479,17 @@ export async function setup(options) {
 
         const tasks = []
         for await (const { entity, options, context, output } of useJournal('Queuing postprocess', [OPERATION.RENDER], signal)) {
-            if (output?.success && options.postprocessor) {
-                const ext = await resolveOutputExt(options.postprocessor)
-                // Engine swaps the extension on whatever destination the
-                // entity carries. Routing semantics (cleanUrls folder
-                // structure, alternate placements, etc.) are whoever-set-
-                // entity.destination's responsibility — typically the
-                // layouts plugin during layout-match. The postprocess
-                // subsystem has no opinion about routing.
-                const destination = changeExtension(entity.destination, ext)
+            // Read the postprocessor chain. layouts plugin carries
+            // it as `options.postprocessors` (array, normalized); the
+            // singular `options.postprocessor` is a back-compat alias
+            // for the head of the chain. Empty chain → no postprocess.
+            const chain = options.postprocessors ?? (options.postprocessor ? [options.postprocessor] : [])
+            if (output?.success && chain.length) {
+                // The FINAL destination extension is the last stage's
+                // `output:`. Intermediate stages' extensions are used
+                // only for scratch path naming inside src/postprocess.js.
+                const finalExt = await resolveOutputExt(chain[chain.length - 1])
+                const destination = changeExtension(entity.destination, finalExt)
 
                 tasks.push({
                     entity: {
@@ -496,7 +498,11 @@ export async function setup(options) {
                         destination
                     },
                     options: {
-                        postprocessor: options.postprocessor,
+                        // Singular kept for back-compat with the worker
+                        // serialization shape; chain is the source of
+                        // truth.
+                        postprocessor: chain[0],
+                        postprocessors: chain,
                         tasks: options.tasks,
                         // When the originating render call passed
                         // `save: false`, the layouts plugin wrote the

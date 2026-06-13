@@ -297,6 +297,24 @@ The common cases that hit this are:
 1. Two layouts produce the same format (`.html` from both `post.html.hbs` and `post-card.html.hbs`). Fix: set `destination:` on one.
 2. Two layouts with the same name in the same directory — file-system collision, not engine collision. Rename one.
 
+**Postprocess chains:**
+
+A layout's filename encodes a postprocessor chain after the format segment: `<name>.<format>-<post1>[-<post2>...].<template>`. Each `post*` segment names a `mikser-io-post-<name>` plugin. Stages run in order, threading file paths (not buffers) between them; the final extension comes from the last stage's `output:`.
+
+```
+layouts/welcome.html-mjml-email.hbs    # renderer → MJML, post-mjml → HTML, post-email → EML
+```
+
+Same shape as frontmatter on the source entity:
+
+```yaml
+---
+postprocessors: [mjml, email]
+---
+```
+
+See [Rendering → Postprocess](./rendering.md#postprocess) for the per-stage contract and failure semantics.
+
 **Entity properties set on documents:**
 - `layout`: The first matched layout (back-compat alias).
 - `layouts`: Array of all matched layouts (canonical under multi-match).
