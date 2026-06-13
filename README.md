@@ -150,6 +150,7 @@ The engine is what stays stable — the lifecycle, the catalog, the file-based c
 |---|---|
 | [`mikser-io-vector`](https://github.com/almero-digital-marketing/mikser-io-vector) | OpenAI embeddings + semantic search (sqlite-vec or pgvector) |
 | [`mikser-io-schemas`](https://github.com/almero-digital-marketing/mikser-io-schemas) | Zod-backed entity validation + auto-generated TypeScript declarations for the SDK. Auto-detects `$`-keyed references and warns on broken ones — see [ADR-0007](./documentation/decisions/0007-references-declaration-and-expansion.md) |
+| [`mikser-io-forms`](https://github.com/almero-digital-marketing/mikser-io-forms) | Public form-submission endpoints. POST → captcha + schema validation → write a document file plus uploaded files to disk; the `documents` / `files` plugins pick them up via their normal watch loop. Composes with `mikser-io-schemas` for schema-by-name; built-in captcha providers (Google v2/v3, hCaptcha, Turnstile) plus a custom-verify escape hatch |
 | [`mikser-io-archive`](https://github.com/almero-digital-marketing/mikser-io-archive) | Persist matching entities to YAML — audit trail, versioned content history, downstream export |
 | `mapper` | Run config-supplied transforms over matched entities each cycle (in-core, generic transformation layer) |
 | [`mikser-io-live`](https://github.com/almero-digital-marketing/mikser-io-live) | Lightweight dev server with browser auto-refresh — pair with `--watch` for the classic save→reload loop |
