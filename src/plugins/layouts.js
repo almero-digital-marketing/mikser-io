@@ -523,14 +523,18 @@ export function layouts(options = {}) {
                         )
                     }
 
-                    // meta.postprocessor override applies to every
-                    // matched layout. Author opts into it; if they
-                    // really want different postprocessors per layout,
-                    // they put `postprocessor:` on each layout file.
-                    if (entity.layouts.length && entity.meta?.postprocessor) {
-                        for (const layout of entity.layouts) {
-                            layout.postprocessor = entity.meta.postprocessor
-                        }
+                    // meta.postprocessor (string) / meta.postprocessors
+                    // (array) override is read at task-build time (in
+                    // onBeforeRender) because the layout entity is
+                    // re-fetched from the catalog there — any mutation
+                    // we did to it here would be reverted by the
+                    // refresh. We just sanity-check the dual key here
+                    // so authors see the error early.
+                    if (entity.meta?.postprocessor && entity.meta?.postprocessors) {
+                        logger.error(
+                            'Entity %s: both meta.postprocessor and meta.postprocessors set — pick one. The chain will fall back to the singular.',
+                            entity.id,
+                        )
                     }
 
                     if (entity.layouts.length) {
@@ -721,7 +725,20 @@ export function layouts(options = {}) {
             // landed during onProcess but the snapshot stored on
             // `entity.layouts` at onProcessed time can be stale; the
             // catalog has the latest by onBeforeRender.
-            const layout = (await findEntity({ id: staleLayout.id })) || staleLayout
+            const refreshedLayout = (await findEntity({ id: staleLayout.id })) || staleLayout
+
+            // Apply entity-level postprocessor override per layout.
+            // meta.postprocessors (array) wins over meta.postprocessor
+            // (string); fall back to whatever the layout filename
+            // encoded.
+            const chainOverride = Array.isArray(original.meta?.postprocessors)
+                ? original.meta.postprocessors
+                : original.meta?.postprocessor
+                    ? [original.meta.postprocessor]
+                    : null
+            const layout = chainOverride
+                ? { ...refreshedLayout, postprocessors: chainOverride, postprocessor: chainOverride[0] }
+                : refreshedLayout
 
             const entity = _.cloneDeep(original)
             // Per-task: pin entity.layout to the layout being processed
@@ -842,6 +859,7 @@ export function layouts(options = {}) {
                         queueTask(pageEntity, {
                             renderer: entity.layout.template,
                             postprocessor: entity.layout.postprocessor,
+                            postprocessors: entity.layout.postprocessors ?? (entity.layout.postprocessor ? [entity.layout.postprocessor] : []),
                             tasks: entity.meta?.task || TASKS.INLINE,
                         }, { data, plugins, sidecarQueries: sidecarTrack.queries })
                     }
@@ -873,6 +891,7 @@ export function layouts(options = {}) {
                     queueTask(entity, {
                         renderer: entity.layout.template,
                         postprocessor: entity.layout.postprocessor,
+                        postprocessors: entity.layout.postprocessors ?? (entity.layout.postprocessor ? [entity.layout.postprocessor] : []),
                         tasks: entity.meta?.task || TASKS.INLINE,
                     },
                     // sidecarQueries threads the sidecar load()'s

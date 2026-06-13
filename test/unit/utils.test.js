@@ -113,6 +113,7 @@ describe('getFormatInfo', () => {
             name: 'foo',
             format: 'html',
             template: 'hbs',
+            postprocessors: [],
             postprocessor: undefined,
         })
     })
@@ -122,6 +123,7 @@ describe('getFormatInfo', () => {
             name: 'page',
             format: 'css',
             template: 'hbs',
+            postprocessors: [],
             postprocessor: undefined,
         })
     })
@@ -131,7 +133,20 @@ describe('getFormatInfo', () => {
             name: 'report',
             format: 'html',
             template: 'hbs',
+            postprocessors: ['pdf'],
             postprocessor: 'pdf',
+        })
+    })
+
+    it('decodes a multi-stage postprocessor chain', () => {
+        // welcome.html-mjml-email.hbs → render to MJML, compile MJML
+        // to HTML, then send/persist as email. Chain runs left-to-right.
+        assert.deepEqual(getFormatInfo('newsletter.html-mjml-email.hbs'), {
+            name: 'newsletter',
+            format: 'html',
+            template: 'hbs',
+            postprocessors: ['mjml', 'email'],
+            postprocessor: 'mjml',
         })
     })
 
@@ -140,6 +155,7 @@ describe('getFormatInfo', () => {
             name: 'welcome',
             format: 'html',
             template: 'liquid',
+            postprocessors: ['mjml'],
             postprocessor: 'mjml',
         })
     })
@@ -149,6 +165,7 @@ describe('getFormatInfo', () => {
             name: 'partials/header',
             format: 'html',
             template: 'hbs',
+            postprocessors: [],
             postprocessor: undefined,
         })
     })

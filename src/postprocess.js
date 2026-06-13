@@ -1,6 +1,8 @@
 import path from 'node:path'
 import { createRequire } from 'node:module'
 import { existsSync } from 'node:fs'
+import { mkdir, unlink } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import _ from 'lodash'
 import { useLogger } from './engine.js'
 import engineRuntime from './runtime.js'
@@ -67,18 +69,36 @@ export default async ({ entity, options, config, context, state, logger, port })
         notice(...args) { port.postMessage(JSON.stringify({ command: 'logger', data: { log: 'notice', args } })) },
     }
 
-    const { postprocessor } = options
+    // Chain dispatch. The engine queued ONE task per (entity, chain);
+    // we iterate stages here, threading the previous stage's output
+    // path into the next stage's `entity.origin`. Intermediates land
+    // in runtime/postprocess-scratch/<entity-derived>/<stage>.<ext>;
+    // the final stage writes to entity.destination (outputFolder).
+    //
+    // Each stage's `postprocess()` is expected to read entity.origin,
+    // write to entity.destination, and return either:
+    //   { success: true, result: <output-path> }   — preferred
+    //   <path string>                              — accepted
+    //   <Buffer | string-of-bytes>                 — engine writes to
+    //                                                entity.destination
+    //                                                (legacy single-
+    //                                                stage shape)
+    //
+    // The final stage's return value is what bubbles back to the
+    // engine; intermediate stages' returns are consumed here.
+
+    const chain = options.postprocessors ?? (options.postprocessor ? [options.postprocessor] : [])
+    if (!chain.length) {
+        throw new Error('Postprocess dispatch: no postprocessors in the chain')
+    }
+
     const plugins = {}
     let pluginsToLoad = [...context.plugins || []]
-    pluginsToLoad.push(`post-${postprocessor}`)
+    for (const stage of chain) pluginsToLoad.push(`post-${stage}`)
     if (entity.meta?.plugins) {
         pluginsToLoad.push(...entity.meta.plugins)
     }
     pluginsToLoad.push(...options.plugins)
-    // `context.plugins` / `entity.meta.plugins` carry string
-    // identifiers; `options.plugins` carries factory returns. Project
-    // descriptors to their `post-${name}` identifier so loadPlugin()
-    // can resolve them uniformly.
     pluginsToLoad = _.uniq(pluginsToLoad
         .map(p => {
             if (typeof p === 'string') return p
@@ -89,32 +109,35 @@ export default async ({ entity, options, config, context, state, logger, port })
         })
         .filter(p => p && p.indexOf('post-') == 0))
 
-    // Resolve all plugins up front so we can populate `runtime.config`
-    // (the worker-side mini-runtime built below) with the requested
-    // postprocessor's own options — same channel the legacy v8 path
-    // populated via `runtime.config['post-pdf']`.
     for (let pluginName of pluginsToLoad) {
         const plugin = await loadPlugin(pluginName, options.workingFolder, logger)
-        if (!plugin) continue // loadPlugin already logged the "not found" path
+        if (!plugin) continue
         plugins[pluginName] = plugin
     }
 
-    const postprocessorPlugin = plugins[`post-${postprocessor}`]
-    if (!postprocessorPlugin) {
-        throw new Error(`Postprocessor "${postprocessor}" was requested but plugin "post-${postprocessor}" is not loaded`)
-    }
-    if (typeof postprocessorPlugin.postprocess !== 'function') {
-        throw new Error(`Plugin "post-${postprocessor}" does not export a postprocess() function`)
+    // Pre-flight: every stage in the chain must resolve to a loaded
+    // plugin with a postprocess() function. Fail loud at the start
+    // rather than mid-chain.
+    for (const stage of chain) {
+        const plugin = plugins[`post-${stage}`]
+        if (!plugin) {
+            throw new Error(`Postprocessor "${stage}" was requested but plugin "post-${stage}" is not loaded`)
+        }
+        if (typeof plugin.postprocess !== 'function') {
+            throw new Error(`Plugin "post-${stage}" does not export a postprocess() function`)
+        }
     }
 
+    // Run sidecar load() on every loaded plugin once (not per-stage).
+    // load() typically sets up runtime helpers; one cycle is enough.
+    const finalPlugin = plugins[`post-${chain[chain.length - 1]}`]
     const runtime = {
         [entity.type]: entity,
         entity,
         plugins,
-        config: postprocessorPlugin.options,
+        config: finalPlugin.options,
         data: context.data,
     }
-
     for (const [pluginName, plugin] of Object.entries(plugins)) {
         if (!plugin?.load) continue
         try {
@@ -125,5 +148,123 @@ export default async ({ entity, options, config, context, state, logger, port })
         }
     }
 
-    return await postprocessorPlugin.postprocess({ entity, options, config: postprocessorPlugin.options, context, plugins, runtime, state, logger })
+    // Scratch folder per entity. Lives under runtimeFolder so it
+    // survives until cleanup but doesn't leak into outputFolder.
+    const scratchDir = path.join(
+        options.runtimeFolder ?? path.join(options.workingFolder, 'runtime'),
+        'postprocess-scratch',
+        entity.id.replace(/^\/+/, '').replace(/[/\\]/g, '_'),
+    )
+    const intermediatesToCleanup = []
+
+    // Resolve the destination for stage i in the chain.
+    //   - last stage → entity.destination (the final output path,
+    //                  already swapped to the chain's last extension
+    //                  by the engine).
+    //   - all others → scratch/<stage>.<ext> where ext is the stage's
+    //                  declared output.
+    async function resolveStageDestination(stageIndex) {
+        if (stageIndex === chain.length - 1) {
+            return entity.destination
+        }
+        const plugin = plugins[`post-${chain[stageIndex]}`]
+        // Stage's `output:` declaration (e.g. 'html', 'pdf'). When
+        // absent, fall back to the prior file's extension — the stage
+        // is mutating bytes without changing format.
+        const ext = plugin.output ?? path.extname(entity.origin || entity.destination).slice(1) ?? 'bin'
+        await mkdir(scratchDir, { recursive: true })
+        const p = path.join(scratchDir, `${stageIndex}-${chain[stageIndex]}.${ext}`)
+        // Relative-to-outputFolder, since post plugins resolve
+        // entity.origin/destination against outputFolder.
+        const rel = path.relative(options.outputFolder, p)
+        return '/' + rel.split(path.sep).join('/')
+    }
+
+    let stageOrigin = entity.origin
+    let stageResult
+    try {
+        for (let i = 0; i < chain.length; i++) {
+            const stage = chain[i]
+            const plugin = plugins[`post-${stage}`]
+            const stageDestination = await resolveStageDestination(i)
+            const stageEntity = {
+                ...entity,
+                origin: stageOrigin,
+                destination: stageDestination,
+            }
+            stageResult = await plugin.postprocess({
+                entity:  stageEntity,
+                options, config:  plugin.options, context,
+                plugins, runtime, state,   logger,
+            })
+
+            // Determine where this stage actually wrote. Acceptable
+            // return shapes:
+            //   { success: false, ... }     → fail the chain
+            //   { success: true, result: P }→ P is the output path
+            //   string                      → output path
+            //   Buffer | string-of-bytes    → engine writes them to
+            //                                 stageDestination for the
+            //                                 next stage (or for the
+            //                                 final write).
+            if (stageResult && typeof stageResult === 'object' && stageResult.success === false) {
+                throw new Error(`Postprocess stage ${stage} reported failure: ${stageResult.error ?? '(no message)'}`)
+            }
+
+            // If the stage handed us raw bytes, materialize them to
+            // disk so the next stage has an origin path to read.
+            const resultPayload = (stageResult && typeof stageResult === 'object' && 'result' in stageResult)
+                ? stageResult.result
+                : stageResult
+            const isPath = typeof resultPayload === 'string' && (resultPayload.startsWith('/') || resultPayload.startsWith('./') || path.isAbsolute(resultPayload))
+
+            if (!isPath && resultPayload != null) {
+                // Engine materializes bytes to stageDestination.
+                const abs = path.join(options.outputFolder, stageDestination)
+                await mkdir(path.dirname(abs), { recursive: true })
+                await writeFile(abs, resultPayload)
+            }
+
+            // Stage N+1's origin = this stage's output path
+            // (relative-to-outputFolder, same shape entity.origin
+            // already uses).
+            const nextOrigin = isPath ? resultPayload : stageDestination
+            if (i < chain.length - 1) {
+                intermediatesToCleanup.push(nextOrigin)
+            }
+            stageOrigin = nextOrigin
+        }
+    } catch (err) {
+        // Cleanup any intermediates the chain produced before the
+        // failure. Final output (if any) was written to
+        // entity.destination — but a failure means the chain did NOT
+        // complete; remove that too so partial state doesn't leak.
+        for (const p of intermediatesToCleanup) {
+            try { await unlink(path.join(options.outputFolder, p)) } catch {}
+        }
+        try { await unlink(path.join(options.outputFolder, entity.destination)) } catch {}
+        throw err
+    }
+
+    // Cleanup intermediate scratch files. Best-effort; misses are not
+    // a hard failure — they'll re-overwrite next cycle if any survive.
+    for (const p of intermediatesToCleanup) {
+        try { await unlink(path.join(options.outputFolder, p)) } catch {}
+    }
+
+    // Cleanup the renderer's origin (first stage's input) when it's
+    // a different path from the chain's final destination. The
+    // single-stage onComplete in layouts.js used to do this; under
+    // the chain contract the dispatcher owns it so onComplete can
+    // stay disk-write-agnostic for postprocess outputs.
+    if (entity.origin && entity.origin !== entity.destination) {
+        try { await unlink(path.join(options.outputFolder, entity.origin)) } catch {}
+    }
+
+    // Return undefined so the engine's onPostprocess loop doesn't
+    // try to thread `result` back through layouts' onComplete (which
+    // would attempt a writeFile against a non-bytes value). The
+    // postprocess plugins wrote directly to disk; there's nothing
+    // for the engine to flush.
+    return undefined
 }
