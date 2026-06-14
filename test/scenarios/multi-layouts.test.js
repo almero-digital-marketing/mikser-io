@@ -30,7 +30,8 @@ import {
 } from './_harness.js'
 
 const CONFIG = `
-import { documents, frontMatter, yaml, layouts, renderHbs } from 'mikser-io'
+import { documents, frontMatter, yaml, renderHbs } from 'mikser-io'
+import { layouts } from 'mikser-io-layouts'
 export default {
     plugins: [
         documents(),

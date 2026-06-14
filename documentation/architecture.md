@@ -19,7 +19,7 @@ mikser-io/
     ├── manifest.js           Render snapshots (mikser_snapshots sqlite table)
     ├── database/             createSqliteDatabase, registerSchema, useDatabase, sift→SQL translator, queryContext (AsyncLocalStorage)
     ├── subscriptions.js      subscribe() primitive (journal-walk + graph-dispatch modes)
-    ├── source.js             useSource — folder-of-files import pattern shared by documents/files/layouts
+    ├── source.js             useSource — folder-of-files import pattern shared by documents/files (and used by sibling mikser-io-layouts)
     ├── server.js             Express bring-up: --server / --cors flags, trust-proxy, late-binding mount + listen
     ├── config.js             Config file loading
     ├── plugins.js            Plugin resolution and loading
@@ -34,7 +34,6 @@ mikser-io/
     ├── plugins/              Built-in content source and transform plugins
     │   ├── documents.js
     │   ├── files.js
-    │   ├── layouts.js
     │   ├── assets.js
     │   ├── resources.js
     │   ├── data.js
