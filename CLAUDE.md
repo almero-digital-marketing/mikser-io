@@ -20,12 +20,40 @@ work, check the gate first; if v9 isn't paying out yet, the
 question to answer is "what about v9 isn't working in daily use?"
 — not "what should v10 look like?"
 
-**Position mikser by what it is, not by speed.** Hugo wins the speed
-race; mikser doesn't compete there. Position: AI-native, lifecycle-
-observable, files-as-source-of-truth, full-cycle introspection. Speed
-claim cap: "fast enough that watch-mode rebuilds feel instant."
-Honest range: 200–800 docs/sec depending on corpus size
-(see `test/perf/`).
+**mikser is a mixer.** The name is the architecture. It combines
+inputs (entities — from files, forms, queries, anywhere) through
+configurable rendering pipelines (renderer plugins + task-production
+policies) into outputs of any kind. Static-site generation is the
+canonical recipe — what mikser ships with and what most projects
+use today — but it's a recipe, not the definition. The same
+substrate runs:
+
+- HTML SSG via `layouts` + `renderHbs` (the recipe everything else
+  is currently shaped around)
+- PDFs via `renderHbs` + `post-pdf` (puppeteer-driven)
+- Emails via `renderHbs` → `post-mjml` → `post-email` (chain)
+- 3D renders by composing a hypothetical `renderBlender` against
+  `.blend` entities — same engine, different renderer + recipe
+- Video / audio / archives / data-export — same shape
+
+The engine has no opinion on what a renderer produces. `render.js`
+and `postprocess.js` are abstract worker entries; `manifest.js`
+tracks snapshots of *any* output; refs invalidation re-runs
+*any* render task. SSG is the dominant case in v9 because it's
+where the dogfooding lives, not because the architecture only
+fits there. When proposing changes, hold the broader view: a
+change that helps SSG but blocks the Blender/video/audio/archive
+cases is constraining the engine's actual reach.
+
+**Position mikser by what it is, not by speed.** Hugo wins the
+speed race for SSG specifically; mikser doesn't compete there
+(and "fastest mixer" isn't a useful claim because the bottleneck
+is the renderer, not the engine). Secondary attributes that
+follow from the mixer framing: AI-native, lifecycle-observable,
+files-as-source-of-truth, full-cycle introspection. Speed claim
+cap: "fast enough that watch-mode rebuilds feel instant." Honest
+range: 200–800 docs/sec on the SSG-flavor pipeline depending on
+corpus size (see `test/perf/`).
 
 **Direct critique preferred.** Skip "great question," skip "solid but,"
 skip softening. When something didn't pay off, say so. Match user
@@ -141,25 +169,35 @@ brevity.
   POSTPROCESS), `ACTION` (sync action types), `TASKS` (`INLINE`/
   `SERIAL`/`WORKER` — dispatch modes).
 
+## Canonical sibling plugins
+
+These ship as separate repos but most projects pull them in. They're
+not bundled because the engine is renderer-agnostic — each plugin
+encodes a particular recipe (SSG, MJML, PDF, email) rather than
+substrate.
+
+- **`mikser-io-layouts`** — the canonical SSG-flavor task-production
+  policy. Owns multi-match layout assignment (`meta.layout` /
+  `meta.layouts` dual key + `autoLayouts` peel ladder), per-layout
+  destination Handlebars templates, collision detection, postprocess
+  chain parsing (filename `name.html-mjml-email.hbs` → `postprocessors:
+  ['mjml','email']` + frontmatter `postprocessor`/`postprocessors`),
+  `inspect()` primitive at `runtime.options.layouts.inspect`. The
+  engine has no opinion on layouts; this plugin is one way of producing
+  render tasks. Other domains (3D rendering, video) would have their
+  own task-production plugins.
+- **`mikser-io-render-{hbs,liquid,eta,markdown,metatext}`** — renderer
+  plugins. `renderHbs` is bundled in core; the rest are siblings.
+- **`mikser-io-post-{mjml,pdf,email}`** — postprocessor plugins,
+  composable in chains (see `documentation/rendering.md#postprocess`).
+- **`mikser-io-mcp`** — AI tooling surface (ADR-0006 test #5).
+- **`mikser-io-vector`** — vector index over the catalog.
+- **`mikser-io-forms`** — HTTP form receivers → entities.
+- **`mikser-io-schemas`** — TypeScript type generation from entity meta.
+
 ## Plugin map (`src/plugins/`)
 
 - `documents` — file→entity sync for the documents collection
-- `layouts` — multi-match layout assignment, sitemap, `inspect()`
-  primitive (at `runtime.options.layouts.inspect`). Every layout
-  whose pattern hits an entity contributes a render task (no
-  "best match wins"); `meta.layout: 'name'` / `meta.layouts: [...]`
-  is the per-entity opt-in override (dual key, both set → error).
-  `autoLayouts` peel ladder stays first-wins as a fallback.
-  Frontmatter `destination:` on a layout is a Handlebars template
-  (compiled-once cache, rendered with `{entity}`, path-sanitized)
-  that overrides the default `entity.name + .format` destination.
-  Two layouts resolving to the same destination → error logged with
-  both names, every task for that entity dropped for the cycle.
-  Postprocess chain is parsed off the layout filename
-  (`name.html-mjml-email.hbs` → `postprocessors: ['mjml','email']`)
-  or the entity's `postprocessor`/`postprocessors` frontmatter (dual
-  key, mutually exclusive); the array is attached to the render
-  task's options. Engine-side dispatch lives in `postprocess.js`.
 - `files` — file→entity sync for the files collection
 - `assets` — asset references and copy
 - `resources` — resource references
@@ -364,5 +402,8 @@ There is **no `--mcp` CLI flag**. Activation is plugin-presence only.
 - `documentation/configuration.md` — config reference
 - `documentation/api-reference.md` — public API
 - `test/perf/` — render-pipeline perf rig
-- Sibling repos: `mikser-io-mcp`, `mikser-io-vector`, `mikser-io-schemas`,
+- Sibling repos: `mikser-io-layouts` (canonical SSG-flavor render-task
+  production policy), `mikser-io-mcp`, `mikser-io-vector`,
+  `mikser-io-schemas`, `mikser-io-forms`, `mikser-io-post-{mjml,pdf,email}`,
+  `mikser-io-render-{eta,liquid,markdown,metatext}`,
   `mikser-io-sdk-{api,react,svelte,vue,vector}`, `mikser-io-example-blog`

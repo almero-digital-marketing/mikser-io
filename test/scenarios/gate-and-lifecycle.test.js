@@ -20,7 +20,8 @@ import {
 // yaml → layouts → render-hbs pipeline without pulling in
 // vector/decap/schemas/etc.
 const MINIMAL_CONFIG = `
-import { documents, frontMatter, yaml, layouts, renderHbs } from 'mikser-io'
+import { documents, frontMatter, yaml, renderHbs } from 'mikser-io'
+import { layouts } from 'mikser-io-layouts'
 export default {
     plugins: [documents(), frontMatter(), yaml(), layouts({ autoLayouts: true }), renderHbs()],
 }

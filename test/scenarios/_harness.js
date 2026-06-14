@@ -52,6 +52,18 @@ export async function setupFixture(workdir, files) {
     } catch (err) {
         if (err.code !== 'EEXIST') throw err
     }
+    // Sibling plugin: layouts. Resolved via the same symlink-into-
+    // node_modules pattern so scenario configs can `import { layouts }
+    // from 'mikser-io-layouts'`.
+    try {
+        await symlink(
+            path.join(path.dirname(MIKSER_ROOT), 'mikser-io-layouts'),
+            path.join(workdir, 'node_modules', 'mikser-io-layouts'),
+            'dir',
+        )
+    } catch (err) {
+        if (err.code !== 'EEXIST') throw err
+    }
     for (const [rel, content] of Object.entries(files)) {
         const full = path.join(workdir, rel)
         await mkdir(path.dirname(full), { recursive: true })

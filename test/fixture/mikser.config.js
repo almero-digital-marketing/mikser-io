@@ -1,8 +1,9 @@
 import { fileURLToPath } from 'node:url'
 import {
-    documents, frontMatter, yaml, layouts, files, resources, assets,
+    documents, frontMatter, yaml, files, resources, assets,
     renderHbs, renderHref, renderAsset, renderResource,
 } from 'mikser-io'
+import { layouts }        from 'mikser-io-layouts'
 import { renderLiquid }   from 'mikser-io-render-liquid'
 import { renderEta }      from 'mikser-io-render-eta'
 import { renderMarkdown } from 'mikser-io-render-markdown'
