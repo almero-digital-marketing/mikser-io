@@ -34,6 +34,116 @@ function* walkPartials(node) {
     }
 }
 
+// Static reference scan for `mikser-io-layouts`'s inspect() primitive.
+// Walks the Handlebars AST (no regex) and returns the variables / partials
+// / iterations / helpers the template source references. Authoring-time
+// view of "what could this template reference"; the precise runtime
+// answer to "what did it actually touch" lives in mikser-io's manifest.
+//
+// Returned shape matches the parseReferences contract: optional fields,
+// renderer-flavored. Engines that have richer semantics (block helpers,
+// helper args) can surface them under additional keys.
+export function parseReferences(source) {
+    if (typeof source !== 'string' || !source) {
+        return { variables: [], partials: [], iterations: [], helpers: [] }
+    }
+    let ast
+    try {
+        ast = handlebars.parse(source)
+    } catch (err) {
+        // Author-side parse failure shouldn't kill inspect(). Surface
+        // the message and an empty result.
+        return { variables: [], partials: [], iterations: [], helpers: [], parseError: err.message }
+    }
+
+    const variables  = new Set()
+    const partials   = new Set()
+    const iterations = []
+    const helpers    = new Set()
+
+    // Built-in block helpers that aren't user-defined and shouldn't
+    // pollute the helpers set. `each` shows up as an iteration instead.
+    const BUILTIN_BLOCKS = new Set(['if', 'unless', 'each', 'with', 'lookup'])
+
+    function visit(node) {
+        if (!node || typeof node !== 'object') return
+        switch (node.type) {
+            case 'Program':
+                for (const child of node.body ?? []) visit(child)
+                break
+            case 'MustacheStatement':
+                // {{path.to.var}} — record the path.
+                if (node.path?.type === 'PathExpression' && !BUILTIN_BLOCKS.has(node.path.original)) {
+                    variables.add(node.path.original)
+                }
+                // {{helper arg1 arg2}} with args → it's a helper call.
+                if (node.params?.length && node.path?.original && !BUILTIN_BLOCKS.has(node.path.original)) {
+                    helpers.add(node.path.original)
+                }
+                // Walk param paths too — they're variable refs.
+                for (const param of node.params ?? []) {
+                    if (param?.type === 'PathExpression') variables.add(param.original)
+                    if (param?.type === 'SubExpression') visit(param)
+                }
+                break
+            case 'SubExpression':
+                if (node.path?.original && !BUILTIN_BLOCKS.has(node.path.original)) {
+                    helpers.add(node.path.original)
+                }
+                for (const param of node.params ?? []) {
+                    if (param?.type === 'PathExpression') variables.add(param.original)
+                    if (param?.type === 'SubExpression') visit(param)
+                }
+                break
+            case 'BlockStatement':
+                // {{#each posts as |post|}}…{{/each}}
+                if (node.path?.original === 'each') {
+                    const collection = node.params?.[0]?.type === 'PathExpression'
+                        ? node.params[0].original
+                        : null
+                    if (collection) {
+                        const item = node.program?.blockParams?.[0] ?? '(each)'
+                        iterations.push({ item, collection })
+                        variables.add(collection)
+                    }
+                } else if (BUILTIN_BLOCKS.has(node.path?.original)) {
+                    // {{#if cond}}/{{#unless cond}}/{{#with x}} — record the
+                    // condition path as a variable ref.
+                    for (const param of node.params ?? []) {
+                        if (param?.type === 'PathExpression') variables.add(param.original)
+                        if (param?.type === 'SubExpression') visit(param)
+                    }
+                } else {
+                    // User-defined block helper.
+                    if (node.path?.original) helpers.add(node.path.original)
+                    for (const param of node.params ?? []) {
+                        if (param?.type === 'PathExpression') variables.add(param.original)
+                        if (param?.type === 'SubExpression') visit(param)
+                    }
+                }
+                if (node.program) visit(node.program)
+                if (node.inverse) visit(node.inverse)
+                break
+            case 'PartialStatement':
+            case 'PartialBlockStatement':
+                if (node.name?.type === 'PathExpression') {
+                    partials.add(node.name.original)
+                }
+                if (node.program) visit(node.program)
+                if (node.inverse) visit(node.inverse)
+                break
+        }
+    }
+    visit(ast)
+
+    return {
+        variables:  Array.from(variables).sort(),
+        partials:   Array.from(partials).sort(),
+        iterations,
+        helpers:    Array.from(helpers).sort(),
+    }
+}
+
 export function load({ config, runtime, state }) {
     handlebars.registerHelper(helpers(config?.helpers || [
         'array',
@@ -137,5 +247,6 @@ export function renderHbs(options = {}) {
         options,
         load,
         render,
+        parseReferences,
     }
 }
