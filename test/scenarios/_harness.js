@@ -12,7 +12,7 @@
 // test is a true end-to-end restart simulation.
 
 import { spawn } from 'node:child_process'
-import { mkdir, writeFile, rm, symlink } from 'node:fs/promises'
+import { mkdir, writeFile, rm, symlink, lstat } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -55,12 +55,36 @@ export async function setupFixture(workdir, files) {
     // Sibling plugin: layouts. Resolved via the same symlink-into-
     // node_modules pattern so scenario configs can `import { layouts }
     // from 'mikser-io-layouts'`.
+    const layoutsRoot = path.join(path.dirname(MIKSER_ROOT), 'mikser-io-layouts')
     try {
-        await symlink(
-            path.join(path.dirname(MIKSER_ROOT), 'mikser-io-layouts'),
-            path.join(workdir, 'node_modules', 'mikser-io-layouts'),
-            'dir',
-        )
+        await symlink(layoutsRoot, path.join(workdir, 'node_modules', 'mikser-io-layouts'), 'dir')
+    } catch (err) {
+        if (err.code !== 'EEXIST') throw err
+    }
+
+    // Coalesce mikser-io module identity across layouts' resolution
+    // path. npm 7+ auto-installs peer deps, so mikser-io-layouts'
+    // peerDependency on mikser-io ends up materialized as a real
+    // copy at layouts/node_modules/mikser-io. When layouts does
+    // `import { queryContext } from 'mikser-io'`, Node resolves to
+    // that bundled copy — a different module instance than the test
+    // workdir's symlinked working copy. Two AsyncLocalStorage
+    // instances → sidecar findEntities calls don't get tracked
+    // → aggregate-invalidation breaks silently.
+    //
+    // Force coalescence by replacing layouts' bundled mikser-io with
+    // a symlink to MIKSER_ROOT on every test run. Idempotent: if
+    // it's already a symlink, leave it; if it's a real dir, swap it.
+    const layoutsBundle = path.join(layoutsRoot, 'node_modules', 'mikser-io')
+    try {
+        const st = await lstat(layoutsBundle).catch(() => null)
+        if (st && !st.isSymbolicLink()) {
+            await rm(layoutsBundle, { recursive: true, force: true })
+            await symlink(MIKSER_ROOT, layoutsBundle, 'dir')
+        } else if (!st) {
+            await mkdir(path.dirname(layoutsBundle), { recursive: true })
+            await symlink(MIKSER_ROOT, layoutsBundle, 'dir')
+        }
     } catch (err) {
         if (err.code !== 'EEXIST') throw err
     }
