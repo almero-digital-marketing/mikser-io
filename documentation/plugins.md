@@ -37,8 +37,10 @@ Renderer and postprocessor packages **are** listed in `plugins: []` alongside li
 A plugin package exports a **named factory** in camelCase that matches the export name. The factory takes options and returns one of three shapes:
 
 - **Lifecycle plugin** — returns `(core) => void`. Receives the full Mikser API and registers hooks.
-- **Renderer** — returns `{ name, options, load?, render? }`.
-- **Postprocessor** — returns `{ name, options, output?, setup?, postprocess, teardown? }`.
+- **Renderer** — returns `{ name, options, load?, render? }`. Stored in `runtime.renderers`; dispatched by `entity.layout.template`.
+- **Postprocessor** — returns `{ name, options, output?, setup?, postprocess, teardown? }`. Stored in `runtime.postprocessors`; dispatched by the postprocess chain.
+
+A **content provider** plugin (for remote sources like gdrive, notion, s3, github, …) sits in `plugins: []` as a regular lifecycle plugin AND exports a top-level `read(entity)` function. The package MUST be named `mikser-io-provider-<scheme>` (e.g. `mikser-io-provider-gdrive`) — same naming convention as `mikser-io-render-*` and `mikser-io-post-*`. The lifecycle plugin's sync emits entities with `entity.uri = '<scheme>://...'`; when a downstream plugin calls `readEntityContent(entity)`, the engine parses the scheme, dynamic-imports the package, and calls `read(entity)`. Plain local paths and `file://` URIs are handled by a built-in filesystem read — no provider package needed for the canonical case.
 
 ### Lifecycle plugin shape
 

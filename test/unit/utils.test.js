@@ -24,6 +24,7 @@ import {
     expandEntity,
     ExpandError,
     useCollection,
+    readEntityContent,
 } from '../../src/utils.js'
 
 // ─── normalize ──────────────────────────────────────────────────────────────
@@ -1156,5 +1157,70 @@ describe('useCollection', () => {
         const docs = useCollection({ options: {} }, 'documents')
         // Doesn't throw; resolution happens on actual use.
         assert.equal(docs.name, 'documents')
+    })
+})
+
+// ─── readEntityContent (scheme dispatch) ────────────────────────────────────
+
+describe('readEntityContent', () => {
+    it('returns {} for null entity', async () => {
+        assert.deepEqual(await readEntityContent(null), {})
+        assert.deepEqual(await readEntityContent(undefined), {})
+    })
+
+    it('fast-path: entity.content already populated → no I/O, no scheme lookup', async () => {
+        // Even with a scheme-shaped uri (would dispatch to an
+        // uninstalled provider), pre-populated content wins.
+        const result = await readEntityContent({
+            content: 'pre-populated',
+            uri:     'gdrive://abc123/welcome.md',
+        })
+        assert.deepEqual(result, { content: 'pre-populated' })
+    })
+
+    it('reports contentError when entity has no uri and no content', async () => {
+        const result = await readEntityContent({ id: '/x' })
+        assert.match(result.contentError, /entity has no uri/)
+    })
+
+    it('built-in filesystem read: plain local path with text extension', async () => {
+        let dir
+        try {
+            dir = await mkdtemp(path.join(tmpdir(), 'mikser-read-content-'))
+            const filePath = path.join(dir, 'hello.md')
+            await writeFile(filePath, '# hello', 'utf8')
+            const result = await readEntityContent({ id: '/x', uri: filePath })
+            assert.deepEqual(result, { content: '# hello' })
+        } finally {
+            if (dir) await rm(dir, { recursive: true })
+        }
+    })
+
+    it('built-in filesystem read: file:// URI strips the scheme', async () => {
+        let dir
+        try {
+            dir = await mkdtemp(path.join(tmpdir(), 'mikser-read-content-'))
+            const filePath = path.join(dir, 'page.html')
+            await writeFile(filePath, '<h1>hi</h1>', 'utf8')
+            const result = await readEntityContent({ id: '/x', uri: `file://${filePath}` })
+            assert.deepEqual(result, { content: '<h1>hi</h1>' })
+        } finally {
+            if (dir) await rm(dir, { recursive: true })
+        }
+    })
+
+    it('built-in filesystem read: contentSkipped for binary extension', async () => {
+        const result = await readEntityContent({ id: '/x', uri: '/some/path/photo.png' })
+        assert.match(result.contentSkipped, /Non-text format \(\.png\)/)
+    })
+
+    it('built-in filesystem read: contentError when file does not exist', async () => {
+        const result = await readEntityContent({ id: '/x', uri: '/this/does/not/exist/yo.md' })
+        assert.match(result.contentError, /ENOENT/)
+    })
+
+    it('scheme dispatch: reports contentError when provider package is not installed', async () => {
+        const result = await readEntityContent({ id: '/x', uri: 'gdrive://abc123/welcome.md' })
+        assert.match(result.contentError, /Provider "gdrive" not installed \(mikser-io-provider-gdrive\)/)
     })
 })

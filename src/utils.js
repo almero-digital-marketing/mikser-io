@@ -1,6 +1,7 @@
 import crypto from 'node:crypto'
 import { hashFile, hash } from 'hasha'
 import { stat, readFile, writeFile, mkdir, unlink } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import TruncateStream from 'truncate-stream'
 import { createReadStream } from 'node:fs'
 import _ from 'lodash'
@@ -8,6 +9,7 @@ import { minimatch } from 'minimatch'
 import path from 'path'
 import fm from 'front-matter'
 import yaml from 'yaml'
+import runtime from './runtime.js'
 
 // Stable content fingerprint for entities — used by manifest snapshots,
 // engine mutation tracking, and the layouts dispatcher's hash-aware
@@ -143,42 +145,101 @@ export function isTextEntity(entity) {
     return TEXT_EXTENSIONS.has(ext)
 }
 
-// Read the source bytes for an entity, gated on isTextEntity. Returns
-// an object that callers Object.assign onto the entity (or use directly):
+// Cache resolved provider modules so we don't re-import per read.
+// Keyed by URI scheme — same scheme → same module → same auth state.
+const providerModuleCache = new Map()
+
+// Recognise URI schemes (`gdrive://abc123`, `notion://page/X`, `s3://bucket/key`,
+// `file:///abs/path`, `http(s)://...`). Plain local paths (`/Users/...`,
+// `C:\Users\...`, `./relative`) don't match and fall through to the
+// built-in filesystem read.
+const URI_SCHEME_RE = /^([a-z][a-z0-9+\-.]*):\/\//i
+
+// Resolve `<scheme>` to the package `mikser-io-provider-<scheme>` and
+// import it. Cached per scheme; same package convention as renderers
+// (`mikser-io-render-<name>`) and postprocessors (`mikser-io-post-<name>`).
+async function loadProviderModule(scheme, workingFolder) {
+    if (providerModuleCache.has(scheme)) return providerModuleCache.get(scheme)
+    const pkg = `mikser-io-provider-${scheme}`
+    let resolved
+    try {
+        const require = createRequire(path.join(workingFolder ?? process.cwd(), 'package.json'))
+        resolved = require.resolve(pkg)
+    } catch {
+        // Falls back to the import below trying the bare package name —
+        // resolves against the engine's own node_modules when the package
+        // lives there (workspace, hoisted dep, etc.).
+    }
+    const mod = await import(resolved ?? pkg)
+    providerModuleCache.set(scheme, mod)
+    return mod
+}
+
+// Read the source bytes for an entity. Returns an object callers
+// Object.assign onto the entity (or use directly):
 //
-//   { content }                   — text format read OK
-//   { contentError: message }     — text format but read failed (or no uri)
-//   { contentSkipped: message }   — binary format, deliberately not read
+//   { content }                   — text content available
+//   { contentError: message }     — read failed
+//   { contentSkipped: message }   — content not readable as text
+//                                   (binary file, oversized blob, ...)
 //
-// Returns `{}` when the entity itself is null. The skip message is
-// generic ("use a render API") — consumers wanting a transport-specific
-// pointer (e.g. "use mikser_render") should compose their own message
-// from `isTextEntity` + `readFile` directly. Centralised so every
-// "load this entity's content for me" caller agrees on the gate
-// semantics and the error shape.
+// Returns `{}` when the entity itself is null.
+//
+// Two layers of dispatch:
+//
+//   1. Fast path: if a source plugin already populated `entity.content`
+//      at sync time (small remote docs eager-fetched), use it. No I/O.
+//
+//   2. Scheme dispatch: parse the URI scheme. No scheme (plain local
+//      path) or `file` → built-in filesystem read. Any other scheme
+//      (`gdrive://`, `notion://`, `s3://`, `http(s)://`, ...) → dynamic-
+//      import `mikser-io-provider-<scheme>` (same naming convention as
+//      `mikser-io-render-*` and `mikser-io-post-*`) and call its
+//      exported `read(entity)`. Provider plugins initialize their
+//      auth/state via their own onLoaded hook; module-level state
+//      survives between the lifecycle setup and the read call.
 //
 // Usage:
 //
 //   Object.assign(entity, await readEntityContent(entity))
-//
-// or, when the caller wants to inspect first:
-//
-//   const fields = await readEntityContent(entity)
-//   if (fields.contentSkipped) { ... }
-//   Object.assign(entity, fields)
 export async function readEntityContent(entity) {
     if (!entity) return {}
+    if (typeof entity.content === 'string') return { content: entity.content }
     if (!entity.uri) return { contentError: 'entity has no uri' }
-    if (!isTextEntity(entity)) {
-        const ext = path.extname(entity.uri).slice(1).toLowerCase()
-        return {
-            contentSkipped: `Non-text format (.${ext}). Read the file directly at entity.uri, or use a render API to materialize output.`,
+
+    const m = URI_SCHEME_RE.exec(entity.uri)
+    const scheme = m?.[1].toLowerCase()
+
+    // Built-in filesystem read: no scheme (plain path) or `file://`.
+    if (!scheme || scheme === 'file') {
+        if (!isTextEntity(entity)) {
+            const ext = path.extname(entity.uri).slice(1).toLowerCase()
+            return {
+                contentSkipped: `Non-text format (.${ext}). Read the file directly at entity.uri, or use a render API to materialize output.`,
+            }
+        }
+        try {
+            const target = scheme === 'file' ? entity.uri.replace(/^file:\/\//i, '') : entity.uri
+            return { content: await readFile(target, 'utf8') }
+        } catch (err) {
+            return { contentError: err.message }
         }
     }
+
+    // External provider via package naming convention.
+    let providerMod
     try {
-        return { content: await readFile(entity.uri, 'utf8') }
+        providerMod = await loadProviderModule(scheme, runtime?.options?.workingFolder)
     } catch (err) {
-        return { contentError: err.message }
+        return { contentError: `Provider "${scheme}" not installed (mikser-io-provider-${scheme}): ${err.message}` }
+    }
+    if (typeof providerMod?.read !== 'function') {
+        return { contentError: `Provider "mikser-io-provider-${scheme}" must export a \`read(entity)\` function` }
+    }
+    try {
+        return await providerMod.read(entity)
+    } catch (err) {
+        return { contentError: `Provider "${scheme}" threw: ${err.message}` }
     }
 }
 

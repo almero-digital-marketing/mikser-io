@@ -391,6 +391,22 @@ There is **no `--mcp` CLI flag**. Activation is plugin-presence only.
 - **New lifecycle hook?** Almost certainly no. Existing hooks cover
   all known patterns. If you think you need one, post the use case
   to ADR-0006 review.
+- **New content source (gdrive, notion, s3, github, …)?** Two
+  things ship together:
+  - A regular lifecycle plugin (the sync — emits entities into the
+    catalog, sets `entity.uri = '<scheme>://...'` so the dispatch
+    knows where to route reads).
+  - A named export `read(entity)` from the same package, which
+    must be named `mikser-io-provider-<scheme>` so the engine can
+    find it. `readEntityContent(entity)` parses the scheme out of
+    `entity.uri`, dynamic-imports the package, calls its `read`.
+    No registry, no descriptor — same package-name convention as
+    `mikser-io-render-*` and `mikser-io-post-*`.
+  Built-in: plain local paths (no scheme) and `file://` URIs are
+  read via `fs.readFile` directly — no provider package needed for
+  the canonical local-filesystem case. `entity.content` already
+  populated is a fast-path that skips the dispatch entirely (for
+  small remote docs eager-fetched at sync time).
 
 ## Test suites
 
