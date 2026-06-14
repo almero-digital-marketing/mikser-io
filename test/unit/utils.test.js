@@ -1220,7 +1220,24 @@ describe('readEntityContent', () => {
     })
 
     it('scheme dispatch: reports contentError when provider package is not installed', async () => {
-        const result = await readEntityContent({ id: '/x', uri: 'gdrive://abc123/welcome.md' })
-        assert.match(result.contentError, /Provider "gdrive" not installed \(mikser-io-provider-gdrive\)/)
+        // Use a scheme that genuinely has no companion provider package
+        // installed in the workspace; the dispatch should surface the
+        // package name it tried.
+        const result = await readEntityContent({ id: '/x', uri: 'noatall://abc123/welcome.md' })
+        assert.match(result.contentError, /Provider "noatall" not installed \(mikser-io-provider-noatall\)/)
+    })
+
+    it('scheme dispatch: reaches an installed provider end-to-end', async () => {
+        // mikser-io-provider-gdrive IS installed via the workspace.
+        // The provider's lifecycle plugin hasn't been initialized in
+        // this test, so its read() returns "not initialized" — which
+        // confirms the dispatch reached the package and called its
+        // read() export, the substrate's contract.
+        const result = await readEntityContent({
+            id: '/x',
+            uri: 'gdrive://abc123/foo.md',
+            meta: { driveId: 'abc123', driveMimeType: 'text/markdown' },
+        })
+        assert.match(result.contentError, /gdrive: provider not initialized/)
     })
 })
