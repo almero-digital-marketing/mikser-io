@@ -217,6 +217,19 @@ substrate.
 - **Engine state** at `runtime.<name>` — `runtime.refs`, `runtime.catalog`.
 - **Plugin surfaces** at `runtime.options.<plugin>` —
   `runtime.options.preview`, `runtime.options.layouts.inspect`.
+- **Reachability:** `runtime.options.url` is the engine's resolved
+  public URL (from `--url` or `config.url`, trailing slash stripped,
+  validated). Plugins that need external reachability — webhook
+  receivers, absolute links in emails, MCP preview URLs returned to
+  agents, forms share links — read this. Standard gating pattern:
+  ```js
+  const canPush = runtime.options.url?.startsWith('https://')
+  if (canPush) registerWebhookAt(`${runtime.options.url}/api/X/webhook`)
+  else         setupPollingFallback()
+  ```
+  `runtime.options.port` is the internal listener port (kept for
+  loopback/dev URL building); `runtime.options.url` is the external
+  origin. When in doubt: external = `url`, internal = `port`.
 - **Engine functions** as module-level exports from `mikser-io`:
   `import { queryEntities, subscribe, useRenderer, useCollection,
   readEntityContent, isTextEntity } from 'mikser-io'`.

@@ -33,6 +33,7 @@ export function attachServerCliOptions(commander) {
         ?.option('-s --server [port]', 'start an Express server on the given port (defaults to 3001)')
         .option('--cors [origin]', 'restrict server CORS to a specific origin (default *)')
         .option('--no-cors', 'disable server CORS headers')
+        .option('-u --url <url>', 'public URL where this mikser is reachable (e.g. https://blog.me.com). Webhook-capable plugins use https URLs for push notifications; other plugins use this when generating absolute URLs (email tracking links, forms share links, MCP previews, etc.).')
 }
 
 // Wire the server lifecycle hooks. Called by engine.js's setup() AFTER

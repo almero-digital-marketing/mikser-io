@@ -59,6 +59,7 @@ These options are part of `runtime.options` and apply to the engine itself.
 | `threads` | — | number | `4` | Worker thread count for the Piscina pools (`renderWorkers`, `postprocessWorkers`). Both pools are lazy (`minThreads: 0` + `idleTimeout: 30_000`) so INLINE-only workloads spin up zero workers. |
 | `server` | `-s, --server [port]` | number\|boolean | — | When set, the engine creates a shared Express app on `runtime.options.app` and listens on the given port (default `3001`) after all plugins have mounted their routes. Plugins like `api` attach to it instead of starting their own server. The `outputFolder` is also served as a static catch-all route at `/` (plugin routes match first; anything that doesn't match falls through to the rendered output). Requires `express` to be installed. |
 | `cors` / `no-cors` | `--cors` / `--no-cors` | boolean | — | Toggle CORS on the engine's shared Express app. See `src/server.js` for the extensible header arrays plugins push onto. |
+| `url` | `-u, --url <url>` | string | — | Public URL where this mikser is reachable (e.g. `https://blog.me.com`). Validated, trailing slash stripped, stamped on `runtime.options.url`. Read by webhook-capable plugins for push-vs-poll gating (`url.startsWith('https://')`); used by anything that surfaces absolute URLs externally — MCP preview URLs returned to agents, forms share links, email tracking pixels. Plugins that just need internal URLs keep using `runtime.options.port`. |
 
 ## Engine Substrate
 

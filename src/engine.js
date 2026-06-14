@@ -5,7 +5,7 @@ import { existsSync } from 'fs'
 import _ from 'lodash'
 import Piscina from 'piscina'
 import runtime from './runtime.js'
-import { onInitialize, onInitialized, onRender, onCancel, onCancelled, onFinalized, onLoaded, onBeforePostprocess, onPostprocess, postprocessEntities } from './lifecycle.js'
+import { onInitialize, onInitialized, onLoad, onRender, onCancel, onCancelled, onFinalized, onLoaded, onBeforePostprocess, onPostprocess, postprocessEntities } from './lifecycle.js'
 import { useJournal, updateEntry } from './journal.js'
 import { globby } from 'globby'
 import { OPERATION, TASKS } from './constants.js'
@@ -177,6 +177,39 @@ export async function setup(options) {
     // Called AFTER engine's own onInitialized registration so server's
     // bring-up logs come after the folder-info lines.
     setupServer()
+
+    // Public URL resolution. CLI --url wins; otherwise read runtime.config.url
+    // populated by the user's mikser.config.js. Stamped on runtime.options.url
+    // (no trailing slash) for plugins to consume in their onLoaded.
+    //
+    // Plugins that need external reachability (webhook receivers, absolute
+    // links in emails, MCP preview URLs, forms share links) read this. The
+    // standard gating pattern is:
+    //
+    //     const canPush = runtime.options.url?.startsWith('https://')
+    //     if (canPush) registerWebhookAt(`${runtime.options.url}/api/X/webhook`)
+    //     else         setupPollingFallback()
+    //
+    // Runs at onLoad — after config.js fires its onLoad (which populates
+    // runtime.config) and before any plugin's onLoaded.
+    onLoad(async () => {
+        const logger = useLogger()
+        const cli = runtime.options.url
+        const cfg = runtime.config?.url
+        const raw = cli ?? cfg
+        if (raw == null || raw === '') {
+            runtime.options.url = undefined
+            return
+        }
+        try {
+            new URL(raw)
+        } catch (err) {
+            throw new Error(`Invalid --url / config.url value: ${raw} (${err.message})`)
+        }
+        runtime.options.url = String(raw).replace(/\/+$/, '')
+        logger.info('Public URL: %s%s', runtime.options.url,
+            runtime.options.url.startsWith('https://') ? ' (webhook-capable)' : ' (http; plugins will not enable push webhooks)')
+    })
 
     onLoaded(async () => {
         const logger = useLogger()

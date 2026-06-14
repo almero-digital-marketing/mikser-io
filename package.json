@@ -4,9 +4,9 @@
 	"description": "<p align=\"center\">   <img src=\"mikser-lockup-stacked.svg\" alt=\"mikser\" width=\"198\" /> </p>",
 	"main": "index.js",
 	"exports": {
-		".":            "./index.js",
+		".": "./index.js",
 		"./package.json": "./package.json",
-		"./*":          "./*"
+		"./*": "./*"
 	},
 	"scripts": {
 		"debug": "node --no-warnings app.js --server --watch --working-folder test/fixture",
@@ -61,6 +61,7 @@
 		"express": "^5.2.1"
 	},
 	"devDependencies": {
+		"@ai-sdk/openai": "^3.0.71",
 		"fluent-ffmpeg": "^2.1.3",
 		"mikser-io-decap": "file:../mikser-io-decap",
 		"mikser-io-post-mjml": "file:../mikser-io-post-mjml",

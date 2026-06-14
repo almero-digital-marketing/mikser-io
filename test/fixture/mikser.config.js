@@ -10,6 +10,7 @@ import { renderMarkdown } from 'mikser-io-render-markdown'
 import { postPdf }        from 'mikser-io-post-pdf'
 import { postMjml }       from 'mikser-io-post-mjml'
 import { vector }         from 'mikser-io-vector'
+import { openai }         from '@ai-sdk/openai'
 import { decap }          from 'mikser-io-decap'
 import { schemas }        from 'mikser-io-schemas'
 
@@ -54,7 +55,7 @@ export default async ({ options }) => ({
         postPdf(),
         postMjml(),
         vector({
-            openai: { apiKey: process.env.OPENAI_API_KEY },
+            model: openai.embedding('text-embedding-3-small'),
             stores: {
                 documents: {
                     map: entity => ({
