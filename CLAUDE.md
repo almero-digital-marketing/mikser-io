@@ -407,6 +407,48 @@ There is **no `--mcp` CLI flag**. Activation is plugin-presence only.
   + clean-build timing). `SIZE=realistic` + entity count knobs
   documented in **Perf**.
 
+## Dev workspace
+
+The siblings live side-by-side under `/Users/dick/Projects/mikser/`
+and share an npm workspace declared at the parent's `package.json`:
+
+```json
+{
+  "private": true,
+  "workspaces": ["mikser-io", "mikser-io-*"]
+}
+```
+
+`npm install` at that root hoists everything: each sibling's
+`node_modules/mikser-io` (and any other cross-workspace dep)
+becomes a symlink to the working copy. The whole tree runs
+against ONE module instance of mikser-io.
+
+**This isn't optional ergonomics — it's correctness.** Plugins
+use `AsyncLocalStorage` (currently `queryContext` for sidecar
+findEntities tracking; the schema-version meta could grow more).
+Without workspace deduplication, npm 7+ auto-installs the peer
+dep into each sibling's own `node_modules`. Layouts'
+`import { queryContext } from 'mikser-io'` then resolves to its
+bundled copy — a different AsyncLocalStorage instance than the
+engine uses. Sidecar queries don't get tracked → no `query`
+edges in `mikser_snapshots.refClosure` →
+`manifest.queryAffected` returns empty → aggregate layouts
+(index pages, sitemaps, RSS feeds) never invalidate when new
+matching entities land. Silent broken-incremental.
+
+`test/scenarios/_harness.js` also auto-coalesces (replaces any
+real `mikser-io-layouts/node_modules/mikser-io` directory with a
+symlink to MIKSER_ROOT on every `setupFixture`) as a backstop —
+the scenarios pass with or without the workspace, but the
+workspace is the canonical setup. Same shape applies to any
+future sibling that uses `queryContext` or other module-level
+state from mikser-io.
+
+For production consumers (someone `npm install mikser-io
+mikser-io-layouts` in their own project), npm resolves both from
+the consumer's own project tree — no duplication, no bug.
+
 ## Reference
 
 - `documentation/architecture.md` — module map (audit before relying
