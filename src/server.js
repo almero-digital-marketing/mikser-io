@@ -140,7 +140,12 @@ export function setupServer() {
 
             await new Promise(resolve => {
                 runtime.options.app.listen(runtime.options.port, () => {
-                    logger.info('Server listening: http://localhost:%d', runtime.options.port)
+                    // Public URL wins for operator-clickable log lines —
+                    // a reverse-proxy/tunnel/ngrok setup binds locally but
+                    // is reached externally at runtime.options.url. Fall
+                    // back to the bind URL when no public origin is set.
+                    const externalUrl = runtime.options.url ?? `http://localhost:${runtime.options.port}`
+                    logger.info('Server listening: %s', externalUrl)
                     resolve()
                 })
             })

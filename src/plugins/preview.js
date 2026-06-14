@@ -167,11 +167,12 @@ export function preview(options = {}) {
             }
             res.type(entry.mime).send(entry.bytes)
         })
-        // Full URL when port is known; bare path otherwise. The /:filename
-        // segment is left off — it's filled at request time per preview.
-        const location = runtime.options.port
-            ? `http://localhost:${runtime.options.port}${cfg.path}`
-            : cfg.path
+        // Full URL when an origin is known (public --url wins, falls back
+        // to localhost:port); bare path otherwise. The /:filename segment
+        // is left off — it's filled at request time per preview.
+        const origin = runtime.options.url
+            ?? (runtime.options.port ? `http://localhost:${runtime.options.port}` : null)
+        const location = origin ? `${origin}${cfg.path}` : cfg.path
         logger.info('Preview route mounted: %s (cache cap: %d MB)', location, Math.round(cfg.maxBytes / 1024 / 1024))
     })
 

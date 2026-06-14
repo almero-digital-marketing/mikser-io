@@ -811,11 +811,14 @@ export function api(options = {}) {
             const authLabel = ep.token
                 ? 'token'
                 : (ep.allowRemote ? 'public, REMOTE OPEN' : 'public, loopback-only')
-            // Full URL when the engine owns the listener (port is known).
-            // Falls back to the path alone for external-app setups.
-            const location = runtime.options.port
-                ? `http://localhost:${runtime.options.port}${base}/${name}`
-                : `${base}/${name}`
+            // Full URL when an origin is known. Public --url wins for
+            // operator-clickable share-this links; localhost:port is the
+            // fallback when only the local listener is configured; bare
+            // path is the last resort for external-app setups where the
+            // engine doesn't own the listener and no public URL is set.
+            const origin = runtime.options.url
+                ?? (runtime.options.port ? `http://localhost:${runtime.options.port}` : null)
+            const location = origin ? `${origin}${base}/${name}` : `${base}/${name}`
             logger.info('Api endpoint mounted: %s (ops=[%s] [%s])',
                 location, [...allowedOps].join(','), authLabel)
         }
