@@ -128,7 +128,16 @@ brevity.
   plugins to push onto), late-binding static mount + listen.
 - `logger.js` — pino + pino-pretty (inline) + gauge progress + custom
   Writable for progress coordination + `pino.multistream` for
-  third-party shipping (`runtime.config.logging.transports`).
+  third-party shipping. Two registration surfaces for transports:
+  - `runtime.config.logging.transports` — declarative; user config.
+  - `addLogTransport({ target, options?, level? })` — public export;
+    plugins call this from their factory (queues until logger build)
+    or any later hook (live-rebuilds the multistream + swaps
+    `runtime.engine.logger`). `useLogger()` reads the swap-target
+    fresh on each call so new transports start receiving records
+    immediately. Both surfaces compose; same `{level, target, options}`
+    shape. Enables Better Stack / Datadog / Loki / Axiom / Sentry as
+    standard sibling plugins without engine changes per vendor.
 - `utils.js` — shared pure helpers: `mimeForEntity`, `isLoopback`,
   `expandEntity`, `projectMeta`, `useCollection`, `useRenderer` (via
   render.js), `isTextEntity`, `readEntityContent`, `extractRefs`,

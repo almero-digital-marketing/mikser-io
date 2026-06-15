@@ -37,6 +37,31 @@ import { onLoad } from './lifecycle.js'
 // want visibility above info noise but aren't warnings.
 const CUSTOM_LEVELS = { notice: 35 }
 
+// Plugin-side log transport registry — paired with `addLogTransport`
+// below. Two-state lifecycle:
+//
+//   - Before createMikserLogger() runs (the plugin factory phase, when
+//     mikser.config.js is being import()'d and the factories embedded
+//     in `plugins: []` are calling addLogTransport synchronously), the
+//     entries land in pendingTransports. createMikserLogger drains it
+//     alongside the declarative runtime.config.logging.transports when
+//     it builds the multistream.
+//
+//   - After createMikserLogger() has run, `currentStreams` and
+//     `currentLevel` are populated. Any later addLogTransport call
+//     (e.g. from a plugin's onLoaded hook, or a deferred integration)
+//     builds the new stream, pushes it onto currentStreams, and swaps
+//     runtime.engine.logger to a fresh pino instance backed by the
+//     updated multistream. useLogger() reads runtime.engine.logger
+//     fresh on each call, so the new transport starts receiving
+//     records immediately for every subsequent log call.
+//
+// The shape `{ level?, target, options? }` mirrors what
+// runtime.config.logging.transports already accepts.
+const pendingTransports = []
+let currentStreams = null
+let currentLevel   = 'info'
+
 // Per-level icons prepended via pino-pretty's messageFormat. Empty
 // strings for levels we don't want to decorate — debug/trace are noisy
 // enough already. messageFormat receives `log.level` as a number, so we
@@ -135,22 +160,26 @@ export function createMikserLogger(level = 'info') {
 
     const streams = [{ level, stream: prettyStream }]
 
-    // Mikser-config-driven third-party transports. Each entry is
-    // `{ level?, target, options? }` — same shape pino.transport()
-    // accepts. The transport spawns a worker; if its module fails to
-    // load (missing dep, bad config), we surface it to stderr and keep
-    // the terminal stream alive rather than crashing the engine.
-    const transports = runtime.config?.logging?.transports ?? []
-    for (const t of transports) {
-        try {
-            const stream = pino.transport({ target: t.target, options: t.options })
-            streams.push({ level: t.level ?? level, stream })
-        } catch (err) {
-            process.stderr.write(
-                `Logger: failed to load transport "${t.target}": ${err.message}\n`
-            )
-        }
+    // Two sources of transports merged into one list:
+    //
+    //   - runtime.config.logging.transports (declarative — user-config-
+    //     driven). The historical surface; still works unchanged.
+    //   - pendingTransports (plugin-side, drained here). Plugin factories
+    //     that called addLogTransport at config-load time land here.
+    //
+    // Each entry is `{ level?, target, options? }` — same shape
+    // pino.transport() accepts. Transport workers that fail to load
+    // (missing dep, bad config) surface to stderr but don't crash the
+    // engine — the terminal stream stays alive.
+    const declared = runtime.config?.logging?.transports ?? []
+    for (const t of [...declared, ...pendingTransports]) {
+        const s = buildTransportStream(t, level)
+        if (s) streams.push(s)
     }
+    pendingTransports.length = 0
+
+    currentStreams = streams
+    currentLevel   = level
 
     return pino(
         {
@@ -159,6 +188,62 @@ export function createMikserLogger(level = 'info') {
         },
         pino.multistream(streams)
     )
+}
+
+// Construct a multistream entry for a transport descriptor. Returns
+// null when the underlying pino.transport() call throws (missing
+// dependency, bad options) — caller treats null as "skip".
+function buildTransportStream(entry, defaultLevel) {
+    try {
+        return {
+            level:  entry.level ?? defaultLevel,
+            stream: pino.transport({ target: entry.target, options: entry.options }),
+        }
+    } catch (err) {
+        process.stderr.write(
+            `Logger: failed to load transport "${entry.target}": ${err.message}\n`
+        )
+        return null
+    }
+}
+
+// Add a log transport from anywhere in mikser-io's lifecycle —
+// typically from a plugin's factory (the canonical Better Stack /
+// Datadog / Loki / Axiom / Sentry shape) or from a plugin's onLoaded
+// hook for deferred / runtime-resolved integrations.
+//
+// Behavior depends on when this is called:
+//
+//   - Before createMikserLogger() has run (factory phase during
+//     config.js's onLoad — plugin factories called inside the user's
+//     mikser.config.js evaluate here): the entry queues. The next
+//     createMikserLogger() call drains the queue.
+//
+//   - After createMikserLogger() has run (plugin onLoaded, any later
+//     hook, runtime injection): the new pino.transport stream is
+//     built and pushed onto the live multistream, then runtime.engine
+//     .logger is swapped to a fresh pino backed by the updated list.
+//     useLogger() reads runtime.engine.logger on each call, so all
+//     subsequent log emissions reach the new transport.
+//
+// Returns true when the transport was queued or successfully added,
+// false when transport stream construction failed (the load error
+// already went to stderr via buildTransportStream).
+export function addLogTransport(entry) {
+    if (currentStreams === null) {
+        pendingTransports.push(entry)
+        return true
+    }
+    const s = buildTransportStream(entry, currentLevel)
+    if (!s) return false
+    currentStreams.push(s)
+    if (runtime.engine) {
+        runtime.engine.logger = pino(
+            { level: 'trace', customLevels: CUSTOM_LEVELS },
+            pino.multistream(currentStreams),
+        )
+    }
+    return true
 }
 
 // Replace the bootstrap logger (built by engine.setup() with the
@@ -176,7 +261,9 @@ export function createMikserLogger(level = 'info') {
 // to closures that have already executed.
 onLoad(() => {
     if (!runtime.engine?.logger) return
-    if (!runtime.config?.logging?.transports?.length) return
+    const haveDeclared = (runtime.config?.logging?.transports?.length ?? 0) > 0
+    const havePending  = pendingTransports.length > 0
+    if (!haveDeclared && !havePending) return
     const level = runtime.engine.logger.level
     runtime.engine.logger = createMikserLogger(level)
 })
