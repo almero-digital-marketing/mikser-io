@@ -185,19 +185,25 @@ async function loadProviderModule(scheme, workingFolder) {
 //
 // Returns `{}` when the entity itself is null.
 //
-// Two layers of dispatch:
+// Three layers of dispatch:
 //
 //   1. Fast path: if a source plugin already populated `entity.content`
 //      at sync time (small remote docs eager-fetched), use it. No I/O.
 //
-//   2. Scheme dispatch: parse the URI scheme. No scheme (plain local
-//      path) or `file` → built-in filesystem read. Any other scheme
-//      (`gdrive://`, `notion://`, `s3://`, `http(s)://`, ...) → dynamic-
-//      import `mikser-io-provider-<scheme>` (same naming convention as
-//      `mikser-io-render-*` and `mikser-io-post-*`) and call its
-//      exported `read(entity)`. Provider plugins initialize their
-//      auth/state via their own onLoaded hook; module-level state
-//      survives between the lifecycle setup and the read call.
+//   2. Built-in providers (handled inline, no package install needed):
+//      - no scheme or `file://`  → src/plugins/providers (filesystem
+//        read with the isTextEntity gate)
+//      - `http://` / `https://`  → src/plugins/providers/http.js
+//        (conditional GET with ETag caching, binary mirror, inflight
+//        coalescing)
+//
+//   3. External providers: any other scheme (`gdrive://`, `notion://`,
+//      `s3://`, etc.) → dynamic-import `mikser-io-provider-<scheme>`
+//      (same naming convention as `mikser-io-render-*` and
+//      `mikser-io-post-*`) and call its exported `read(entity)`.
+//      Provider plugins initialize their auth/state via their own
+//      onLoaded hook; module-level state survives between the
+//      lifecycle setup and the read call.
 //
 // Usage:
 //
@@ -209,6 +215,14 @@ export async function readEntityContent(entity) {
 
     const m = URI_SCHEME_RE.exec(entity.uri)
     const scheme = m?.[1].toLowerCase()
+
+    // Built-in HTTP/HTTPS provider — ships in core because every
+    // mikser project might consume a public URL (CSV pull, RSS feed,
+    // remote config) and fetch is in Node 18+ already.
+    if (scheme === 'http' || scheme === 'https') {
+        const { readHttpEntity } = await import('./plugins/providers/http.js')
+        return await readHttpEntity(entity)
+    }
 
     // Built-in filesystem read: no scheme (plain path) or `file://`.
     if (!scheme || scheme === 'file') {

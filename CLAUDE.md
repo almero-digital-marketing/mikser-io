@@ -212,6 +212,30 @@ substrate.
 - `observer` / `mapper` / `validator` / `commands` / `shares` —
   utility plugins
 
+## Built-in content providers (`src/plugins/providers/`)
+
+The substrate-side `readEntityContent(entity)` dispatches by URI
+scheme. Two schemes are handled inline by built-in providers
+(no separate package required, ships with mikser-io):
+
+- **No scheme / plain path / `file://`** — filesystem read. Lives
+  inline in `src/utils.js readEntityContent` because the engine
+  already touches the filesystem everywhere.
+- **`http://` / `https://`** — `src/plugins/providers/http.js`.
+  Conditional GET with ETag + Last-Modified, in-memory response
+  cache, inflight coalescing on the same URL, binary mirror to
+  `runtime/http-cache/<sha-of-url>.<ext>`, operator-supplied
+  headers via `entity.meta.httpHeaders`, configurable timeout via
+  `entity.meta.httpTimeoutMs`. Test affordance:
+  `__resetHttpCacheForTests()` clears the module-level caches
+  between unit tests.
+
+Any other scheme (`gdrive://`, `notion://`, `s3://`, …) routes
+through the dynamic-import-by-name path — `mikser-io-provider-<scheme>`
+must be installed as a sibling package and export a top-level
+`read(entity)` function. See ADR-0010 / the gdrive provider for
+the convention.
+
 ## Naming conventions
 
 - **Engine state** at `runtime.<name>` — `runtime.refs`, `runtime.catalog`.

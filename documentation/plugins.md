@@ -40,7 +40,12 @@ A plugin package exports a **named factory** in camelCase that matches the expor
 - **Renderer** — returns `{ name, options, load?, render? }`. Stored in `runtime.renderers`; dispatched by `entity.layout.template`.
 - **Postprocessor** — returns `{ name, options, output?, setup?, postprocess, teardown? }`. Stored in `runtime.postprocessors`; dispatched by the postprocess chain.
 
-A **content provider** plugin (for remote sources like gdrive, notion, s3, github, …) sits in `plugins: []` as a regular lifecycle plugin AND exports a top-level `read(entity)` function. The package MUST be named `mikser-io-provider-<scheme>` (e.g. `mikser-io-provider-gdrive`) — same naming convention as `mikser-io-render-*` and `mikser-io-post-*`. The lifecycle plugin's sync emits entities with `entity.uri = '<scheme>://...'`; when a downstream plugin calls `readEntityContent(entity)`, the engine parses the scheme, dynamic-imports the package, and calls `read(entity)`. Plain local paths and `file://` URIs are handled by a built-in filesystem read — no provider package needed for the canonical case.
+A **content provider** plugin (for remote sources like gdrive, notion, s3, github, …) sits in `plugins: []` as a regular lifecycle plugin AND exports a top-level `read(entity)` function. The package MUST be named `mikser-io-provider-<scheme>` (e.g. `mikser-io-provider-gdrive`) — same naming convention as `mikser-io-render-*` and `mikser-io-post-*`. The lifecycle plugin's sync emits entities with `entity.uri = '<scheme>://...'`; when a downstream plugin calls `readEntityContent(entity)`, the engine parses the scheme, dynamic-imports the package, and calls `read(entity)`.
+
+**Two schemes are built-in and ship in core** (no provider package needed):
+
+- Plain local paths and `file://` URIs → filesystem read.
+- `http://` / `https://` URIs → `src/plugins/providers/http.js`. Conditional GET with ETag + Last-Modified, in-memory response cache, inflight coalescing, binary mirror to `runtime/http-cache/`, operator-supplied headers via `entity.meta.httpHeaders`. Ships in core because every project might consume a remote URL (CSV pull, RSS feed, hosted config), and `fetch` is in Node 18+ already.
 
 ### Lifecycle plugin shape
 
