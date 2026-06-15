@@ -92,25 +92,46 @@ export async function gateChecksum(file, id, { reload = false, priorChecksums } 
 }
 
 // Delete sweep. After a scan, find every catalog entity in `collection`
-// whose id wasn't seen by the scan and emit DELETE via the caller's
-// `onDelete(entity)` hook (which performs the actual deleteEntity() call
-// plus any plugin-specific cleanup — state-map removal, etc).
+// AND owned by this source (uri rooted at `ownerPrefix`) whose id wasn't
+// seen by the scan and emit DELETE via the caller's `onDelete(entity)`
+// hook (which performs the actual deleteEntity() call plus any plugin-
+// specific cleanup — state-map removal, etc).
 // Bypassed by --force (operator wants a full rebuild; deletes still
 // flow naturally on the rebuild).
 //
+// `ownerPrefix` (required) is the absolute folder the calling source
+// owns — typically `absFolder` for documents/files/assets, or
+// `layoutsFolder` for layouts. Sweep only considers entities whose
+// `entity.uri` is rooted there, so foreign entities co-existing in
+// the same collection (CSV-emitted documents-collection rows with
+// `uri` empty, gdrive-sourced docs with `uri = 'gdrive://...'`,
+// API-injected entities, etc.) are invisible to this sweep and stay
+// in the catalog. Without this scope, every non-file emitter in a
+// shared collection gets silently wiped on every cycle by whichever
+// file source ran last — a class-of-bugs landmine.
+//
 // Set difference runs in SQL. The scanned ids land in a session-scoped
 // TEMP table, then a LEFT JOIN against mikser_entities returns just the
-// "in catalog, not in scanned" rows. Memory is bounded by the *delete
-// set* (typically 0-10 per cycle) rather than the corpus — at 1M docs
-// the prior `for (const e of await findEntities({collection}))` walk
-// allocated ~7GB; this allocates a few KB.
+// "in catalog, not in scanned, owned by us" rows. Memory is bounded by
+// the *delete set* (typically 0-10 per cycle) rather than the corpus —
+// at 1M docs the prior `for (const e of await findEntities({collection}))`
+// walk allocated ~7GB; this allocates a few KB.
 //
 // Setup cost is one INSERT per scanned id (~2μs prepared-and-batched).
 // At 1M scanned files that's ~2s of sweep overhead — comparable to the
 // LRU population the scan already does, and we get rid of the 7GB JS
 // heap peak in return.
-export async function sweepDeleted(collection, scanned, onDelete) {
+export async function sweepDeleted(collection, scanned, onDelete, ownerPrefix) {
     if (runtime.options.force) return 0
+    if (!ownerPrefix) {
+        throw new Error(
+            'sweepDeleted: ownerPrefix is required — pass the absolute folder ' +
+            'this source owns so the sweep can stay scoped to entities whose ' +
+            'uri is rooted there. Without it, every co-collection emitter ' +
+            '(CSV, gdrive, API, …) gets silently wiped on every cycle.'
+        )
+    }
+    const ownerLike = ownerPrefix.endsWith('/') ? ownerPrefix : ownerPrefix + '/'
     const db = useDatabase()
     if (!db?.isOpen) {
         // Fallback for test paths that drive sweepDeleted without the
@@ -119,6 +140,7 @@ export async function sweepDeleted(collection, scanned, onDelete) {
         let count = 0
         for (const e of await findEntities({ collection })) {
             if (scanned.has(e.id)) continue
+            if (!e.uri || !String(e.uri).startsWith(ownerLike)) continue
             await onDelete(e)
             count++
         }
@@ -138,13 +160,19 @@ export async function sweepDeleted(collection, scanned, onDelete) {
     })
 
     // Set difference in SQL — returns only the rows in mikser_entities
-    // whose id has no match in sweep_scanned_ids.
+    // whose id has no match in sweep_scanned_ids AND whose uri is rooted
+    // at ownerPrefix. Foreign-emitter entities (uri NULL/empty, foreign
+    // scheme, or rooted elsewhere) are excluded by the LIKE clause.
     const deletedIds = db.prepare(`
         SELECT e.id
         FROM mikser_entities e
         LEFT JOIN sweep_scanned_ids s ON s.id = e.id
-        WHERE e.collection = ? AND s.id IS NULL
-    `).all(collection).map(r => r.id)
+        WHERE e.collection = ?
+          AND s.id IS NULL
+          AND e.uri IS NOT NULL
+          AND e.uri != ''
+          AND e.uri LIKE ? || '%'
+    `).all(collection, ownerLike).map(r => r.id)
 
     let count = 0
     for (const id of deletedIds) {
@@ -358,7 +386,11 @@ export function useSource(core, options) {
             // {id,type,collection} would miss those filters.
             await deleteEntity(e)
             logger.debug('%s removed (file gone): %s', collection, e.name)
-        })
+        }, absFolder)
+        // ownerPrefix: absFolder. The sweep stays inside this source's
+        // own filesystem root, so foreign-emitter entities in the same
+        // collection (CSV rows, gdrive docs, API-injected entries) are
+        // left alone instead of getting cross-trashed every cycle.
 
         logger.info(scanSummary({ cap, loaded: files.length, ...scanStats }))
     })

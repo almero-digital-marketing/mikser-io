@@ -245,6 +245,33 @@ must be installed as a sibling package and export a top-level
 `read(entity)` function. See ADR-0010 / the gdrive provider for
 the convention.
 
+## Multi-emitter collections (sweep ownership)
+
+Collections like `documents` / `files` / `assets` aren't owned by a
+single plugin. The file source (via `useSource`) emits into them
+from its scanned folder, but other plugins legitimately emit into
+the same collection: `mikser-io-csv` fans CSV rows into `documents`,
+a gdrive sync would emit there too, an API endpoint can push into
+`files`. The catalog has no opinion on emitter identity — only on
+collection.
+
+The delete sweep MUST respect that. `sweepDeleted(collection,
+scanned, onDelete, ownerPrefix)` requires `ownerPrefix` (typically
+`absFolder` for file sources, `layoutsFolder` for layouts) and only
+considers entities whose `entity.uri` is rooted under that prefix.
+Foreign-emitter entities have a different `uri` shape:
+- CSV row entities: empty `uri` (synthetic — meta is the content)
+- HTTP-fetched CSV parent: `uri = 'https://…'`
+- gdrive-sourced docs: `uri = 'gdrive://…'`
+
+…and the LIKE clause excludes them. Without the scope, every cycle's
+file-source sweep silently wipes every co-collection emitter's
+entities. Throwing instead of silently sweeping the whole collection
+is intentional — this used to be a class-of-bugs landmine. If you're
+writing a new source-shaped plugin, the scoping is mandatory.
+
+Test coverage: `test/unit/source-sweep.test.js`.
+
 ## Naming conventions
 
 - **Engine state** at `runtime.<name>` — `runtime.refs`, `runtime.catalog`.
