@@ -10,15 +10,16 @@ paths. No migration markdown. No `task: pool` legacy aliasing for
 `task: inline`. Update READMEs and ADRs in place as source-of-truth
 changes; rewrite, don't supersede. The freedom is the point.
 
-**v9 has to pay out before v10 starts.** Not "ship v9 and start v10."
-**Use v9 in real daily work until the workflow pays out**, then
-v10. The v10 architecture (party-mikser-io) is more fun to design
-than v9 documentation is to write — the gate exists because that
-asymmetry kills projects. Concrete pass/fail signals in
-`10.0-PLAN.md` under "The gate." If a session brings up v10 design
-work, check the gate first; if v9 isn't paying out yet, the
-question to answer is "what about v9 isn't working in daily use?"
-— not "what should v10 look like?"
+**v9 shipped. The gate now is daily-use payoff, not completion.**
+The engine, every sibling plugin, the agency template — all live.
+The next step isn't "finish v9," it's **use v9 in real daily work
+until the workflow earns the v10 layer**. The v10 architecture
+(party-mikser-io) is more fun to design than v9 dogfooding is to
+sustain — the gate exists because that asymmetry kills projects.
+Concrete pass/fail signals in `10.0-PLAN.md` under "The gate." If
+a session brings up v10 design work, check the gate first; if v9
+isn't paying out yet, the question to answer is "what about v9
+isn't working in daily use?" — not "what should v10 look like?"
 
 **mikser is a mixer.** The name is the architecture. It combines
 inputs (entities — from files, forms, queries, anywhere) through
