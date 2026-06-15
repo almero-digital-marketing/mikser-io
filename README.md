@@ -50,6 +50,28 @@ Build mikser into the parts of your application that are content-shaped. Keep th
 
 **Open source.** MIT-licensed, on GitHub, no telemetry, no auth wall, no SaaS dependency. What you see is what runs.
 
+## Mix content from anywhere, ship to anywhere
+
+A real content stack pulls from more than one system. Marketing copy lives in a CMS or a spreadsheet. Prices and stock live in an ERP. Hero images live in a DAM. Editorial pages live in markdown files in the repo. Most teams either pick one tool and contort the rest to fit it, or build sync services that copy everything into one database — and then more sync services when things drift out of sync.
+
+Mikser is built around a different bet: **one queryable substrate that any source can pour into, and any frontend can read from.**
+
+**Any source.** Provider plugins let you treat external systems as content sources. A Google Sheet, an ERP feed, a Drive folder, a Notion database, an HTTP webhook, the local repo's `.md` files — each becomes a stream of entities flowing into mikser's catalog with the same shape. The authoring tool doesn't change. The editorial workflow doesn't change. The team writing product copy in Google Sheets keeps writing product copy in Google Sheets — mikser just notices when they save.
+
+**Cross-source composition through references.** Mikser tracks references between entities the way a graph database does. A product page can declare `$marketing` pointing at a row pulled from a spreadsheet, `$pricing` at a record pulled from your ERP, `$hero` at an asset pulled from your DAM. A single API call from your frontend asks for the product page *with* its referenced data — and gets the page, the marketing copy, the price, and the hero image merged into one response. One round trip, not three or four, and no consumer-side join logic to maintain.
+
+**Live updates are uniform across every source.** Edit a cell in the spreadsheet, change a price in the ERP, replace an asset in the DAM — the pages depending on those entities update within seconds, in every frontend connected to mikser's live channel. You don't write per-source invalidation; mikser already knows which pages reference what.
+
+**Your frontend is whatever you want.** Mikser exposes the catalog over HTTP (and over MCP, for AI agents). You query it from React, Vue, Svelte, SvelteKit, Next.js, an iOS app, a kiosk — anything that speaks HTTP. The framework SDKs (`mikser-io-sdk-react`, `mikser-io-sdk-vue`, `mikser-io-sdk-svelte`) make the calls feel native, but they're optional. Headless CMSes free you from the database lock. Frameworks like Astro free you from one kind of authoring lock. Mikser frees you from both at once: **any source on the input side, any framework on the output side.**
+
+What this looks like in practice:
+
+- Marketing edits product copy in Google Sheets, prices come from your ERP, both flow into the same product page in your storefront — changes appear within seconds, without your e-commerce team writing webhook handlers or cache-invalidation logic.
+- A SaaS pulls customer-facing release notes from `release-notes/*.md` in the repo and feature flags from LaunchDarkly; both render in a dashboard built in the team's own React stack, not a framework somebody else picked.
+- A magazine pulls editorial articles from local markdown, contributor bios from Notion, sponsorship info from Airtable, and renders the same article surface across web, email (MJML), and PDF — one catalog, one set of references, three outputs.
+
+Adding a source is mechanical. See [`mikser-io-csv`](https://github.com/almero-digital-marketing/mikser-io-csv) (any HTTP-served CSV, with live polling), [`mikser-io-provider-gdrive`](https://github.com/almero-digital-marketing/mikser-io-provider-gdrive) (Google Drive), and the built-in `http` provider for the shape. If a system has an API, it can be a mikser source, usually in well under 100 lines.
+
 ## Built for AI-assisted development
 
 Files-as-source isn't just a portability story — it makes the project unusually friendly to AI coding agents. There's a static-time half (the agent reads your tree the way it reads any repo — no DB connection, no schema upload, no sandboxed query layer to learn) and a runtime half (when the agent needs to write or render, mikser ships its own MCP server in core, so it talks to the live engine instead of a parallel REST shim you have to maintain).
