@@ -300,17 +300,21 @@ export function onSync(name, callback) {
 export function onValidate(operations, callback) {
     const logger = useLogger()
     runtime.validators.push(async (entry) => {
-        if (operations.indexOf(entry.operation) != -1) {
-            try {
-                const message = await callback(entry)
-                if (message) {
-                    logger.warn('Validation problem: [%s] %s %s', entry.operation, entry.entity.name, message)
-                }
-                return true
-            } catch (err) {
-                logger.error('Validation error: [%s] %s %s', entry.operation, entry.entity.name, err.message)
-                return false
+        // Abstain explicitly when this validator isn't scoped to the
+        // entry's operation — returning undefined here means "pass"
+        // under runtime.validate's abstain-is-pass contract. The early
+        // return makes that intent legible instead of relying on a
+        // fall-through.
+        if (operations.indexOf(entry.operation) === -1) return
+        try {
+            const message = await callback(entry)
+            if (message) {
+                logger.warn('Validation problem: [%s] %s %s', entry.operation, entry.entity.name, message)
             }
+            return true
+        } catch (err) {
+            logger.error('Validation error: [%s] %s %s', entry.operation, entry.entity.name, err.message)
+            return false
         }
     })
 }

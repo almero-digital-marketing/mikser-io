@@ -153,7 +153,15 @@ const runtime = {
 
     async validate(entry) {
         for (let hook of this.validators) {
-            if (!await hook(entry)) return false
+            // Only an explicit `false` rejects the entry. A validator
+            // that returns undefined is abstaining — it doesn't care
+            // about this operation — and abstain means pass. The old
+            // truthiness check (`if (!await hook(entry))`) treated
+            // undefined as rejection, so any validator scoped to a
+            // subset of operations (e.g. onValidate([CREATE, UPDATE]))
+            // silently dropped every entry it never opted into —
+            // notably DELETEs, which then never propagated.
+            if (await hook(entry) === false) return false
         }
         return true
     },
