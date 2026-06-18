@@ -304,6 +304,18 @@ Test coverage: `test/unit/source-sweep.test.js`.
   `runtime.options.port` is the internal listener port (kept for
   loopback/dev URL building); `runtime.options.url` is the external
   origin. When in doubt: external = `url`, internal = `port`.
+- **Trust proxy default is `'loopback'`** (server.js), not Express's
+  `false`. The dominant deployment puts a same-host reverse proxy in
+  front, where every socket peer is 127.0.0.1; with no trust, mikser
+  reads every proxied request as loopback and the loopback-only gate
+  (api/mcp/forms/decap enforce `isLoopback(req.ip)`) inverts the
+  moment a facade is added. `'loopback'` honors `X-Forwarded-For` only
+  from a loopback peer — safe everywhere (a remote attacker's kernel-
+  set peer is never 127.0.0.1, so they can't forge a loopback
+  `req.ip`). Override via `config.server.trustProxy` — `'uniquelocal'`
+  for a sibling-container proxy, a CIDR for a specific subnet, `false`
+  to opt out. The loopback-enforcement and this default are a pair; a
+  facade that injects `X-Forwarded-For` (Caddy/nginx do) makes it work.
 - **Engine functions** as module-level exports from `mikser-io`:
   `import { queryEntities, subscribe, useRenderer, useCollection,
   readEntityContent, isTextEntity } from 'mikser-io'`.

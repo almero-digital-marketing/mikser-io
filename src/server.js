@@ -70,18 +70,32 @@ export function setupServer() {
         //                        proxy strips/rewrites X-Forwarded-*)
         //   'loopback'         — trust 127.0.0.1, ::1, and other
         //                        loopback addresses (correct for a
-        //                        proxy on the same host)
+        //                        proxy on the same host) — THE DEFAULT
+        //   'uniquelocal'      — also trust RFC1918 private ranges
+        //                        (10/8, 172.16/12, 192.168/16) — for a
+        //                        proxy in a sibling container/host on a
+        //                        private network
         //   '10.0.0.0/8'       — trust a specific subnet
-        //   false (default)    — no trust; req.ip == socket peer
+        //   false              — no trust; req.ip == socket peer
         //
-        // Without this and behind a proxy, mikser sees every request as
-        // coming from the proxy's loopback address and unauthenticated
-        // requests through the proxy would pass the loopback gate.
-        const trustProxy = runtime.config.server?.trustProxy
-        if (trustProxy !== undefined) {
-            runtime.options.app.set('trust proxy', trustProxy)
-            logger.info('Server trust proxy: %s', String(trustProxy))
-        }
+        // Default 'loopback' instead of Express's `false`, because the
+        // dominant deployment puts a same-host reverse proxy (Caddy /
+        // nginx) in front: there the socket peer is always 127.0.0.1, so
+        // with no trust mikser would read EVERY proxied request as
+        // loopback and unauthenticated requests through the proxy would
+        // pass the loopback gate — the enforcement inverts the moment a
+        // facade is added. 'loopback' closes that with no operator
+        // action and is safe everywhere: a remote attacker's socket peer
+        // is their real IP (the kernel sets it), never 127.0.0.1, so
+        // their X-Forwarded-For is never trusted and they can't forge a
+        // loopback req.ip. Standalone mikser is unaffected — direct
+        // clients aren't loopback, so their XFF is ignored. A proxy on a
+        // DIFFERENT host fails closed (non-loopback peer → XFF ignored →
+        // loopback endpoints 403) until the operator sets 'uniquelocal'
+        // or the specific subnet.
+        const trustProxy = runtime.config.server?.trustProxy ?? 'loopback'
+        runtime.options.app.set('trust proxy', trustProxy)
+        logger.info('Server trust proxy: %s', String(trustProxy))
 
         // CORS — a server exists to be fetched, and in dev the frontend
         // is almost always on a different origin (a dev server on
