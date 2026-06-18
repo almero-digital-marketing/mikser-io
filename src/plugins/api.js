@@ -5,6 +5,7 @@ import _ from 'lodash'
 import sift from 'sift'
 import { useRenderer } from '../render.js'
 import { mimeForEntity, isLoopback, ExpandError, useCollection } from '../utils.js'
+import { registerRoute } from '../routes.js'
 import { queryEntities, queryContext } from '../catalog.js'
 import { subscribe } from '../subscriptions.js'
 
@@ -806,21 +807,24 @@ export function api(options = {}) {
             })
 
             app.use(`${base}/${name}`, router)
-            // Same three reachability states the mikser-io-mcp plugin's
-            // boot log uses — convention shared across both packages.
+            // Reachability → registry enum + the louder bracket label.
+            // 'public' here means a deliberate unauthenticated exposure
+            // (allowRemote), so we keep the REMOTE OPEN warning in the
+            // log. streaming:true — the `subscribe` op holds an open SSE
+            // stream, so a facade must not buffer this route.
+            const reachability = ep.token ? 'token' : (ep.allowRemote ? 'public' : 'loopback')
             const authLabel = ep.token
                 ? 'token'
-                : (ep.allowRemote ? 'public, REMOTE OPEN' : 'public, loopback-only')
-            // Full URL when an origin is known. Public --url wins for
-            // operator-clickable share-this links; localhost:port is the
-            // fallback when only the local listener is configured; bare
-            // path is the last resort for external-app setups where the
-            // engine doesn't own the listener and no public URL is set.
-            const origin = runtime.options.url
-                ?? (runtime.options.port ? `http://localhost:${runtime.options.port}` : null)
-            const location = origin ? `${origin}${base}/${name}` : `${base}/${name}`
-            logger.info('Api endpoint mounted: %s (ops=[%s] [%s])',
-                location, [...allowedOps].join(','), authLabel)
+                : (ep.allowRemote ? 'public, REMOTE OPEN' : 'loopback-only')
+            registerRoute({
+                path:         `${base}/${name}`,
+                plugin:       'api',
+                reachability,
+                streaming:    allowedOps.has('subscribe'),
+                label:        'Api endpoint',
+                detail:       `(ops=[${[...allowedOps].join(',')}])`,
+                authLabel,
+            })
         }
 
     })

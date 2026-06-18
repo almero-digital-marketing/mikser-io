@@ -31,7 +31,7 @@
 import sift from 'sift'
 
 export function preview(options = {}) {
-    return ({ runtime, onLoaded, onPersist, useJournal, useLogger, constants: { OPERATION } }) => {
+    return ({ runtime, onLoaded, onPersist, useJournal, useLogger, registerRoute, constants: { OPERATION } }) => {
     // Factory-scope cache. One per engine instance. Module-scope would
     // share across multiple engines in the same Node process, which is
     // a scenario mikser doesn't really support.
@@ -167,13 +167,18 @@ export function preview(options = {}) {
             }
             res.type(entry.mime).send(entry.bytes)
         })
-        // Full URL when an origin is known (public --url wins, falls back
-        // to localhost:port); bare path otherwise. The /:filename segment
-        // is left off — it's filled at request time per preview.
-        const origin = runtime.options.url
-            ?? (runtime.options.port ? `http://localhost:${runtime.options.port}` : null)
-        const location = origin ? `${origin}${cfg.path}` : cfg.path
-        logger.info('Preview route mounted: %s (cache cap: %d MB)', location, Math.round(cfg.maxBytes / 1024 / 1024))
+        // Preview URLs are meant to be fetched (by a browser, an agent
+        // following a returned link), so the route is public + non-
+        // streaming. The /:filename segment is left off the logged URL —
+        // it's filled at request time per preview.
+        registerRoute({
+            path:        cfg.path,
+            plugin:      'preview',
+            reachability: 'public',
+            streaming:   false,
+            label:       'Preview route',
+            detail:      `(cache cap: ${Math.round(cfg.maxBytes / 1024 / 1024)} MB)`,
+        })
     })
 
     return { name: 'preview' }

@@ -175,6 +175,19 @@ brevity.
   Strings produce a v9 migration error pointing at the new shape.
 - `manager.js` — file watching (chokidar) and cron scheduling.
 - `source.js` — `useSource` codifies the folder-of-files pattern.
+- `routes.js` — HTTP route registry. Plugins mount on
+  `runtime.options.app` directly; the Express router stack has the
+  paths but not the intent (loopback-only? streaming?). So plugins
+  declare each mount via `registerRoute({ path, plugin, reachability,
+  streaming })` as they make it. `reachability` is `public` | `token`
+  | `loopback`; `streaming` flags SSE/WS routes a facade must not
+  buffer. Inventory lives at `runtime.routes`; consumers (a Caddy/nginx
+  facade generator, healthcheck list, `mikser://routes` resource) read
+  it — none baked in. `registerRoute` also folds in the origin/location
+  URL building and the standard `"<label> mounted: <loc>
+  [<reachability>]"` boot log that api/preview/mcp/vector/forms/decap
+  were each copy-pasting. Pure inventory — takes no position on what to
+  do with the routes.
 - `constants.js` — `OPERATION` (CREATE/UPDATE/DELETE/RENDER/
   POSTPROCESS), `ACTION` (sync action types), `TASKS` (`INLINE`/
   `SERIAL`/`WORKER` — dispatch modes).

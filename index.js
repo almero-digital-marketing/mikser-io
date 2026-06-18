@@ -16,6 +16,7 @@ export * from './src/logger.js'
 export * from './src/engine.js'
 export * from './src/render.js'
 export * from './src/source.js'
+export * from './src/routes.js'
 
 // Built-in plugin factories. Each takes options and returns the
 // (core) => void closure the engine calls at onLoad time. See ADR-0010
