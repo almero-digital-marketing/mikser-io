@@ -14,7 +14,7 @@
 
 Built for Node.js around a strict lifecycle and a composable plugin system: every document, asset, and template flows through the same pipeline, and plugins hook in at any phase. MIT-licensed, runs on Node, zero hosted dependencies. **The portability promise is the architecture, not a feature.**
 
-> **New to mikser?** Read the [Architecture Overview](./documentation/overview.md) — one document, end-to-end walkthrough of how a file becomes a deployed page across all twenty lifecycle phases. It's the doc most projects need first.
+> **New to mikser?** Read the [Architecture Overview](./docs/overview.md) — one document, end-to-end walkthrough of how a file becomes a deployed page across all twenty lifecycle phases. It's the doc most projects need first.
 
 ## Where it fits
 
@@ -165,7 +165,7 @@ The engine is what stays stable — the lifecycle, the catalog, the file-based c
 | Plugin | What it does |
 |---|---|
 | `data` | JSON snapshots of entities / context / catalog, written to disk for static serving |
-| `api` | REST endpoints with sift-backed queries, per-endpoint tokens, optional render, opt-in [per-query disk cache](./documentation/caching.md) for reverse-proxy failover |
+| `api` | REST endpoints with sift-backed queries, per-endpoint tokens, optional render, opt-in [per-query disk cache](./docs/caching.md) for reverse-proxy failover |
 | `preview` | In-memory render cache + `GET /preview/:filename` route. Companion to the `mikser_preview_render` MCP tool (in [`mikser-io-mcp`](https://github.com/almero-digital-marketing/mikser-io-mcp)) — transient render bytes served at a clickable URL, no filesystem footprint |
 
 **Integrations:**
@@ -173,7 +173,7 @@ The engine is what stays stable — the lifecycle, the catalog, the file-based c
 | Plugin | What it does |
 |---|---|
 | [`mikser-io-vector`](https://github.com/almero-digital-marketing/mikser-io-vector) | OpenAI embeddings + semantic search (sqlite-vec or pgvector) |
-| [`mikser-io-schemas`](https://github.com/almero-digital-marketing/mikser-io-schemas) | Zod-backed entity validation + auto-generated TypeScript declarations for the SDK. Auto-detects `$`-keyed references and warns on broken ones — see [ADR-0007](./documentation/decisions/0007-references-declaration-and-expansion.md) |
+| [`mikser-io-schemas`](https://github.com/almero-digital-marketing/mikser-io-schemas) | Zod-backed entity validation + auto-generated TypeScript declarations for the SDK. Auto-detects `$`-keyed references and warns on broken ones — see [ADR-0007](./docs/decisions/0007-references-declaration-and-expansion.md) |
 | [`mikser-io-forms`](https://github.com/almero-digital-marketing/mikser-io-forms) | Public form-submission endpoints. POST → captcha + schema validation → write a document file plus uploaded files to disk; the `documents` / `files` plugins pick them up via their normal watch loop. Composes with `mikser-io-schemas` for schema-by-name; built-in captcha providers (Google v2/v3, hCaptcha, Turnstile) plus a custom-verify escape hatch |
 | [`mikser-io-archive`](https://github.com/almero-digital-marketing/mikser-io-archive) | Persist matching entities to YAML — audit trail, versioned content history, downstream export |
 | `mapper` | Run config-supplied transforms over matched entities each cycle (in-core, generic transformation layer) |
@@ -219,13 +219,13 @@ npx mikser --watch      # incremental dev loop
 npx mikser --server     # build + serve at :3001
 ```
 
-For a working starter — config with a real plugin set, sample `documents/`, expected output — see [Getting Started](./documentation/getting-started.md). Or skip straight to "add mikser to this app" via the [Claude Code plugin](#built-for-ai-assisted-development) above.
+For a working starter — config with a real plugin set, sample `documents/`, expected output — see [Getting Started](./docs/getting-started.md). Or skip straight to "add mikser to this app" via the [Claude Code plugin](#built-for-ai-assisted-development) above.
 
 ## Core Concepts
 
 - **Lifecycle** — Processing runs through fixed phases: initialize → load → import → process → persist → render → finalize. Plugins hook into any phase.
 - **Entities** — Everything is an entity (document, file, layout, asset). Entities flow through the journal and are tracked in the catalog.
-- **References between entities** — A front-matter key starting with `$` (e.g. `$author: /authors/dick`) points at another entity. The engine knows the whole graph: templates can follow the links, the schemas plugin checks they resolve, and a single query can pull referenced entities along inline instead of one round trip per link. See [ADR-0007](./documentation/decisions/0007-references-declaration-and-expansion.md).
+- **References between entities** — A front-matter key starting with `$` (e.g. `$author: /authors/dick`) points at another entity. The engine knows the whole graph: templates can follow the links, the schemas plugin checks they resolve, and a single query can pull referenced entities along inline instead of one round trip per link. See [ADR-0007](./docs/decisions/0007-references-declaration-and-expansion.md).
 - **Plugins** — Functionality is delivered via plugins. Built-in plugins handle common sources (documents, files, layouts, assets). Custom plugins can be added to any project.
 - **Runtime Singleton** — A plain module-level object holds all global state and coordinates the lifecycle. The ES module cache guarantees every importer gets the same instance.
 - **Watch Mode** — In watch mode, file changes trigger incremental re-processing without restarting.
@@ -241,16 +241,16 @@ The shape mikser fits cleanly:
 - **Mixed-output publishing** — the same source document renders to HTML, PDF (via `post-pdf`), MJML email (via `post-mjml`), and JSON snapshots. One catalog, many output formats, all concurrent.
 - **Headless backends for static frontends** — pair the `api` plugin with `sdk-api` for SSE-driven live frontends; pair the `data` plugin output with any static host for pre-rendered consumption.
 
-The shape mikser **doesn't** fit cleanly: anything with non-technical content authors who can't or won't work with files, anything with non-content business logic at the core, anything needing multi-tenant / per-user auth. Those aren't bugs — they're outside the design envelope. See [`decisions/0001-content-layer-not-the-app.md`](./documentation/decisions/0001-content-layer-not-the-app.md) for the explicit scope decision.
+The shape mikser **doesn't** fit cleanly: anything with non-technical content authors who can't or won't work with files, anything with non-content business logic at the core, anything needing multi-tenant / per-user auth. Those aren't bugs — they're outside the design envelope. See [`decisions/0001-content-layer-not-the-app.md`](./docs/decisions/0001-content-layer-not-the-app.md) for the explicit scope decision.
 
 ## Engineering discipline
 
 What you get from how this project is built:
 
-- **Every load-bearing decision has an ADR.** The [`decisions/`](./documentation/decisions/) folder names which choices are structural — files-as-source, journal+catalog split, plugin-as-factory, when something goes in core vs. ships as a plugin — and explains what protects them. When you push against one, there's a written answer waiting instead of folklore.
+- **Every load-bearing decision has an ADR.** The [`decisions/`](./docs/decisions/) folder names which choices are structural — files-as-source, journal+catalog split, plugin-as-factory, when something goes in core vs. ships as a plugin — and explains what protects them. When you push against one, there's a written answer waiting instead of folklore.
 - **Engine stays small; capability ships in plugins.** The 15+ plugin ecosystem adds features without core changes, so your upgrade cost stays low. Probes like `decap` (a full third-party CMS mounted in ~150 lines, zero engine changes) are deliberate evidence the extension model holds where it counts.
 - **Builds are deterministic; no async middleware layer.** The journal is the only synchronization primitive — no event bus, no IoC container, no orchestrator running plugins in surprising order. The lifecycle is a list of named phases; "what ran when?" has an answer you can read off the source.
-- **The whole engine is one read.** The [Architecture Overview](./documentation/overview.md) walks the full pipeline top to bottom. Onboarding a new engineer is an afternoon, not a tour through fifteen reference docs.
+- **The whole engine is one read.** The [Architecture Overview](./docs/overview.md) walks the full pipeline top to bottom. Onboarding a new engineer is an afternoon, not a tour through fifteen reference docs.
 
 ## Mikser among static site generators
 
@@ -276,19 +276,19 @@ Mikser itself has a previous chapter: the [legacy 7.x line](https://github.com/a
 
 | Document                                              | Audience           | Description                                        |
 | ----------------------------------------------------- | ------------------ | -------------------------------------------------- |
-| [Architecture Overview](./documentation/overview.md)  | Everyone           | **Start here.** End-to-end walkthrough of how a file becomes a deployed page across all lifecycle phases. |
-| [Getting Started](./documentation/getting-started.md) | Users              | Installation, first project, basic usage           |
-| [Configuration](./documentation/configuration.md)     | Users              | All CLI options and config file reference          |
-| [Lifecycle](./documentation/lifecycle.md)             | Users & Developers | Complete lifecycle phases and hook system          |
-| [Plugins](./documentation/plugins.md)                 | Users & Developers | Built-in plugins, writing custom plugins, the assets / resources / AI pipeline |
-| [Entities](./documentation/entities.md)               | Users & Developers | Entity model, operations, journal, catalog         |
-| [Rendering](./documentation/rendering.md)             | Users & Developers | Render pipeline, render plugins, render modes      |
-| [Watch Mode](./documentation/watch-mode.md)           | Users              | File watching, scheduled tasks, incremental builds |
+| [Architecture Overview](./docs/overview.md)  | Everyone           | **Start here.** End-to-end walkthrough of how a file becomes a deployed page across all lifecycle phases. |
+| [Getting Started](./docs/getting-started.md) | Users              | Installation, first project, basic usage           |
+| [Configuration](./docs/configuration.md)     | Users              | All CLI options and config file reference          |
+| [Lifecycle](./docs/lifecycle.md)             | Users & Developers | Complete lifecycle phases and hook system          |
+| [Plugins](./docs/plugins.md)                 | Users & Developers | Built-in plugins, writing custom plugins, the assets / resources / AI pipeline |
+| [Entities](./docs/entities.md)               | Users & Developers | Entity model, operations, journal, catalog         |
+| [Rendering](./docs/rendering.md)             | Users & Developers | Render pipeline, render plugins, render modes      |
+| [Watch Mode](./docs/watch-mode.md)           | Users              | File watching, scheduled tasks, incremental builds |
 | [MCP](https://github.com/almero-digital-marketing/mikser-io-mcp#readme) | Users              | The `mikser-io-mcp` plugin — tool surface, `mikser://` resources, twelve worked AI-driven scenarios |
-| [Caching](./documentation/caching.md)                 | Users (production) | The `cache: true` disk cache + working nginx config for reverse-proxy failover |
-| [Architecture](./documentation/architecture.md)       | Developers         | Module-level reference — what's in each file       |
-| [API Reference](./documentation/api-reference.md)     | Developers         | Complete public API reference                      |
-| [Decisions (ADRs)](./documentation/decisions/)        | Developers         | Load-bearing architectural choices and what protects them |
+| [Caching](./docs/caching.md)                 | Users (production) | The `cache: true` disk cache + working nginx config for reverse-proxy failover |
+| [Architecture](./docs/architecture.md)       | Developers         | Module-level reference — what's in each file       |
+| [API Reference](./docs/api-reference.md)     | Developers         | Complete public API reference                      |
+| [Decisions (ADRs)](./docs/decisions/)        | Developers         | Load-bearing architectural choices and what protects them |
 
 ## License
 

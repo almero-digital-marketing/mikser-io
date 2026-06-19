@@ -212,7 +212,7 @@ substrate.
 - **`mikser-io-render-{hbs,liquid,eta,markdown,metatext}`** — renderer
   plugins. `renderHbs` is bundled in core; the rest are siblings.
 - **`mikser-io-post-{mjml,pdf,email}`** — postprocessor plugins,
-  composable in chains (see `documentation/rendering.md#postprocess`).
+  composable in chains (see `docs/rendering.md#postprocess`).
 - **`mikser-io-mcp`** — AI tooling surface (ADR-0006 test #5).
 - **`mikser-io-vector`** — vector index over the catalog.
 - **`mikser-io-forms`** — HTTP form receivers → entities.
@@ -553,11 +553,11 @@ the consumer's own project tree — no duplication, no bug.
 
 ## Reference
 
-- `documentation/architecture.md` — module map (audit before relying
+- `docs/architecture.md` — module map (audit before relying
   on specifics; may have drift)
-- `documentation/decisions/` — ADRs
-- `documentation/configuration.md` — config reference
-- `documentation/api-reference.md` — public API
+- `docs/decisions/` — ADRs
+- `docs/configuration.md` — config reference
+- `docs/api-reference.md` — public API
 - `test/perf/` — render-pipeline perf rig
 - Sibling repos: `mikser-io-layouts` (canonical SSG-flavor render-task
   production policy), `mikser-io-mcp`, `mikser-io-vector`,
