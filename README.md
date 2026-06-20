@@ -2,6 +2,8 @@
   <img src="mikser-lockup-stacked.svg" alt="mikser" width="198" />
 </p>
 
+<p align="center"><strong>The AI-native content engine.</strong></p>
+
 # Mikser
 
 **Mikser is a content mixer.** Pull content from anywhere — markdown files, Google Sheets, your ERP, a CMS, any API — into one live catalog, link it together with references, and ship it to any frontend. Edit a price in your ERP or a cell in a spreadsheet, and every page that uses it updates within seconds — in whatever framework you built the site with.
