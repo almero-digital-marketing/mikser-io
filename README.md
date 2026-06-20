@@ -6,7 +6,7 @@
 
 # Mikser
 
-**Mikser is a content mixer.** Pull content from anywhere — markdown files, Google Sheets, your ERP, a CMS, any API — into one live catalog, link it together with references, and ship it to any frontend. Edit a price in your ERP or a cell in a spreadsheet, and every page that uses it updates within seconds — in whatever framework you built the site with.
+**Mikser is the AI-native content engine.** It mixes content from anywhere — markdown files, Google Sheets, your ERP, a CMS, any API — into one live catalog, links it together with references, and ships it to any frontend. Edit a price in your ERP or a cell in a spreadsheet, and every page that uses it updates within seconds — in whatever framework you built the site with.
 
 **Framework-agnostic on both ends.** Headless CMSes (Sanity, Contentful) free you from the database but lock authoring into their UI. Frameworks like Astro let you bring any frontend but lock you into the framework. Mikser frees both: **any source in, any frontend out.** Provider plugins turn external systems into content sources; the catalog is served over plain HTTP, with idiomatic [Vue](https://github.com/almero-digital-marketing/mikser-io-sdk-vue) / [React](https://github.com/almero-digital-marketing/mikser-io-sdk-react) / [Svelte](https://github.com/almero-digital-marketing/mikser-io-sdk-svelte) SDKs on top (`useDocument`, `useDocuments`, multilingual `useHref`, live SSE). It's also AI-native: agents read and write the same catalog over MCP using the same calls a frontend developer uses — there's no separate "AI API" to keep in sync.
 
