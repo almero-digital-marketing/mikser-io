@@ -3,8 +3,8 @@
 //
 // Schema (registered with the substrate at module load time):
 //   mikser_entities (id, collection, type, format, name, meta_href,
-//                     meta_layout, meta_lang, meta_cache, time, uri,
-//                     data)
+//                     meta_url, meta_layout, meta_lang, meta_cache, time,
+//                     uri, data)
 // Indexed columns are the fields engine code routinely filters on;
 // the JSON body sits in `data` for everything else. The sift→SQL
 // translator pushes predicates on indexed columns down to SQL.
@@ -49,6 +49,7 @@ registerSchema('mikser_entities', `
         format       TEXT,
         name         TEXT,
         meta_href    TEXT,
+        meta_url     TEXT,
         meta_layout  TEXT,
         meta_lang    TEXT,
         meta_cache   INTEGER,
@@ -61,6 +62,7 @@ registerSchema('mikser_entities', `
     CREATE INDEX IF NOT EXISTS idx_mikser_entities_format      ON mikser_entities(format);
     CREATE INDEX IF NOT EXISTS idx_mikser_entities_name        ON mikser_entities(name);
     CREATE INDEX IF NOT EXISTS idx_mikser_entities_meta_href   ON mikser_entities(meta_href)   WHERE meta_href   IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_mikser_entities_meta_url    ON mikser_entities(meta_url)    WHERE meta_url    IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_mikser_entities_meta_layout ON mikser_entities(meta_layout) WHERE meta_layout IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_mikser_entities_meta_lang   ON mikser_entities(meta_lang)   WHERE meta_lang   IS NOT NULL;
     -- Partial index over meta.cache: false (rare opt-out for renders
@@ -173,6 +175,10 @@ function entityToRow(entity) {
         format:       entity.format       ?? null,
         name:         entity.name         ?? null,
         meta_href:    entity.meta?.href   ?? null,
+        // Deployed served path (ADR-0011). Indexed so a $-ref to a file/
+        // resource resolves by the path content actually authors (its
+        // served URL), not the collection-prefixed id.
+        meta_url:     entity.meta?.url    ?? null,
         meta_layout:  entity.meta?.layout ?? null,
         meta_lang:    entity.meta?.lang   ?? null,
         // meta.cache: false is the opt-out — entities that should
@@ -248,15 +254,16 @@ onLoaded(async () => {
     stmtGet = db.prepare('SELECT data FROM mikser_entities WHERE id = ?')
     stmtUpsert = db.prepare(`
         INSERT INTO mikser_entities
-            (id, collection, type, format, name, meta_href, meta_layout, meta_lang, meta_cache, time, uri, data)
+            (id, collection, type, format, name, meta_href, meta_url, meta_layout, meta_lang, meta_cache, time, uri, data)
         VALUES
-            (@id, @collection, @type, @format, @name, @meta_href, @meta_layout, @meta_lang, @meta_cache, @time, @uri, @data)
+            (@id, @collection, @type, @format, @name, @meta_href, @meta_url, @meta_layout, @meta_lang, @meta_cache, @time, @uri, @data)
         ON CONFLICT(id) DO UPDATE SET
             collection  = @collection,
             type        = @type,
             format      = @format,
             name        = @name,
             meta_href   = @meta_href,
+            meta_url    = @meta_url,
             meta_layout = @meta_layout,
             meta_lang   = @meta_lang,
             meta_cache  = @meta_cache,

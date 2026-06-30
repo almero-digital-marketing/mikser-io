@@ -79,6 +79,10 @@ export function refFilter(refValue) {
         $or: [
             { id: refValue },
             { 'meta.href': refValue },
+            // Served path (ADR-0011): a $-ref to a file/resource is the URL
+            // content authors (`/img/x.jpg`, `/media/clip.mp4`), which is the
+            // entity's meta.url — not its collection-prefixed id. Indexed.
+            { 'meta.url': refValue },
             { id: { $regex: `^${escaped}\\.[^./]+$` } },
         ],
     }
@@ -637,6 +641,24 @@ export async function expandEntity(entity, paths, options = {}) {
     return result
 }
 
+// Collect every `$`-ref site reachable under `node` by walking plain
+// structure (objects + arrays). Stops AT ref keys — a ref's value is the
+// next graph hop's concern, not descended here. Returns { container, key,
+// value } so the caller can resolve and replace in place. Powers the `$`
+// expand wildcard.
+function collectRefSites(node, out = []) {
+    if (node === null || typeof node !== 'object') return out
+    if (Array.isArray(node)) {
+        for (const item of node) collectRefSites(item, out)
+        return out
+    }
+    for (const [k, v] of Object.entries(node)) {
+        if (isRefKey(k)) out.push({ container: node, key: k, value: v })
+        else collectRefSites(v, out)
+    }
+    return out
+}
+
 async function walkExpandPath(node, parts, ctx) {
     if (parts.length === 0) return
     if (node === null || typeof node !== 'object') return
@@ -647,6 +669,24 @@ async function walkExpandPath(node, parts, ctx) {
         if (Array.isArray(node)) {
             for (const item of node) {
                 await walkExpandPath(item, tail, ctx)
+            }
+        }
+        return
+    }
+
+    // `$` wildcard: expand EVERY `$`-ref reachable by walking this node's
+    // structure (recursively through plain objects/arrays), one graph hop
+    // each. A tail applies to each resolved entity, so `$.$.$` walks the
+    // resolved graph deeper. Structure-agnostic — the caller declares that
+    // it wants refs resolved, not where they sit. Bounded by maxResolved
+    // (and maxDepth caps the chain length); explicit, so the cost is visible
+    // at the call site (ADR-0007).
+    if (head === '$') {
+        for (const site of collectRefSites(node)) {
+            if (typeof site.value === 'string') {
+                await expandSingleRef(site.container, site.key, site.value, tail, ctx)
+            } else if (Array.isArray(site.value)) {
+                await expandArrayRef(site.container, site.key, site.value, tail, ctx)
             }
         }
         return

@@ -77,6 +77,11 @@ export function files(options = {}) {
                         type,
                         format,
                         source,
+                        // Deployed URL — the served path, distinct from `id`
+                        // (which carries the `/files` collection prefix). A
+                        // $-ref to this entity expands to it; consumers read
+                        // meta.url for the served location (ADR-0011).
+                        meta: { url: '/' + name },
                         checksum: await checksum(source),
                         link: await link(source)
                     })
@@ -92,6 +97,7 @@ export function files(options = {}) {
                             type,
                             format,
                             source,
+                            meta: { url: '/' + name },
                             checksum: await checksum(source),
                             link: await link(source)
                         })
@@ -162,6 +168,7 @@ export function files(options = {}) {
                     format: path.extname(relativePath).substring(1).toLowerCase(),
                     name,
                     source,
+                    meta: { url: '/' + name },
                     checksum: newChecksum,
                     link: await link(source),
                 })

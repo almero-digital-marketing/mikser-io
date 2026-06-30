@@ -389,6 +389,26 @@ Test coverage: `test/unit/source-sweep.test.js`.
   plugin config moved entirely off `runtime.config.<plugin>`; it
   arrives as factory args, gets stashed on the descriptor, and is
   passed as `config` to `load`/`render`/`setup`/`postprocess`.
+- **0011** (implemented; proven against gpoint) — File and resource
+  entities expose deployed URLs. References to served files
+  (image/video/PDF) are `$`-keyed **served paths** (`/img/X.jpg`,
+  `/media/clip.mp4` — the path content authors, = the entity's
+  `meta.url`), resolving via a new `refFilter` `{ 'meta.url': … }`
+  clause (utils.js) backed by an indexed `meta_url` column
+  (catalog.js + the `INDEXED_COLUMNS` map in sift-to-sql.js; schema
+  9.0.1 → 9.0.2). No collection-prefixed ids leak into content.
+  Id-refs were tried and rejected — gpoint references content by
+  served path everywhere, and its `/media/**` `resources()` library
+  means the entity only exists *because* content references
+  `/media/…`. The `files` plugin stamps `meta.url`; the `resources`
+  plugin stamps its library's served location; the `assets` plugin
+  stamps `meta.presets` in `onProcessed` via the pure `presetUrl()`
+  helper. Expanding a ref then yields the served entity's URL set,
+  not a string to reconstruct; `lookupUrl` (render.js) is the sync
+  Handlebars helper resolving a ref to `meta.url` or a named preset.
+  Base-relative in the live catalog, absolute in static renders
+  (from `runtime.options.url`). Umbrella term is *served entity*
+  (file/resource/preset).
 
 ## MCP
 

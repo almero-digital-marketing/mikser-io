@@ -96,13 +96,17 @@ export function resources(options = {}) {
                 try {
                     const id = resource.indexOf(`/${library}`) == 0 ? resource : path.join(`/${library}`, resource)
                     if (!localResources.has(id)) {
+                        const resourceName = resource.indexOf('/') == 0 ? resource.substring(1) : resource
                         await createEntity({
                             id,
                             uri: path.join(runtime.options.workingFolder, resource),
                             collection,
                             type,
                             format: path.extname(resource).substring(1).toLowerCase(),
-                            name: resource.indexOf('/') == 0 ? resource.substring(1) : resource,
+                            name: resourceName,
+                            // Served path — a $-ref to this entity expands to it;
+                            // consumers read meta.url for the location (ADR-0011).
+                            meta: { url: '/' + resourceName },
                             source: path.join(runtime.options.workingFolder, resource),
                             checksum: await checksum(path.join(runtime.options.workingFolder, resource))
                         })
@@ -181,13 +185,15 @@ export function resources(options = {}) {
                 }
 
                 if (success) {
+                    const resourceName = path.join(library, pathname)
                     await createEntity({
                         id: path.join('/resources', library, pathname),
                         uri,
                         collection,
                         type,
                         format: path.extname(resource).substring(1).toLowerCase(),
-                        name: path.join(library, pathname),
+                        name: resourceName,
+                        meta: { url: '/' + resourceName },
                         source: resource,
                         checksum: await checksum(resource)
                     })

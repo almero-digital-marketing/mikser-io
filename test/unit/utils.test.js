@@ -18,6 +18,7 @@ import {
     isLoopback,
     loopbackOnly,
     isRefKey,
+    refFilter,
     projectMeta,
     extractRefs,
     writeEntity,
@@ -1239,5 +1240,78 @@ describe('readEntityContent', () => {
             meta: { driveId: 'abc123', driveMimeType: 'text/markdown' },
         })
         assert.match(result.contentError, /gdrive: provider not initialized/)
+    })
+})
+
+describe('refFilter (ADR-0011: served-path resolution)', () => {
+    it('matches a reference by id, meta.href, OR meta.url', () => {
+        const f = refFilter('/media/bg/clip.mp4')
+        const keys = f.$or.map(c => Object.keys(c)[0])
+        assert.ok(keys.includes('id'), 'matches by id')
+        assert.ok(keys.includes('meta.href'), 'matches by meta.href')
+        assert.ok(keys.includes('meta.url'), 'matches by meta.url (served path)')
+    })
+
+    it('the meta.url clause carries the ref verbatim — a $-ref is the served path', () => {
+        const f = refFilter('/img/products/X.jpg')
+        const urlClause = f.$or.find(c => 'meta.url' in c)
+        assert.equal(urlClause['meta.url'], '/img/products/X.jpg')
+    })
+
+    it('keeps the extensionless-id regex fallback (ADR-0007)', () => {
+        const f = refFilter('/images/hero')
+        const rx = f.$or.find(c => c.id && typeof c.id === 'object' && c.id.$regex)
+        assert.ok(rx, 'still resolves /images/hero → /images/hero.<ext>')
+    })
+
+    it('returns a never-match filter for a non-string ref', () => {
+        assert.deepEqual(refFilter(null), { id: '__never__' })
+    })
+})
+
+describe('expandEntity — $ wildcard (deep, structure-agnostic ref expansion)', () => {
+    const catalog = {
+        '/media/a.mp4':  { id: '/media/a.mp4', meta: { url: '/media/a.mp4', presets: { poster: '/p.jpg' } } },
+        '/media/b.mp4':  { id: '/media/b.mp4', meta: { url: '/media/b.mp4' } },
+        '/authors/dick': { id: '/authors/dick', meta: { name: 'Dick', $org: '/orgs/acme' } },
+        '/orgs/acme':    { id: '/orgs/acme', meta: { name: 'Acme' } },
+    }
+    const findRef = async (ref) => catalog[ref] ?? null
+
+    it('["$"] expands every $-ref at any structural depth, one hop', async () => {
+        const entity = { id: '/doc', meta: {
+            presentation: { $video: '/media/a.mp4' },
+            faq: { questions: [{ $video: '/media/b.mp4' }, { text: 'no video' }] },
+        } }
+        const r = await expandEntity(entity, ['$'], { findRef })
+        assert.equal(r.meta.presentation.$video.meta.presets.poster, '/p.jpg')
+        assert.equal(r.meta.faq.questions[0].$video.id, '/media/b.mp4')
+        assert.equal(r.meta.faq.questions[1].text, 'no video')   // non-ref untouched
+    })
+
+    it('["$"] is one hop — deeper graph refs stay strings', async () => {
+        const entity = { id: '/doc', meta: { $author: '/authors/dick' } }
+        const r = await expandEntity(entity, ['$'], { findRef })
+        assert.equal(r.meta.$author.meta.name, 'Dick')
+        assert.equal(r.meta.$author.meta.$org, '/orgs/acme')     // not expanded yet
+    })
+
+    it('["$.$"] walks the resolved graph one hop deeper', async () => {
+        const entity = { id: '/doc', meta: { $author: '/authors/dick' } }
+        const r = await expandEntity(entity, ['$.$'], { findRef })
+        assert.equal(r.meta.$author.meta.name, 'Dick')
+        assert.equal(r.meta.$author.meta.$org.meta.name, 'Acme')
+    })
+
+    it('composes with literal segments — `faq.$`', async () => {
+        const entity = { id: '/doc', meta: { faq: { questions: [{ $video: '/media/a.mp4' }] }, $other: '/media/b.mp4' } }
+        const r = await expandEntity(entity, ['faq.$'], { findRef })
+        assert.equal(r.meta.faq.questions[0].$video.id, '/media/a.mp4')  // under faq → expanded
+        assert.equal(r.meta.$other, '/media/b.mp4')                       // outside faq → untouched
+    })
+
+    it('respects maxResolved', async () => {
+        const entity = { id: '/doc', meta: { $a: '/media/a.mp4', $b: '/media/b.mp4' } }
+        await assert.rejects(expandEntity(entity, ['$'], { findRef, maxResolved: 1 }), /maxResolved/)
     })
 })

@@ -130,6 +130,21 @@ expand: [
 
 `*` is explicit. No implicit array traversal — one rule applied uniformly.
 
+**`$` is a structure-agnostic segment: expand every reference reachable from here, one hop.** Where `*` iterates array indices, `$` iterates *references*. It descends the current node's structure recursively — through plain objects and arrays — and expands every `$`-keyed value it finds, each one hop. The caller declares THAT it wants refs resolved, not WHERE they sit in the document.
+
+```
+expand: [
+    '$',                         // resolve every ref in the doc, any depth, one hop
+    '$.$',                       // …then every ref of those resolved entities
+    '$.$.$',                     // walk the resolved graph three hops deep
+    'faq.$',                     // every ref under the `faq` subtree only
+]
+```
+
+A tail after `$` applies to each resolved entity's meta, so `$.$.$` walks the *resolved graph* deeper — refs, then refs of those entities, then refs of those. It composes with literal segments (`faq.$` scopes the wildcard to one subtree). Like every path, it is bounded: `maxResolved` caps the total lookups and `maxDepth` caps the chain length. `['$']` alone — resolve every ref in a doc, one hop — is the common case: a consumer asks for resolution without knowing the document's internal shape.
+
+It's common enough that the framework SDKs make it the **default** for their document loaders — `provideCurrentDocument` / `CurrentDocumentProvider` and the cache's `content.document` / `documentSync` resolve `['$']` when no `expand` is given. A document arrives with its references resolved; a consumer that only reads plain fields opts out with `expand: []`. This is an SDK-layer convenience, not a change to the engine contract: the engine and `sdk-api` stay opt-in (B-series guardrails below), and the framework wrapper still passes an explicit `['$']` per call — the cost stays visible, just defaulted where the common case lives.
+
 **B3. Resolved values replace the ref string inline.**
 
 ```js
@@ -318,7 +333,7 @@ Expand-time errors are different from ref-validation: a malformed `expand` param
 The convention and the expansion are protected by the same disciplines. Drift modes to recognise:
 
 - **"Let's normalize in the catalog so plugins don't have to think about it."** The catalog stays canonical because the schemas plugin, `runtime.refs`, and the api filter dispatch all need the marker. The render context wrapper is the right place for normalization.
-- **"Let's allow `expand: ['*']` to expand everything implicitly."** Implicit unbounded expansion silently makes every GET walk the catalog. Callers should name what they want; the cost should be visible at the call site.
+- **"Let's allow `expand: ['*']` to expand everything implicitly."** Keep `*` to its array-iteration meaning. What 0007 rejected was *implicit, unbounded* expansion that hides cost — a path that silently makes every GET walk the catalog with no marker at the call site. That rejection still stands. It is **not** an argument against `$`: `$` is explicit (you wrote `$`, so the call site says "resolve all refs") and bounded (`maxResolved` caps it), so the cost stays visible exactly where 0007 wants it. `$` is the supported "resolve every ref" escape hatch — structure-agnostic but cost-honest — not a reintroduction of implicit-`*`.
 - **"Let's add `_originalRef` to expanded objects."** Skip until somebody needs it. The expanded entity carries `id`, which IS the original ref by A2's href convention.
 - **"Let's support selection sets per-expand."** That's GraphQL. The existing `fields` parameter handles projection across expanded paths; richer DSL is a separate concern. `expand` is not the surface for it.
 - **"Let's allow deep PUT — sending a nested object updates referenced entities too."** Hard no. Writes go to one entity at a time, with refs as strings. ADR-0002.

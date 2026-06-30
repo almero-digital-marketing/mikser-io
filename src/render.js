@@ -22,6 +22,7 @@ import engineRuntime from './runtime.js'
 // dispatch.
 let workerDb = null
 let stmtHrefLookup = null
+let stmtIdLookup = null
 
 function ensureWorkerDb(options) {
     if (workerDb) return
@@ -34,6 +35,11 @@ function ensureWorkerDb(options) {
     // indexed in mikser_entities; one row per (href, lang) tuple.
     stmtHrefLookup = workerDb.prepare(
         'SELECT data FROM mikser_entities WHERE meta_href = ?',
+    )
+    // By id (PK) — for lookupUrl resolving a served-entity reference to
+    // its deployed URL (ADR-0011).
+    stmtIdLookup = workerDb.prepare(
+        'SELECT data FROM mikser_entities WHERE id = ?',
     )
 }
 
@@ -57,6 +63,26 @@ function lookupHrefViaDb(href) {
         result[entity.meta?.lang ?? 'default'] = entity
     }
     return result
+}
+
+// Resolve a served-entity reference (its id) to a deployed URL for render
+// output (ADR-0011). Renders project-but-don't-expand, so a template that
+// needs an asset's URL resolves the ref here:
+//   {{ lookupUrl meta.image }}           → served path
+//   {{ lookupUrl meta.video 'poster' }}  → a preset derivative
+// `origin` (runtime.options.url) makes it absolute so static outputs —
+// emails, feeds — carry a whole URL; absent, it stays base-relative.
+// Unresolved refs return unchanged, staying visible like lookupHref.
+function lookupUrlViaDb(ref, preset, origin) {
+    if (typeof ref !== 'string') return ref
+    const row = stmtIdLookup.get(ref)
+    if (!row) return ref
+    const meta = JSON.parse(row.data).meta || {}
+    // A template helper called with one arg still receives the renderer's
+    // options/hash object as the second — only treat a string as a preset.
+    const rel = typeof preset === 'string' ? meta.presets?.[preset] : meta.url
+    if (!rel) return ref
+    return origin ? origin + rel : rel
 }
 
 export default async ({ entity, options, config, context, state, logger, port, track }) => {
@@ -161,6 +187,9 @@ export default async ({ entity, options, config, context, state, logger, port, t
         // task. Goes through the same WAL-backed read-only handle
         // every worker shares with the engine writer.
         lookupHref: lookupHrefViaDb,
+        // Resolve a served-entity reference to its deployed URL, absolute
+        // when runtime.options.url is set (ADR-0011).
+        lookupUrl: (ref, preset) => lookupUrlViaDb(ref, preset, options.url),
         content() {
             return readFileSync(entity.source, { encoding: 'utf8' })
         },

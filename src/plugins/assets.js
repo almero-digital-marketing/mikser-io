@@ -48,6 +48,18 @@ export function normalizePresetConfig(value) {
     return { matches: [value], options: {} }
 }
 
+// Deployed URL for a preset derivative of a source entity (ADR-0011).
+// Mirrors renderPresets' destination: <assetsFolder>/<preset>/<name>, with
+// the extension swapped to the preset's `format` (absent → keep the source
+// extension). `assetsFolder` is the served root for derivatives ('assets',
+// or '<outputFolder>/assets'). `changeExtension` is passed in so this stays
+// a pure, engine-free helper. Base-relative — a render target prefixes the
+// origin; a same-origin consumer uses it as-is.
+export function presetUrl({ assetsFolder, preset, name, format, changeExtension }) {
+    const destination = format ? changeExtension(name, format) : name
+    return '/' + path.posix.join(assetsFolder, preset, destination)
+}
+
 export function assets(options = {}) {
     return ({
         runtime,
@@ -352,6 +364,23 @@ export function assets(options = {}) {
                         if (entityPresets.length) {
                             logger.debug('Presets matched for: %s %s', entity.collection, entity.id, entityPresets.length)
                             assetsMap[entity.id] = entityPresets
+                            // ADR-0011: stamp deployed preset URLs onto the
+                            // source entity so a $-ref to it expands to its
+                            // derivatives. Same destination as renderPresets;
+                            // recorded here where the matched presets are known.
+                            // Auto-persisted via useJournal (mutate-and-move-on).
+                            const { presets } = runtime.state.assets
+                            const urls = {}
+                            for (const presetName of entityPresets) {
+                                urls[presetName] = presetUrl({
+                                    assetsFolder: runtime.state.assets.assetsFolder,
+                                    preset: presetName,
+                                    name: entity.name,
+                                    format: presets[presetName]?.format,
+                                    changeExtension,
+                                })
+                            }
+                            entity.meta = { ...entity.meta, presets: urls }
                         }
                         break
                     case OPERATION.DELETE:
