@@ -1,4 +1,5 @@
 import { readFileSync, existsSync } from 'node:fs'
+import { readFile, unlink } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
@@ -290,7 +291,42 @@ export function useRenderer(runtime, { defaultTimeout = 30_000 } = {}) {
             if (!isFinal) return
             remaining.delete(cid)
             clearTimeout(item.timer)
-            item.resolve({ output: entry.output, entity: entry.entity })
+
+            // The postprocess chain writes the final bytes straight to
+            // disk and its dispatcher (src/postprocess.js) returns
+            // undefined, so a postprocessed completion arrives with
+            // output.result empty — even though the bytes exist on disk.
+            // Our contract (see the render() JSDoc below) is to hand back
+            // the FINAL pipeline output, so read it from where the chain
+            // wrote it: <destination> under outputFolder, or under
+            // previewFolder when the caller passed save:false (the engine
+            // swaps the postprocess outputFolder to previewFolder in that
+            // case — see engine.js onBeforePostprocess). Render-only
+            // entities already carry their bytes in output.result and
+            // skip this entirely.
+            let output = entry.output
+            if (hasPostprocessor && output?.result == null && entry.entity?.destination) {
+                const saveOff = entry.entity.options?.save === false
+                const folder = saveOff
+                    ? runtime.options.previewFolder
+                    : runtime.options.outputFolder
+                const file = path.join(folder, entry.entity.destination.replace(/^\/+/, ''))
+                try {
+                    const bytes = await readFile(file)
+                    output = { success: true, result: bytes }
+                    // save:false → that previewFolder file is engine
+                    // scratch the caller explicitly opted out of
+                    // persisting. Hand back the bytes, leave nothing on
+                    // disk.
+                    if (saveOff) await unlink(file).catch(() => {})
+                } catch (err) {
+                    useLogger()?.warn?.(
+                        'useRenderer: postprocessed output for %s not found at %s — returning empty result: %s',
+                        entry.entity.id, file, err.message,
+                    )
+                }
+            }
+            item.resolve({ output, entity: entry.entity })
         }
         completedHooks.push(hook)
 

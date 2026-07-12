@@ -1,5 +1,9 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, mkdir, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 
 import { useRenderer } from '../../src/render.js'
 
@@ -35,6 +39,94 @@ describe('useRenderer', () => {
         const { output, entity } = await render({ id: '/a.md', collection: 'documents' })
         assert.equal(output.result, 'rendered html')
         assert.ok(entity.options?.correlationId)
+    })
+
+    // Regression: postprocessed layouts (*.html-mjml, *.html-pdf, …).
+    // The postprocess chain writes the final bytes to disk and its
+    // dispatcher (src/postprocess.js) returns undefined, so the final
+    // completion arrives with output.result empty even though the bytes
+    // exist on disk. useRenderer's contract is to return the FINAL
+    // pipeline output, so it reads them back. Before the fix, this
+    // resolved with a null result and the API /render endpoint 204'd.
+    it('reads postprocessed bytes back from disk on save:false and removes the scratch file', async () => {
+        const dir = await mkdtemp(path.join(tmpdir(), 'mikser-pp-'))
+        const previewFolder = path.join(dir, 'preview')
+        await mkdir(path.join(previewFolder, 'en'), { recursive: true })
+        await writeFile(path.join(previewFolder, 'en', 'welcome.html'), '<html>compiled mjml</html>')
+
+        const updates = []
+        const runtime = createFakeRuntime({
+            update: async (e) => updates.push(e),
+            process: async () => {
+                const last = updates[updates.length - 1]
+                // Simulate the FINAL (postprocess) completion: origin set,
+                // output carries success but no result — exactly what the
+                // engine hands over after src/postprocess.js returns undefined.
+                for (const cb of [...runtime.hooks.completed]) {
+                    await cb({ entity: { ...last, origin: '/en/welcome.mjml' }, output: { success: true } })
+                }
+            },
+        })
+        runtime.options = { previewFolder, outputFolder: path.join(dir, 'out') }
+
+        const { render } = useRenderer(runtime)
+        const { output } = await render(
+            { id: '/en/welcome', layout: { postprocessor: 'mjml' }, destination: '/en/welcome.html', collection: 'documents' },
+            { save: false },
+        )
+        const text = Buffer.isBuffer(output.result) ? output.result.toString('utf8') : output.result
+        assert.equal(text, '<html>compiled mjml</html>')
+        // save:false → the previewFolder scratch file must be gone.
+        assert.equal(existsSync(path.join(previewFolder, 'en', 'welcome.html')), false)
+    })
+
+    it('reads postprocessed bytes back on save:true and keeps the output file', async () => {
+        const dir = await mkdtemp(path.join(tmpdir(), 'mikser-pp-'))
+        const outputFolder = path.join(dir, 'out')
+        await mkdir(path.join(outputFolder, 'en'), { recursive: true })
+        await writeFile(path.join(outputFolder, 'en', 'welcome.html'), '<html>saved mjml</html>')
+
+        const updates = []
+        const runtime = createFakeRuntime({
+            update: async (e) => updates.push(e),
+            process: async () => {
+                const last = updates[updates.length - 1]
+                for (const cb of [...runtime.hooks.completed]) {
+                    await cb({ entity: { ...last, origin: '/en/welcome.mjml' }, output: { success: true } })
+                }
+            },
+        })
+        runtime.options = { previewFolder: path.join(dir, 'preview'), outputFolder }
+
+        const { render } = useRenderer(runtime)
+        const { output } = await render(
+            { id: '/en/welcome', layout: { postprocessor: 'mjml' }, destination: '/en/welcome.html', collection: 'documents' },
+            { save: true },
+        )
+        const text = Buffer.isBuffer(output.result) ? output.result.toString('utf8') : output.result
+        assert.equal(text, '<html>saved mjml</html>')
+        // save:true → the output file stays on disk.
+        assert.equal(existsSync(path.join(outputFolder, 'en', 'welcome.html')), true)
+    })
+
+    it('does not read disk for a render-only entity (no postprocessor)', async () => {
+        // A plain layout's bytes are already in output.result; the
+        // read-back path must not fire (no postprocessor → untouched).
+        const updates = []
+        const runtime = createFakeRuntime({
+            update: async (e) => updates.push(e),
+            process: async () => {
+                const last = updates[updates.length - 1]
+                for (const cb of [...runtime.hooks.completed]) {
+                    await cb({ entity: last, output: { result: 'plain html' } })
+                }
+            },
+        })
+        runtime.options = { previewFolder: '/nonexistent', outputFolder: '/nonexistent' }
+
+        const { render } = useRenderer(runtime)
+        const { output } = await render({ id: '/plain', collection: 'documents' }, { save: false })
+        assert.equal(output.result, 'plain html')
     })
 
     it('routes outputs to the right correlation id in a concurrent batch', async () => {
