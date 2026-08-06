@@ -39,6 +39,10 @@ export function attachServerCliOptions(commander) {
 // Wire the server lifecycle hooks. Called by engine.js's setup() AFTER
 // engine's own onInitialized/onLoad registrations so the log-line order
 // stays "engine folder logs → server bring-up" rather than the reverse.
+// True when this module created the Express app. The late hook applies config-derived
+// settings only then — a caller-supplied app owns its own configuration.
+let ownsApp = false
+
 export function setupServer() {
     onInitialized(async () => {
         const logger = useLogger()
@@ -53,6 +57,7 @@ export function setupServer() {
             throw new Error('Express is required for --server. Run: npm install express')
         })
         runtime.options.app = express()
+        ownsApp = true
         runtime.options.port = runtime.options.server === true
             ? 3001
             : Number(runtime.options.server) || 3001
@@ -93,9 +98,8 @@ export function setupServer() {
         // DIFFERENT host fails closed (non-loopback peer → XFF ignored →
         // loopback endpoints 403) until the operator sets 'uniquelocal'
         // or the specific subnet.
-        const trustProxy = runtime.config.server?.trustProxy ?? 'loopback'
-        runtime.options.app.set('trust proxy', trustProxy)
-        logger.info('Server trust proxy: %s', String(trustProxy))
+        // `trust proxy` is applied in the late hook at the bottom of this file: runtime.config
+        // is not populated during the initialized phase.
 
         // CORS — a server exists to be fetched, and in dev the frontend
         // is almost always on a different origin (a dev server on
@@ -110,28 +114,30 @@ export function setupServer() {
         // Default on (?? true) so programmatic setup({ server }) — which
         // bypasses commander's --no-cors default — matches the CLI.
         // Explicit false (config or --no-cors) still disables.
-        const corsOrigin = runtime.config.server?.cors ?? runtime.options.cors ?? true
-        if (corsOrigin) {
-            const origin = corsOrigin === true ? '*' : String(corsOrigin)
-            // Extensible header arrays. Plugins push values into these
-            // at factory time to teach CORS about headers they care
-            // about — e.g. the mikser-io-mcp plugin adds mcp-session-id,
-            // mcp-protocol-version, last-event-id so browser-side MCP
-            // clients can complete the Streamable HTTP handshake.
-            // Default to the minimum every server needs.
-            runtime.options.corsAllowHeaders  = ['Content-Type', 'Authorization']
-            runtime.options.corsExposeHeaders = []
-            const { default: cors } = await import('cors')
-            runtime.options.app.use(cors((req, callback) => {
-                callback(null, {
-                    origin,
-                    methods:        ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-                    allowedHeaders: runtime.options.corsAllowHeaders,
-                    exposedHeaders: runtime.options.corsExposeHeaders,
-                })
-            }))
-            logger.debug('CORS enabled: %s', origin)
-        }
+        // Registered unconditionally, decided per request. The middleware's position is fixed
+        // here — ahead of static and every plugin router — while its setting lives in
+        // runtime.config, which is only populated in the load phase. The per-request callback
+        // is what lets both hold.
+        //
+        // Extensible header arrays. Plugins push values into these at factory time to teach
+        // CORS about headers they care about — e.g. the mikser-io-mcp plugin adds
+        // mcp-session-id, mcp-protocol-version, last-event-id so browser-side MCP clients can
+        // complete the Streamable HTTP handshake. Default to the minimum every server needs.
+        runtime.options.corsAllowHeaders  = ['Content-Type', 'Authorization']
+        runtime.options.corsExposeHeaders = []
+        const { default: cors } = await import('cors')
+        runtime.options.app.use(cors((req, callback) => {
+            const configured = runtime.config.server?.cors ?? runtime.options.cors ?? true
+            // `origin: false` is how the cors package emits no CORS headers at all, which is
+            // what --no-cors / config.server.cors:false asks for.
+            if (!configured) return callback(null, { origin: false })
+            callback(null, {
+                origin:         configured === true ? '*' : String(configured),
+                methods:        ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+                allowedHeaders: runtime.options.corsAllowHeaders,
+                exposedHeaders: runtime.options.corsExposeHeaders,
+            })
+        }))
     })
 
     // Late-binding static + listen. Registered here (inside another
@@ -149,6 +155,22 @@ export function setupServer() {
         onLoaded(async () => {
             const logger = useLogger()
             const { default: express } = await import('express')
+
+            // Config-derived settings belong here rather than in the onInitialized block that
+            // creates the app. Phases run initialize -> initialized -> load -> loaded, and
+            // config.js populates runtime.config from a `load` hook — so anything read during
+            // `initialized` sees an empty object and takes its default. `loaded` runs after
+            // every `load`, so runtime.config is complete here whatever the import order.
+            //
+            // Express evaluates `trust proxy` per request, so setting it before listen is
+            // equivalent to setting it at creation.
+            if (ownsApp) {
+                const trustProxy = runtime.config.server?.trustProxy ?? 'loopback'
+                runtime.options.app.set('trust proxy', trustProxy)
+                logger.info('Server trust proxy: %s', String(trustProxy))
+                const corsOrigin = runtime.config.server?.cors ?? runtime.options.cors ?? true
+                logger.debug('CORS: %s', corsOrigin === false ? 'disabled' : (corsOrigin === true ? '*' : String(corsOrigin)))
+            }
 
             runtime.options.app.use(express.static(runtime.options.outputFolder))
 

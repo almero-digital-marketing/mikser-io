@@ -1,85 +1,85 @@
 {
-	"name": "mikser-io",
-	"version": "9.0.4",
-	"description": "<p align=\"center\">   <img src=\"mikser-lockup-stacked.svg\" alt=\"mikser\" width=\"198\" /> </p>",
-	"main": "index.js",
-	"exports": {
-		".": "./index.js",
-		"./package.json": "./package.json",
-		"./*": "./*"
-	},
-	"scripts": {
-		"debug": "node --no-warnings app.js --server --watch --working-folder test/fixture",
-		"test:unit": "node --test --test-reporter=spec 'test/unit/**/*.test.js'",
-		"test:smoke": "node --no-warnings app.js --working-folder test/fixture",
-		"test:scenarios": "node --test --test-reporter=spec --test-timeout=60000 'test/scenarios/**/*.test.js'",
-		"test:perf": "node test/perf/generate.js && node --no-warnings app.js --working-folder test/perf",
-		"test": "npm run test:unit && npm run test:scenarios && npm run test:smoke"
-	},
-	"bin": {
-		"mikser": "app.js"
-	},
-	"repository": {
-		"type": "git",
-		"url": "git+https://github.com/almero-digital-marketing/mikser-io.git"
-	},
-	"type": "module",
-	"author": "",
-	"license": "ISC",
-	"dependencies": {
-		"@budibase/handlebars-helpers": "^0.14.3",
-		"await-semaphore": "^0.1.3",
-		"axios": "^1.17.0",
-		"better-sqlite3": "^12.10.0",
-		"chokidar": "^5.0.0",
-		"commander": "^15.0.0",
-		"cors": "^2.8.5",
-		"dayjs": "^1.11.21",
-		"deepdash": "^5.3.9",
-		"escape-string-regexp": "^5.0.0",
-		"execa": "^9.6.1",
-		"front-matter": "^4.0.2",
-		"gauge": "^5.0.2",
-		"globby": "^16.2.0",
-		"handlebars": "^4.7.9",
-		"hasha": "^7.0.0",
-		"is-url": "^1.2.4",
-		"line-reader": "^0.4.0",
-		"lodash": "^4.18.1",
-		"minimatch": "^10.2.5",
-		"node-cron": "^4.2.1",
-		"p-map": "^7.0.4",
-		"p-queue": "^9.3.0",
-		"pino": "^10.3.1",
-		"pino-pretty": "^13.1.3",
-		"piscina": "^5.1.4",
-		"sift": "^17.1.3",
-		"truncate-stream": "^1.0.2",
-		"yaml": "^2.9.0"
-	},
-	"optionalDependencies": {
-		"express": "^5.2.1"
-	},
-	"devDependencies": {
-		"@ai-sdk/openai": "^3.0.71",
-		"fluent-ffmpeg": "^2.1.3",
-		"mikser-io-decap": "file:../mikser-io-decap",
-		"mikser-io-post-mjml": "file:../mikser-io-post-mjml",
-		"mikser-io-post-pdf": "file:../mikser-io-post-pdf",
-		"mikser-io-render-eta": "file:../mikser-io-render-eta",
-		"mikser-io-render-liquid": "file:../mikser-io-render-liquid",
-		"mikser-io-render-markdown": "file:../mikser-io-render-markdown",
-		"mikser-io-schemas": "file:../mikser-io-schemas",
-		"mikser-io-vector": "file:../mikser-io-vector",
-		"puppeteer": "^25.1.0",
-		"sharp": "^0.34.5",
-		"zod": "^4.4.3"
-	},
-	"directories": {
-		"test": "test"
-	},
-	"bugs": {
-		"url": "https://github.com/almero-digital-marketing/mikser-io/issues"
-	},
-	"homepage": "https://github.com/almero-digital-marketing/mikser-io#readme"
+  "name": "mikser-io",
+  "version": "9.0.5",
+  "description": "<p align=\"center\">   <img src=\"mikser-lockup-stacked.svg\" alt=\"mikser\" width=\"198\" /> </p>",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json",
+    "./*": "./*"
+  },
+  "scripts": {
+    "debug": "node --no-warnings app.js --server --watch --working-folder test/fixture",
+    "test:unit": "node --test --test-reporter=spec 'test/unit/**/*.test.js'",
+    "test:smoke": "node --no-warnings app.js --working-folder test/fixture",
+    "test:scenarios": "node --test --test-reporter=spec --test-timeout=60000 'test/scenarios/**/*.test.js'",
+    "test:perf": "node test/perf/generate.js && node --no-warnings app.js --working-folder test/perf",
+    "test": "npm run test:unit && npm run test:scenarios && npm run test:smoke"
+  },
+  "bin": {
+    "mikser": "app.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/almero-digital-marketing/mikser-io.git"
+  },
+  "type": "module",
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@budibase/handlebars-helpers": "^0.14.3",
+    "await-semaphore": "^0.1.3",
+    "axios": "^1.17.0",
+    "better-sqlite3": "^12.10.0",
+    "chokidar": "^5.0.0",
+    "commander": "^15.0.0",
+    "cors": "^2.8.5",
+    "dayjs": "^1.11.21",
+    "deepdash": "^5.3.9",
+    "escape-string-regexp": "^5.0.0",
+    "execa": "^9.6.1",
+    "front-matter": "^4.0.2",
+    "gauge": "^5.0.2",
+    "globby": "^16.2.0",
+    "handlebars": "^4.7.9",
+    "hasha": "^7.0.0",
+    "is-url": "^1.2.4",
+    "line-reader": "^0.4.0",
+    "lodash": "^4.18.1",
+    "minimatch": "^10.2.5",
+    "node-cron": "^4.2.1",
+    "p-map": "^7.0.4",
+    "p-queue": "^9.3.0",
+    "pino": "^10.3.1",
+    "pino-pretty": "^13.1.3",
+    "piscina": "^5.1.4",
+    "sift": "^17.1.3",
+    "truncate-stream": "^1.0.2",
+    "yaml": "^2.9.0"
+  },
+  "optionalDependencies": {
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "@ai-sdk/openai": "^3.0.71",
+    "fluent-ffmpeg": "^2.1.3",
+    "mikser-io-decap": "file:../mikser-io-decap",
+    "mikser-io-post-mjml": "file:../mikser-io-post-mjml",
+    "mikser-io-post-pdf": "file:../mikser-io-post-pdf",
+    "mikser-io-render-eta": "file:../mikser-io-render-eta",
+    "mikser-io-render-liquid": "file:../mikser-io-render-liquid",
+    "mikser-io-render-markdown": "file:../mikser-io-render-markdown",
+    "mikser-io-schemas": "file:../mikser-io-schemas",
+    "mikser-io-vector": "file:../mikser-io-vector",
+    "puppeteer": "^25.1.0",
+    "sharp": "^0.34.5",
+    "zod": "^4.4.3"
+  },
+  "directories": {
+    "test": "test"
+  },
+  "bugs": {
+    "url": "https://github.com/almero-digital-marketing/mikser-io/issues"
+  },
+  "homepage": "https://github.com/almero-digital-marketing/mikser-io#readme"
 }
