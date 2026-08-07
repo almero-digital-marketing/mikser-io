@@ -681,6 +681,7 @@ api: {
   base: '/api',                    // mount prefix; default '/api'
   pageSize: 10,                    // global default; per-endpoint override below
   renderTimeout: 30_000,           // global default; per-endpoint override below
+  bodyLimit: '2mb',                // global default; per-endpoint override below
   endpoints: {
     public: {
       // No token → publicly readable. The query function scopes what
@@ -706,10 +707,22 @@ api: {
       token: process.env.API_RENDER_TOKEN,
       operations: ['render'],
       renderTimeout: 60_000,
+      bodyLimit: '8mb',            // override the global bodyLimit
     },
   },
 }
 ```
+
+**`bodyLimit`** is worth setting deliberately on a `render` endpoint. The request
+body carries the whole entity, so its size is the size of everything the layout
+needs — a mail template handed a customer's recent history is easily several
+hundred kilobytes, which is not large but is well past Express's 100kb default.
+
+The failure mode argues for getting this right rather than discovering it: the
+body is rejected while the stream is being read, so the render never runs, the
+rejection is not logged as a render error, and the caller receives an HTML error
+page from a JSON API. It reads as "the thing I was rendering for is broken",
+not as "the request was too big".
 
 **Routes per endpoint:**
 

@@ -1087,3 +1087,101 @@ describe('api plugin: expand-cache invalidation (ADR-0007 B9)', () => {
         }
     })
 })
+
+// Express's own default is 100kb, which is fine for a REST body and wrong for
+// `render`: the request carries the entity, so its size is the size of whatever
+// the layout needs. On gpoint a mail template handed a customer's recent
+// bookings ran 141–423kb and every one of those renders was rejected — 168 of
+// them in under two hours, booking confirmations among them.
+//
+// The failure is invisible from inside mikser. raw-body rejects while READING
+// the stream, so no handler runs and nothing is logged as a render error; the
+// caller gets an HTML error page back from a JSON API and concludes the thing it
+// was rendering for is broken.
+describe('api plugin: request body limit', () => {
+    // 300kb of JSON — over Express's default, comfortably under the new one, and
+    // the size range that actually broke.
+    const bigMeta = 'x'.repeat(300 * 1024)
+
+    const serve = async (apiOptions) => {
+        const { default: express } = await import('express')
+        const app = express()
+        const h = createHarness({
+            options: {
+                app,
+                workingFolder: '/tmp/mikser-body-limit',
+                outputFolder: '/tmp/mikser-body-limit/out',
+            },
+        })
+        h.runtime.process = async () => {
+            const lastUpdate = [...h.journal].reverse().find(e => e.operation === 'update')
+            if (!lastUpdate) return
+            const entry = {
+                entity: { ...lastUpdate.entity, destination: '/en/page.html' },
+                output: { success: true, result: 'ok' },
+            }
+            for (const cb of [...h.runtime.hooks.completed]) await cb(entry)
+        }
+        h.runtime.hooks.completed = h.runtime.hooks.complete
+
+        api(apiOptions)(h.core)
+        await h.runHook('loaded')
+        const server = await new Promise((resolve) => {
+            const s = app.listen(0, () => resolve(s))
+        })
+        return { server, port: server.address().port }
+    }
+
+    const post = (port, body) => fetch(`http://127.0.0.1:${port}/api/default/render`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+    })
+
+    it('accepts a body larger than the express default', async () => {
+        const { server, port } = await serve({ endpoints: { default: { operations: ['render'] } } })
+        try {
+            const response = await post(port, {
+                id: '/documents/en/page.md', collection: 'documents', type: 'document',
+                meta: { blob: bigMeta },
+            })
+            assert.notEqual(response.status, 413)
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('still refuses a body over the configured limit', async () => {
+        // Not unbounded: a token-gated endpoint is still a body whose size the
+        // caller chooses.
+        const { server, port } = await serve({
+            bodyLimit: '100kb',
+            endpoints: { default: { operations: ['render'] } },
+        })
+        try {
+            const response = await post(port, {
+                id: '/documents/en/page.md', collection: 'documents', type: 'document',
+                meta: { blob: bigMeta },
+            })
+            assert.equal(response.status, 413)
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('lets one endpoint raise the limit without changing the others', async () => {
+        const { server, port } = await serve({
+            bodyLimit: '100kb',
+            endpoints: { default: { operations: ['render'], bodyLimit: '2mb' } },
+        })
+        try {
+            const response = await post(port, {
+                id: '/documents/en/page.md', collection: 'documents', type: 'document',
+                meta: { blob: bigMeta },
+            })
+            assert.notEqual(response.status, 413)
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+})

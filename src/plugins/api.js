@@ -359,6 +359,23 @@ export function api(options = {}) {
         const base = apiBase   // alias so existing local references still work
         const globalPageSize = options.pageSize ?? 10
         const globalRenderTimeout = options.renderTimeout ?? 30_000
+        // express.json() defaults to 100kb, which is a sensible ceiling for a
+        // REST body and much too small for `render`: the caller posts an entity
+        // whose meta carries everything the layout needs, and a mail template
+        // given a list of a customer's recent bookings runs 150–400kb. That
+        // exceeds the default without being remotely large.
+        //
+        // The failure is quiet at the wrong end. The renderer never sees the
+        // request — raw-body rejects it while reading the stream — so nothing
+        // appears in mikser's log, and the caller gets an HTML error page for a
+        // JSON API. On gpoint that was 168 renders lost in under two hours,
+        // including the customer booking confirmations, and it looked from the
+        // outside like the mail was broken rather than the render.
+        //
+        // 2mb, and configurable per endpoint like every other limit here. Not
+        // unbounded: a token-gated endpoint is still a body an attacker can
+        // choose the size of.
+        const globalBodyLimit = options.bodyLimit ?? '2mb'
 
         // Preview workflow (render → cache → URL) lives in its own
         // plugin (src/plugins/preview.js) as of v7.3.0. The api plugin
@@ -377,7 +394,7 @@ export function api(options = {}) {
         //   api.endpoints.admin   { token: '...', operations: ['list','update','delete','render'] }
         for (const [name, ep] of Object.entries(endpoints)) {
             const router = express.Router()
-            router.use(express.json())
+            router.use(express.json({ limit: ep.bodyLimit ?? globalBodyLimit }))
 
             // Operations default to the safer shape when no token is set
             // (read-only) and full access when token-gated. `subscribe`
