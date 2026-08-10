@@ -567,19 +567,38 @@ async function expandAndProject(entity, expand) {
     return { ...result, meta: projectMeta(result.meta) }
 }
 
+// Combine a caller's filter with an endpoint scope. A sift-shaped scope
+// becomes part of the query so sift-to-sql can push it down; a function scope
+// returns the filter untouched and is applied by the caller after the fetch.
+export function scopedFilter(filter, scope) {
+    if (!scope || typeof scope === 'function') return filter
+    const hasFilter = filter && Object.keys(filter).length > 0
+    return hasFilter ? { $and: [filter, scope] } : scope
+}
+
 export async function queryEntities({
     filter, sort, fields, skip, limit, expand, scope,
 } = {}) {
     const effectiveLimit = Math.min(100, Math.max(1, limit ?? 25))
     const effectiveSkip = Math.max(0, skip ?? 0)
 
-    recordQuery(filter)
+    // A sift-shaped `scope` is merged into the filter so it reaches
+    // findEntities, where sift-to-sql pushes what it can into the WHERE
+    // clause. A function `scope` cannot be translated and stays a post-fetch
+    // predicate — which means the query materializes every row the caller's
+    // own filter matched, including the ones the endpoint would then reject.
+    // For an endpoint whose filter is broad (or absent) that is the entire
+    // catalog, per request, and `limit` does not help: it is applied after
+    // this. Prefer the object form.
+    const scopePredicate = typeof scope === 'function' ? scope : null
+    const effectiveFilter = scopedFilter(filter, scope)
+
+    recordQuery(effectiveFilter)
 
     // Materialize via findEntities (which handles sqlite + shim
-    // dispatch + js fallback). scope is a JS predicate applied
-    // post-fetch.
-    let all = await findEntities(filter)
-    if (scope) all = all.filter(scope)
+    // dispatch + js fallback).
+    let all = await findEntities(effectiveFilter)
+    if (scopePredicate) all = all.filter(scopePredicate)
 
     const total = all.length
 

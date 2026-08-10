@@ -407,7 +407,14 @@ export function api(options = {}) {
                 : ['list']
             const allowedOps = new Set(ep.operations ?? defaultOps)
 
-            const query = typeof ep.query === 'function' ? ep.query : null
+            // The endpoint's scope. A sift filter is the form to prefer —
+            // queryEntities merges it into the WHERE clause, so the endpoint
+            // never materializes rows it would only reject. A function still
+            // works and is applied post-fetch, which costs every row the
+            // caller's filter matched.
+            const query = (typeof ep.query === 'function' || (ep.query && typeof ep.query === 'object'))
+                ? ep.query
+                : null
             const pageSize = ep.pageSize ?? globalPageSize
             const renderTimeout = ep.renderTimeout ?? globalRenderTimeout
 

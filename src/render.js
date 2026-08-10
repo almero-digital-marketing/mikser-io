@@ -376,7 +376,10 @@ export function useRenderer(runtime, { defaultTimeout = 30_000 } = {}) {
      * - `catalog: true` (default) — keep the entity in the catalog after
      *   the render. Pass `catalog: false` to prune the catalog row;
      *   useful for on-demand renders where the metadata row would just
-     *   accumulate.
+     *   accumulate. Requires `save: false` — the prune goes through the
+     *   journal, and a DELETE takes the manifest's file cleanup with it,
+     *   so it is only safe for a render that wrote nothing. With
+     *   `save: true` the row is kept and a warning is logged.
      * - `save: true` (default) — write the rendered output to disk at
      *   `<outputFolder>/<entity.destination>`. Pass `save: false` to
      *   skip the final disk write; the bytes still come back via
@@ -439,18 +442,24 @@ export function useRenderer(runtime, { defaultTimeout = 30_000 } = {}) {
         })
 
         if (catalog === false) {
-            // Explicit opt-out: prune the catalog row so it doesn't
-            // accumulate. The rendered output file stays on disk — the
-            // bytes are the work product. We deliberately bypass the
-            // journal/DELETE path here (which would also unlink the file
-            // via the manifest module's cleanup) and splice the entity
-            // out of the in-memory catalog directly. Strict equality so
-            // ambiguous inputs (null, "false", 0) fall through to the
-            // default of keeping the row.
-            const entities = runtime.catalog?.data?.entities
-            if (entities) {
-                const idx = entities.findIndex(e => e.id === result.entity.id)
-                if (idx >= 0) entities.splice(idx, 1)
+            // Prune the row through the journal, so the DELETE lands in
+            // sqlite at onPersist alongside the CREATE that put it there.
+            // Strict equality — null / "false" / 0 keep the row.
+            //
+            // Only when `save` is also false. A DELETE carries the
+            // manifest's file cleanup with it, which unlinks the render's
+            // output; that is correct for an entity that produced no file
+            // and wrong for one that did. `catalog: false, save: true`
+            // therefore keeps its row, and says so rather than dropping
+            // the output on the floor.
+            if (save === false) {
+                await runtime.delete(result.entity)
+            } else {
+                useLogger()?.warn(
+                    'render: catalog:false ignored for %s — it needs save:false, ' +
+                    'because pruning the row also unlinks the rendered output',
+                    result.entity.id,
+                )
             }
         }
 

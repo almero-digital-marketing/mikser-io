@@ -12,13 +12,18 @@ import { useRenderer } from '../../src/render.js'
 // controls. (In a real mikser run lifecycle.js attaches `update` to the
 // runtime singleton on import; tests with a fake runtime supply their
 // own.)
-function createFakeRuntime({ process, update = async () => { }, delete: del = async () => { }, entities = [] } = {}) {
+// Mirrors the real runtime surface render.js touches. `catalog` carries no
+// `data.entities` because the live one has none — it holds cacheInvalidated /
+// export / save (catalog.js). A fixture that invents the shape the code wants
+// will agree with the code and disagree with production, which is how
+// catalog:false came to be a no-op with a passing test.
+function createFakeRuntime({ process, update = async () => { }, delete: del = async () => { } } = {}) {
     return {
         hooks: { completed: [] },
         process,
         update,
         delete: del,
-        catalog: { data: { entities } },
+        catalog: { cacheInvalidated: false, export: async () => [], save: async () => { } },
     }
 }
 
@@ -235,14 +240,15 @@ describe('useRenderer', () => {
         assert.equal(runtime.hooks.completed.length, 0, 'should not leak hooks across batches')
     })
 
-    it('keeps the catalog row by default (matches mikser persist behavior)', async () => {
+    // The pruning contract. Asserted through runtime.delete — the journal
+    // helper — because that is what actually reaches sqlite. Row lifetime is
+    // decided at onPersist, so anything that does not journal does not prune.
+    function pruneHarness() {
         const updates = []
-        // Seed the catalog with an existing entry (simulating that the
-        // persist phase wrote it during the cycle).
-        const entities = [{ id: '/kept', collection: 'documents' }]
+        const deletes = []
         const runtime = createFakeRuntime({
-            entities,
             update: async (e) => updates.push(e),
+            delete: async (e) => deletes.push(e),
             process: async () => {
                 for (const upd of updates) {
                     for (const cb of [...runtime.hooks.completed]) {
@@ -252,40 +258,44 @@ describe('useRenderer', () => {
                 updates.length = 0
             },
         })
+        return { runtime, deletes }
+    }
 
+    it('keeps the catalog row by default (matches mikser persist behavior)', async () => {
+        const { runtime, deletes } = pruneHarness()
         const { render } = useRenderer(runtime)
         await render({ id: '/kept', type: 'document', collection: 'documents' })
-
-        assert.equal(entities.length, 1)
-        assert.equal(entities[0].id, '/kept')
+        assert.deepEqual(deletes, [])
     })
 
-    it('catalog: false — explicit opt-out prunes the catalog row', async () => {
-        const updates = []
-        const entities = [{ id: '/transient', collection: 'documents' }]
-        const runtime = createFakeRuntime({
-            entities,
-            update: async (e) => updates.push(e),
-            process: async () => {
-                for (const upd of updates) {
-                    for (const cb of [...runtime.hooks.completed]) {
-                        await cb({ entity: upd, output: { result: 'rendered' } })
-                    }
-                }
-                updates.length = 0
-            },
-        })
-
+    it('catalog: false + save: false journals a DELETE for the row', async () => {
+        const { runtime, deletes } = pruneHarness()
         const { render } = useRenderer(runtime)
         await render(
             { id: '/transient', type: 'document', collection: 'documents' },
+            { catalog: false, save: false },
+        )
+        assert.equal(deletes.length, 1)
+        assert.equal(deletes[0].id, '/transient')
+    })
+
+    it('catalog: false alone keeps the row — pruning would unlink the output', async () => {
+        const { runtime, deletes } = pruneHarness()
+        const { render } = useRenderer(runtime)
+        await render(
+            { id: '/written', type: 'document', collection: 'documents' },
             { catalog: false },
         )
+        assert.deepEqual(deletes, [], 'a saved render must keep its row rather than lose its file')
+    })
 
-        // Catalog row gone — but no fake "delete" or "process" calls
-        // happened: the cleanup is in-memory removal, not a DELETE journal
-        // entry that would also unlink the file.
-        assert.equal(entities.length, 0)
+    it('ambiguous falsey values are not an opt-out', async () => {
+        for (const catalog of [null, 0, 'false']) {
+            const { runtime, deletes } = pruneHarness()
+            const { render } = useRenderer(runtime)
+            await render({ id: '/x', type: 'document', collection: 'documents' }, { catalog, save: false })
+            assert.deepEqual(deletes, [], `catalog: ${JSON.stringify(catalog)} must not prune`)
+        }
     })
 
     it('save: false — sets entity.options.save = false so layouts.onComplete skips the disk write', async () => {
