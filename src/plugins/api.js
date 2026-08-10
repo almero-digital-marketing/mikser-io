@@ -415,6 +415,20 @@ export function api(options = {}) {
             const query = (typeof ep.query === 'function' || (ep.query && typeof ep.query === 'object'))
                 ? ep.query
                 : null
+
+            // The same scope as a PREDICATE. Two paths hold one entity in
+            // hand and have no query to push a filter into — admitting a
+            // POST /render body, and the graph-subscription filter — so
+            // they have to test it directly. Calling `query` there works
+            // only while the scope is a function; the sift-object form
+            // this endpoint now accepts is not callable, and the failure
+            // is a bare `query is not a function` surfacing from whichever
+            // route touched it first.
+            const matchesScope = typeof ep.query === 'function'
+                ? ep.query
+                : query
+                    ? sift(query)
+                    : null
             const pageSize = ep.pageSize ?? globalPageSize
             const renderTimeout = ep.renderTimeout ?? globalRenderTimeout
 
@@ -614,7 +628,7 @@ export function api(options = {}) {
                                 : null
                             const handle = runtime.refs.subscribeGraph({
                                 filter: (entity) => {
-                                    if (query && !query(entity)) return false
+                                    if (matchesScope && !matchesScope(entity)) return false
                                     if (requestFilter && !requestFilter(entity)) return false
                                     return true
                                 },
@@ -645,7 +659,10 @@ export function api(options = {}) {
                     // is a 500. Same shape used by the POST handler below.
                     const status = err instanceof ExpandError ? err.status : 500
                     if (status >= 500) {
-                        logger.error('Api[%s] list error (%dms): %s', name, Date.now() - t0, err.message)
+                        logger.error(
+                            'Api[%s] list error (%dms): %s\n%s',
+                            name, Date.now() - t0, err.message, err.stack || '(no stack)',
+                        )
                     } else {
                         logger.debug('Api[%s] list rejected (%dms): %s', name, Date.now() - t0, err.message)
                     }
@@ -803,6 +820,10 @@ export function api(options = {}) {
             })
 
             router.post('/render', allow('render'), auth, async (req, res) => {
+                // Hoisted so the catch can name WHICH entity failed. A
+                // render that throws before this is assigned is itself the
+                // finding — it means the body never parsed.
+                let renderId
                 try {
                     // Body shape mirrors the JS API: entity fields at top
                     // level, control flags grouped under `options`. Forwarded
@@ -813,19 +834,42 @@ export function api(options = {}) {
                     //   options.save:    false → skip the final disk write
                     //                            (bytes still in the response)
                     const { options = {}, ...entityShape } = req.body
+                    renderId = entityShape.id
                     // When the endpoint declares a scope, reject anything
                     // outside it BEFORE pushing through the renderer.
-                    if (query && !query(entityShape)) {
+                    if (matchesScope && !matchesScope(entityShape)) {
                         return res.status(403).json({ error: 'Entity is outside this endpoint\'s scope' })
                     }
                     const { output, entity } = await render(entityShape, options)
                     await sendRenderOutput(res, output, entity)
                 } catch (err) {
-                    logger.error('Api[%s] render error: %s', name, err.message)
+                    // useRenderer tags an unrenderable entity (no layout)
+                    // with err.status = 422; everything else is a 500.
+                    const status = err.status ?? 500
+                    if (status >= 500) {
+                        // The stack, not just the message — and this is the
+                        // one route where that is not optional. A render
+                        // reaches here through a renderer, a postprocessor
+                        // chain and any template helper they call, so the
+                        // message is routinely a bare TypeError from a frame
+                        // the operator cannot name. Logging `{error: message}`
+                        // alone leaves bisecting deployed versions as the only
+                        // way to find out where it came from, which is exactly
+                        // as expensive as it sounds. The id says which entity;
+                        // `undefined` there means the body never parsed.
+                        logger.error(
+                            'Api[%s] render error for %s: %s\n%s',
+                            name, renderId ?? '(no id in body)', err.message,
+                            err.stack || '(no stack)',
+                        )
+                    } else {
+                        logger.debug(
+                            'Api[%s] render rejected for %s (%d): %s',
+                            name, renderId ?? '(no id in body)', status, err.message,
+                        )
+                    }
                     if (!res.headersSent) {
-                        // useRenderer tags an unrenderable entity (no layout)
-                        // with err.status = 422; everything else is a 500.
-                        res.status(err.status ?? 500).json({ error: err.message })
+                        res.status(status).json({ error: err.message })
                     }
                 }
             })

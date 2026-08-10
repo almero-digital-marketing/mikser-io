@@ -1185,3 +1185,170 @@ describe('api plugin: request body limit', () => {
         }
     })
 })
+
+// An endpoint scope may be declared as a sift OBJECT (preferred — it pushes
+// down into the WHERE clause) or as a function. `list` reads it as data, but
+// two paths hold a single entity in hand and can only test it as a predicate:
+// POST /render admission, and the graph-subscription filter. Those called the
+// scope directly, which throws `query is not a function` the moment the object
+// form is used — a 500 on a route whose only diagnostic is `{error: message}`.
+describe('api plugin: object-form endpoint scope on /render', () => {
+    const serve = async (apiOptions) => {
+        const { default: express } = await import('express')
+        const app = express()
+        const h = createHarness({
+            options: {
+                app,
+                workingFolder: '/tmp/mikser-scope-render',
+                outputFolder: '/tmp/mikser-scope-render/out',
+            },
+        })
+        h.runtime.process = async () => {
+            const lastUpdate = [...h.journal].reverse().find(e => e.operation === 'update')
+            if (!lastUpdate) return
+            const entry = {
+                entity: { ...lastUpdate.entity, destination: '/en/page.html' },
+                output: { success: true, result: 'ok' },
+            }
+            for (const cb of [...h.runtime.hooks.completed]) await cb(entry)
+        }
+        h.runtime.hooks.completed = h.runtime.hooks.complete
+
+        api(apiOptions)(h.core)
+        await h.runHook('loaded')
+        const server = await new Promise((resolve) => {
+            const s = app.listen(0, () => resolve(s))
+        })
+        return { server, port: server.address().port }
+    }
+
+    const post = (port, body) => fetch(`http://127.0.0.1:${port}/api/default/render`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+    })
+
+    const objectScope = {
+        endpoints: {
+            default: {
+                operations: ['render'],
+                query: { 'meta.href': { $regex: '^/(web|system)' } },
+            },
+        },
+    }
+
+    it('renders an in-scope entity instead of throwing on the object form', async () => {
+        const { server, port } = await serve(objectScope)
+        try {
+            const response = await post(port, {
+                id: '/documents/en/page.md', collection: 'documents', type: 'document',
+                meta: { href: '/web/booking' },
+            })
+            assert.equal(response.status, 200)
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('rejects an out-of-scope entity with 403, not 500', async () => {
+        const { server, port } = await serve(objectScope)
+        try {
+            const response = await post(port, {
+                id: '/documents/en/secret.md', collection: 'documents', type: 'document',
+                meta: { href: '/admin/secret' },
+            })
+            assert.equal(response.status, 403)
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('still honours the function form', async () => {
+        const { server, port } = await serve({
+            endpoints: {
+                default: {
+                    operations: ['render'],
+                    query: e => e.meta?.href?.startsWith('/web'),
+                },
+            },
+        })
+        try {
+            assert.equal((await post(port, {
+                id: '/documents/en/page.md', collection: 'documents', type: 'document',
+                meta: { href: '/web/booking' },
+            })).status, 200)
+            assert.equal((await post(port, {
+                id: '/documents/en/secret.md', collection: 'documents', type: 'document',
+                meta: { href: '/admin/secret' },
+            })).status, 403)
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+})
+
+// A render failure used to log only `err.message` and answer only
+// `{error: message}`. Renders run through a renderer, a postprocessor chain
+// and any template helper those call, so the message is routinely a bare
+// TypeError from a frame nobody can name from the outside — leaving version
+// bisection as the only way to find out where it came from. The stack and the
+// entity id belong in the operator's log.
+describe('api plugin: render failure diagnostics', () => {
+    async function failingRender(thrown, body = {
+        id: '/documents/en/page.md', collection: 'documents', type: 'document',
+    }) {
+        const { default: express } = await import('express')
+        const app = express()
+        const h = createHarness({
+            options: {
+                app,
+                workingFolder: '/tmp/mikser-render-diag',
+                outputFolder: '/tmp/mikser-render-diag/out',
+            },
+        })
+        h.runtime.process = async () => { throw thrown }
+        h.runtime.hooks.completed = h.runtime.hooks.complete
+
+        api({ endpoints: { default: { operations: ['render'] } } })(h.core)
+        await h.runHook('loaded')
+        const server = await new Promise((resolve) => {
+            const s = app.listen(0, () => resolve(s))
+        })
+        try {
+            const response = await fetch(`http://127.0.0.1:${server.address().port}/api/default/render`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify(body),
+            })
+            return { response, logs: h.logs }
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    }
+
+    it('logs the stack and the entity id when a render throws', async () => {
+        const boom = new TypeError("Cannot read properties of undefined (reading 'split')")
+        const { response, logs } = await failingRender(boom)
+
+        assert.equal(response.status, 500)
+        const errors = logs.filter(l => l.level === 'error')
+        assert.equal(errors.length, 1)
+
+        const line = errors[0].args.join(' ')
+        // Which entity, what went wrong, and where it came from.
+        assert.match(line, /\/documents\/en\/page\.md/)
+        assert.match(line, /reading 'split'/)
+        assert.match(line, /TypeError.*\n\s+at /s)
+    })
+
+    it('says so plainly when the body carried no id at all', async () => {
+        // The body failing to parse and the entity being unrenderable are
+        // different faults, and a bare `undefined` in the log reads as
+        // neither — which is exactly how a `Render requested for undefined`
+        // gets mistaken for an engine bug.
+        const { logs } = await failingRender(new Error('nope'), { collection: 'documents' })
+        const line = logs.filter(l => l.level === 'error')[0].args.join(' ')
+        assert.match(line, /\(no id in body\)/)
+        assert.doesNotMatch(line, /undefined/)
+    })
+})
