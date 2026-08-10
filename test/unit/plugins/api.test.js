@@ -1352,3 +1352,93 @@ describe('api plugin: render failure diagnostics', () => {
         assert.doesNotMatch(line, /undefined/)
     })
 })
+
+// The server binds at the end of the loaded phase, before process() has
+// emitted an entity — so without a gate the endpoint spends the whole first
+// build answering against an empty catalog. Renders cannot resolve a layout,
+// and reads return whichever subset happens to exist, which is a wrong answer
+// wearing a 200.
+describe('api plugin: not-ready gate', () => {
+    async function mount({ ready, endpoints, entities = [] }) {
+        const { default: express } = await import('express')
+        const app = express()
+        const h = createHarness({
+            options: { app, workingFolder: '/tmp/mikser-ready', outputFolder: '/tmp/mikser-ready/out' },
+            entities,
+        })
+        h.runtime.ready = ready
+        api({ endpoints })(h.core)
+        await h.runHook('loaded')
+        const server = await new Promise((resolve) => {
+            const s = app.listen(0, () => resolve(s))
+        })
+        return { server, port: server.address().port }
+    }
+
+    const ENDPOINTS = { public: { operations: ['list', 'render'] } }
+
+    it('answers 503 with Retry-After while the first build is still running', async () => {
+        const { server, port } = await mount({
+            ready: false, endpoints: ENDPOINTS,
+            entities: [{ id: '/a.md', type: 'document', meta: {} }],
+        })
+        try {
+            const res = await fetch(`http://127.0.0.1:${port}/api/public/entities`)
+            assert.equal(res.status, 503)
+            assert.equal(res.headers.get('retry-after'), '1')
+            assert.equal((await res.json()).ready, false)
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('gates render too — a build in progress is not a bad request', async () => {
+        // The distinction that matters: 503 invites a retry, 422/500 tells the
+        // caller its request was wrong and to stop.
+        const { server, port } = await mount({ ready: false, endpoints: ENDPOINTS })
+        try {
+            const res = await fetch(`http://127.0.0.1:${port}/api/public/render`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ id: '/x.md', collection: 'documents', type: 'document' }),
+            })
+            assert.equal(res.status, 503)
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('never answers a partial catalog with a 200', async () => {
+        // The failure this exists to prevent: a consumer seeding its routes
+        // from a half-built catalog gets a short list and renders blank pages,
+        // with nothing in any log to say why.
+        const { server, port } = await mount({
+            ready: false, endpoints: ENDPOINTS,
+            entities: [{ id: '/a.md', type: 'document', meta: {} }],
+        })
+        try {
+            const res = await fetch(`http://127.0.0.1:${port}/api/public/entities`)
+            assert.notEqual(res.status, 200)
+            assert.equal(res.headers.get('content-type')?.includes('json'), true)
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('serves normally once the first build has completed', async () => {
+        const { server, port } = await mount({
+            ready: true, endpoints: ENDPOINTS,
+            entities: [
+                { id: '/a.md', type: 'document', meta: {} },
+                { id: '/b.md', type: 'document', meta: {} },
+            ],
+        })
+        try {
+            const res = await fetch(`http://127.0.0.1:${port}/api/public/entities`)
+            assert.equal(res.status, 200)
+            assert.equal((await res.json()).total, 2)
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+})

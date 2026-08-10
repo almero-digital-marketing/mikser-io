@@ -394,6 +394,37 @@ export function api(options = {}) {
         //   api.endpoints.admin   { token: '...', operations: ['list','update','delete','render'] }
         for (const [name, ep] of Object.entries(endpoints)) {
             const router = express.Router()
+
+            // Nothing is served until the first build cycle has finished.
+            //
+            // The server binds at the end of the loaded phase — before
+            // process() has emitted an entity — so without this the endpoint
+            // spends the whole first build answering against an empty catalog.
+            // Renders fail outright (the layouts registry fills during
+            // process()), and reads are worse than that: a list returns
+            // whichever subset exists at that instant, which is a wrong answer
+            // wearing a 200. A consumer seeding its routes from that gets zero
+            // routes and renders blank pages.
+            //
+            // 503, not 4xx, and Retry-After: this is the one honest status
+            // here. It says the request was fine and the server was not, which
+            // is exactly the case, and it is the status every HTTP client
+            // already knows to retry. A 422 or a 500 invites the caller to
+            // treat a transient build as a permanent defect and give up.
+            //
+            // The window is normally sub-second and easy to miss. It stretches
+            // whenever the cache has to be rebuilt from scratch — most notably
+            // after an engine upgrade, where the schema stamp no longer matches
+            // and the catalog is wiped before the rebuild.
+            router.use((req, res, next) => {
+                if (runtime.ready) return next()
+                res.set('Retry-After', '1')
+                res.status(503).json({
+                    error: 'Mikser is still building — the catalog is not ready yet',
+                    ready: false,
+                })
+            })
+
             router.use(express.json({ limit: ep.bodyLimit ?? globalBodyLimit }))
 
             // Operations default to the safer shape when no token is set

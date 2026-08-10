@@ -96,6 +96,11 @@ export function createHarness({
         hooks,
         engine: { logger },
         catalog: catalogStub,
+        // A harness stands in for an engine that has finished its first build —
+        // the entities a test declares are already in the catalog stub. Tests
+        // that want the pre-build window (the api plugin's 503 gate) set this
+        // to false themselves.
+        ready: true,
         // Real lifecycle.js attaches these to the runtime via side-effect
         // on import. The harness doesn't load that module, so reproduce
         // them here against the in-memory journal.

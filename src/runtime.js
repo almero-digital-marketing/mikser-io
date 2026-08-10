@@ -12,6 +12,22 @@ const runtime = {
     journal: [],
     validators: [],
     started: false,
+    // Whether the FIRST build cycle has finished — i.e. whether the catalog
+    // reflects the sources yet. Not the same question as `started`, which is
+    // true from the moment the loaded phase ends, before process() has emitted
+    // a single entity.
+    //
+    // Transports need this. The server binds at the end of the loaded phase, by
+    // design, so that every plugin has registered its routes first — which also
+    // means requests are accepted while the catalog is still empty. A render
+    // arriving then cannot resolve its layout (the layouts registry is filled
+    // during process()), and a list returns whatever subset happens to exist,
+    // which is worse: it is wrong without being an error.
+    //
+    // Set once and never cleared. Later cycles rebuild against a catalog that
+    // is already populated, so they are serveable; flapping this on every watch
+    // rebuild would take the endpoint down for every keystroke.
+    ready: false,
     // Name of the lifecycle phase currently executing — null between
     // phases. Set inside start() / process() / render() etc. before
     // each callHooks(), cleared on completion. Read by mikser-io-mcp's
@@ -85,6 +101,7 @@ const runtime = {
 
         this.started = true
         await this.process()
+        this.ready = true
     },
 
     async process() {
