@@ -319,6 +319,28 @@ onPersist(async () => {
 })
 
 onFinalize(async () => {
+    // Second drain, and the one that closes the cycle.
+    //
+    // onPersist runs BEFORE render, so the drain above only ever sees what
+    // the load and process phases journalled. Everything a render or a
+    // postprocess journals lands after it — and onFinalized's clearJournal()
+    // then throws those entries away unread. The manifest never had this
+    // problem because it drains at onFinalize; the catalog simply had a
+    // shorter view of the same journal.
+    //
+    // The visible symptom was pruning that silently did nothing: a render
+    // asking for `catalog: false` journals its DELETE once the render
+    // resolves, which is past persist, so the row stayed. gpoint's cms
+    // accumulated 1,134 scratch entities carrying 86 MB of render payload,
+    // took its public endpoint from 70ms to 8-15s, and blanked the site.
+    //
+    // Draining again here rather than moving the persist drain: the phases
+    // before render still need their mutations committed at persist (the
+    // render reads the catalog), and journal consumers are named and
+    // independent, so a second pass only ever picks up what the first could
+    // not have seen.
+    await applyJournalMutations()
+
     // Checkpoint the WAL so the main file size stays representative
     // and external tools (mikser --verify on a separate run, debug
     // scripts) see committed state. PASSIVE never blocks readers or

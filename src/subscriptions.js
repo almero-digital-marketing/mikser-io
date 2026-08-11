@@ -35,6 +35,7 @@ import { onFinalize } from './lifecycle.js'
 import { useJournal } from './journal.js'
 import { OPERATION } from './constants.js'
 import { assertExpand, queryEntities } from './catalog.js'
+import sift from 'sift'
 
 // Per-module subscription registry. The dispatcher walks this Set
 // every onFinalize. A Set (not a Map) because subscriptions are keyed
@@ -50,10 +51,34 @@ const opNames = {
     [OPERATION.DELETE]: 'delete',
 }
 
+// A scope may be a predicate OR a sift object, and this is the ONE place that
+// difference is resolved.
+//
+// An endpoint declares its scope once and it then reaches several consumers:
+// queryEntities merges a sift object into the WHERE clause, while a dispatch
+// holding a single entity can only test it. Every consumer that reached for
+// `scope(entity)` therefore worked with the function form and threw
+// `TypeError: scope is not a function` with the object one — which took a
+// production render endpoint down and, because it needed a live subscription to
+// fire at all, reproduced in nothing smaller than production.
+//
+// Compiling here rather than at each call site is the point: a call site that
+// has to remember is a call site that will forget, and the next consumer added
+// inherits the fix instead of the bug.
+function toPredicate(scope) {
+    if (scope == null) return null
+    if (typeof scope === 'function') return scope
+    if (typeof scope === 'object') return sift(scope)
+    throw new Error('subscribe: scope must be a function or a sift filter object')
+}
+
 export function subscribe({ filter, scope, expand, onChange, signal } = {}) {
     if (typeof onChange !== 'function') {
         throw new Error('subscribe: onChange must be a function')
     }
+    // Normalised before it is stored, so both the journal-walk dispatch and the
+    // graph dispatch below see a predicate and neither has to care.
+    scope = toPredicate(scope)
 
     // Reject bad expand at registration. A misconfigured subscriber
     // can otherwise open a session that's expensive to re-dispatch on

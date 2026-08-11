@@ -542,11 +542,27 @@ onFinalize(async () => {
     const m = sharedManifest
 
     // 2a. Stage file unlinks for deleted entities + their children.
+    const deleted = new Set(deletedIds)
     const filesToUnlink = []
+    const staged = new Set()
+    const stageUnlink = (destination) => {
+        if (!destination || staged.has(destination)) return
+        staged.add(destination)
+        filesToUnlink.push({ destination, reason: 'Entity deleted' })
+    }
     for (const id of deletedIds) {
-        const rows = m._stmtSelectByIdOrParent.all(id, id)
-        for (const row of rows) {
-            filesToUnlink.push({ destination: row.destination, reason: 'Entity deleted' })
+        for (const row of m._stmtSelectByIdOrParent.all(id, id)) {
+            stageUnlink(row.destination)
+        }
+    }
+    // Recorded snapshots only describe PRIOR cycles. An entity rendered and
+    // deleted within the same cycle has no row to look its destination up in —
+    // on a first build there is no row at all — so the file it just wrote would
+    // survive both the entity and its snapshot. Take the destination from this
+    // cycle's render entries instead.
+    for (const { entity } of renderedEntries) {
+        if (deleted.has(entity.id) || (entity.parent && deleted.has(entity.parent))) {
+            stageUnlink(entity.destination)
         }
     }
 
@@ -581,8 +597,20 @@ onFinalize(async () => {
     }
 
     // 2e. Hash the rendered output files (async).
+    //
+    // An id can appear in BOTH drains within one cycle — rendered, then
+    // deleted. A render that opts out of the catalog journals its DELETE the
+    // moment it resolves, so the RENDER and the DELETE sit in the same
+    // journal. 3a below drops the snapshot and 3c would insert it straight
+    // back, undoing the delete inside its own transaction. The DELETE wins:
+    // the entity is gone, so nothing may go on describing it. Skipping here
+    // rather than in 3c also saves hashing an output that was just unlinked.
+    //
+    // `parent` is checked too, mirroring _stmtDeleteByIdOrParent — a deleted
+    // parent takes its paginated children's snapshots with it.
     const recordedSnapshots = []
     for (const { entity, deps } of renderedEntries) {
+        if (deleted.has(entity.id) || (entity.parent && deleted.has(entity.parent))) continue
         const outputHash = await hashOutputFile(entity.destination)
         recordedSnapshots.push(buildSnapshot(entity, deps, outputHash))
     }

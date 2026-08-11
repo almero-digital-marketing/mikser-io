@@ -134,3 +134,4 @@ describe('createQuerySubscribers', () => {
         // no throw → ok
     })
 })
+
