@@ -79,4 +79,35 @@ describe('package exports are unambiguous', () => {
         }
         assert.deepEqual(missing, [], 'names dropped from the namespace:\n  ' + missing.join('\n  '))
     })
+
+    it('no explicit export shadows a star-re-exported name', async () => {
+        // The quieter half of the same hazard. index.js also names exports
+        // directly — the plugin and renderer factories. An explicit export WINS
+        // over a star export rather than colliding with it, so nothing errors
+        // and nothing disappears: the name simply resolves to the plugin's
+        // binding while the engine module's version becomes unreachable. A
+        // plugin named `data`, `files` or `json` is one rename away from
+        // swallowing an engine export, and the only symptom would be a consumer
+        // importing something that behaves nothing like its docs.
+        const index = await readFile(new URL('index.js', ROOT), 'utf8')
+        const explicit = []
+        for (const m of index.matchAll(/^export \{([^}]+)\}\s+from\s+'(.+?)'/gm)) {
+            for (const part of m[1].split(',')) {
+                const spec = part.trim()
+                if (!spec) continue
+                const [source, alias] = spec.split(/\s+as\s+/)
+                explicit.push({ name: (alias ?? source).trim(), from: m[2] })
+            }
+        }
+        assert.ok(explicit.length > 10, 'expected index.js to name the plugin and renderer factories')
+
+        const starOwners = new Map(modules.flatMap(({ specifier, names }) =>
+            names.map((name) => [name, specifier])))
+
+        const shadowed = explicit
+            .filter((e) => starOwners.has(e.name))
+            .map((e) => `${e.name} — index.js takes it from ${e.from}, hiding ${starOwners.get(e.name)}`)
+
+        assert.deepEqual(shadowed, [], 'explicit exports hiding module exports:\n  ' + shadowed.join('\n  '))
+    })
 })
