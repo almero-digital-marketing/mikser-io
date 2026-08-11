@@ -61,8 +61,6 @@ import { filterKey } from './track.js'
 import { findById } from './catalog.js'
 import { useDatabase, registerSchema } from './database/index.js'
 
-export { inputHashOf } from './utils.js'
-
 // Schema registration. Applied at db.open(). PRIMARY KEY (id,
 // destination) — leading id column means `WHERE id = ?` queries use the
 // PK index, no separate id index needed. Parent index is for pagination

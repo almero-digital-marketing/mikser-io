@@ -41,7 +41,7 @@ describe('package exports are unambiguous', () => {
         )
     })
 
-    it('no name is exported by two star-re-exported modules', () => {
+    it('every exported name has exactly one owning module', () => {
         const owners = new Map()
         for (const { specifier, ns, names } of modules) {
             for (const name of names) {
@@ -50,20 +50,29 @@ describe('package exports are unambiguous', () => {
             }
         }
 
+        // One name, one module — no exceptions. Two modules exporting the same
+        // name splits into two outcomes, and the strict rule is here because
+        // only one of them announces itself:
+        //
+        //   different bindings — ESM excludes the name from the namespace
+        //     entirely. Silent. This is the one that took a production render
+        //     endpoint down.
+        //   same binding (a re-export) — resolves fine, so it is not a bug on
+        //     its own. It is still banned: it makes a name look like it has two
+        //     homes, and the day the modules drift apart it becomes the case
+        //     above with no diff to point at. Import from the module that
+        //     defines it.
         const clashes = [...owners]
-            .filter(([, from]) =>
-                // Ambiguity is about BINDINGS, not names. manifest.js re-exports
-                // utils.js's `inputHashOf` — one binding reached two ways, which
-                // the spec resolves happily. Only distinct values are a clash.
-                from.length > 1 && new Set(from.map((f) => f.value)).size > 1,
-            )
-            .map(([name, from]) => `${name} — exported by ${from.map((f) => f.specifier).join(' and ')}`)
+            .filter(([, from]) => from.length > 1)
+            .map(([name, from]) => {
+                const distinct = new Set(from.map((f) => f.value)).size > 1
+                return `${name} — ${from.map((f) => f.specifier).join(' and ')}` +
+                    (distinct
+                        ? ' (different bindings: this name is GONE from the namespace)'
+                        : ' (re-export: import it from the module that defines it)')
+            })
 
-        assert.deepEqual(
-            clashes,
-            [],
-            'these names are silently absent from the mikser-io namespace:\n  ' + clashes.join('\n  '),
-        )
+        assert.deepEqual(clashes, [], 'names claimed by more than one module:\n  ' + clashes.join('\n  '))
     })
 
     it('every name a module exports survives into the package namespace', async () => {
