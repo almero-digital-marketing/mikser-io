@@ -3,6 +3,7 @@ import { access, writeFile, mkdir, rm } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import _ from 'lodash'
 import sift from 'sift'
+import { resolveAuth, requireAuth, hasCapability, reachabilityOf } from '../auth.js'
 import { useRenderer } from '../render.js'
 import { mimeForEntity, isLoopback, ExpandError, useCollection } from '../utils.js'
 import { registerRoute } from '../routes.js'
@@ -447,6 +448,55 @@ export function api(options = {}) {
                 ? ep.query
                 : null
 
+            // Principal-bound scope (ADR-0012). A credential may carry its
+            // OWN row filter — "gpoint-web sees only /web" — which is ANDed
+            // with the endpoint's, never ORed: a credential can narrow what
+            // an endpoint exposes, never widen it. That direction is the
+            // whole safety property, so the combination is $and and there is
+            // no code path that produces anything else.
+            //
+            // Both halves stay sift OBJECTS so queryEntities can push them
+            // into the WHERE clause. A function scope is applied post-fetch
+            // — the form that pinned a box at 111% CPU on 1,367 entities —
+            // so a principal scope is REQUIRED to be an object, and a
+            // function endpoint scope keeps its post-fetch path while the
+            // principal's half still pushes down.
+            const scopeFor = (req) => {
+                const principal = req.principal?.scope
+                if (!principal) return { query, matchesScope, principalScoped: false }
+                if (typeof principal !== 'object' || Array.isArray(principal)) {
+                    throw new Error(
+                        'api: a principal scope must be a sift filter object — ' +
+                        'a function cannot be pushed into the query and would be ' +
+                        'applied to every row the caller matched'
+                    )
+                }
+                // queryEntities takes ONE scope, so the two halves have to
+                // become one value of a form it understands:
+                //
+                //   object endpoint scope → { $and: [ … ] }, fully pushed
+                //     into the WHERE clause. The form to prefer, and the
+                //     one gpoint uses.
+                //   function endpoint scope → one combined function, applied
+                //     post-fetch. No pushdown, but that endpoint already
+                //     chose post-fetch; the principal's half just narrows it
+                //     further. Returning the object here instead would
+                //     SILENTLY DROP the endpoint's own filter.
+                const principalMatches = sift(principal)
+                const merged = typeof query === 'function'
+                    ? (entity) => query(entity) && principalMatches(entity)
+                    : query
+                        ? { $and: [query, principal] }
+                        : principal
+                return {
+                    query: merged,
+                    matchesScope: matchesScope
+                        ? (entity) => matchesScope(entity) && principalMatches(entity)
+                        : principalMatches,
+                    principalScoped: true,
+                }
+            }
+
             // The same scope as a PREDICATE. Two paths hold one entity in
             // hand and have no query to push a filter into — admitting a
             // POST /render body, and the graph-subscription filter — so
@@ -537,29 +587,37 @@ export function api(options = {}) {
             // require the token everywhere, run mikser bound to a
             // non-loopback interface only (or behind a proxy that
             // doesn't forward loopback origin).
-            const expectedAuth = ep.token ? `Bearer ${ep.token}` : null
-            const auth = (req, res, next) => {
-                const presented = req.headers.authorization
-                if (expectedAuth && presented && presented !== expectedAuth) {
-                    return res.status(401).json({ error: 'Unauthorized' })
-                }
-                if (presented === expectedAuth && expectedAuth) {
-                    return next()   // valid token from anywhere
-                }
-                if (ep.allowRemote || isLoopback(req.ip)) {
-                    return next()
-                }
-                res.status(403).json({
-                    error: expectedAuth
-                        ? 'Token required from non-loopback sources'
-                        : 'Endpoint accepts loopback connections only — configure a token or set allowRemote: true to enable remote access',
-                })
-            }
+            // The uniform rule now lives in the engine (ADR-0012), so this
+            // endpoint, mcp's and forms' cannot drift apart again. `auth`
+            // takes any verifier — a list of them, HTTP Basic, OAuth — while
+            // `token` keeps the trusted-local-host model it always had.
+            const verifier      = resolveAuth(ep.auth ?? ep.token)
+            const trustLoopback = !ep.auth && !!ep.token
+            const auth = requireAuth(verifier, { allowRemote: ep.allowRemote, trustLoopback, logger })
 
+            // ORDER IS LOAD-BEARING: every route lists `auth` BEFORE
+            // `allow(op)`. The capability half reads req.principal, which
+            // only exists once auth has run — with the old order it read
+            // undefined, and an undefined principal passes every check.
+            // That is a silent bypass, not a failure, so it stays written
+            // down rather than remembered.
+            //
+            // Reach is the INTERSECTION of two independent limits: what the
+            // endpoint exposes, and what the caller's credential carries. A
+            // credential declaring `api:delete` still cannot delete on an
+            // endpoint whose `operations` omits it, and a bare token (which
+            // declares nothing, capabilities === null) is bounded by the
+            // endpoint alone — which is exactly how every endpoint behaved
+            // before this existed.
             const allow = (op) => (req, res, next) => {
                 if (!allowedOps.has(op)) {
                     return res.status(403).json({
                         error: `Operation '${op}' is not allowed on endpoint '${name}'`,
+                    })
+                }
+                if (!hasCapability(req.principal, `api:${op}`)) {
+                    return res.status(403).json({
+                        error: `Your credential does not carry 'api:${op}'`,
                     })
                 }
                 next()
@@ -572,7 +630,7 @@ export function api(options = {}) {
             // per endpoint so per-endpoint renderTimeout overrides land.
             const { render } = useRenderer(runtime, { defaultTimeout: renderTimeout })
 
-            router.get('/entities', allow('list'), auth, async (req, res) => {
+            router.get('/entities', auth, allow('list'), async (req, res) => {
                 const t0 = Date.now()
                 try {
                     const parsed = parseQueryString(req.query)
@@ -599,7 +657,7 @@ export function api(options = {}) {
                         skip,
                         limit,
                         expand: parsed.expand,
-                        scope: query,
+                        scope: scopeFor(req).query,
                     }))
 
                     const page = Math.floor(skip / limit) + 1
@@ -618,7 +676,20 @@ export function api(options = {}) {
                     // nginx's `try_files` sees, no hashing on either
                     // side. See the caching docs for the nginx config
                     // that wires the failover.
-                    if (cacheEnabled && runtime.options.outputFolder) {
+                    // NEVER cache a principal-scoped response. The cache
+                    // mirrors the request URL into the OUTPUT folder, where
+                    // nginx try_files serves it without ever reaching this
+                    // process — so one caller's scoped rows would be handed
+                    // to every later caller of the same URL, unauthenticated.
+                    // The cache key is endpoint+querystring by design (it has
+                    // to match what nginx sees), so it cannot be salted with
+                    // the principal; the only safe answer is not to write.
+                    if (cacheEnabled && scopeFor(req).principalScoped) {
+                        logger.debug(
+                            'Api[%s] response not cached — caller %j carries its own scope',
+                            name, req.principal?.subject ?? 'unknown')
+                    }
+                    if (cacheEnabled && !scopeFor(req).principalScoped && runtime.options.outputFolder) {
                         const url = req.originalUrl || req.url || ''
                         const qIdx = url.indexOf('?')
                         const rawQueryString = qIdx >= 0 ? url.slice(qIdx + 1) : ''
@@ -704,7 +775,7 @@ export function api(options = {}) {
             // POST /entities/query — body-based query for anything that
             // doesn't fit cleanly in a URL: $and/$or, nested operators,
             // regex, projections, etc. Same shape as a Mongo find.
-            router.post('/entities/query', allow('list'), auth, async (req, res) => {
+            router.post('/entities/query', auth, allow('list'), async (req, res) => {
                 const t0 = Date.now()
                 try {
                     const { filter = {}, sort, fields, expand, page: rawPage = 1, limit: rawLimit, skip: rawSkip } = req.body ?? {}
@@ -716,7 +787,7 @@ export function api(options = {}) {
                         fields: resolveFields(fields),
                         skip, limit,
                         expand,
-                        scope: query,
+                        scope: scopeFor(req).query,
                     })
 
                     const page = Math.floor(skip / limit) + 1
@@ -759,7 +830,7 @@ export function api(options = {}) {
             // whose onChange writes SSE frames to `res`. subscribe()
             // throws on invalid input; we wrap it so the error becomes a
             // 400 BEFORE SSE headers are sent.
-            router.get('/entities/subscribe', allow('subscribe'), auth, (req, res) => {
+            router.get('/entities/subscribe', auth, allow('subscribe'), (req, res) => {
                 let filterFn = null
                 let expand = null
                 try {
@@ -782,7 +853,7 @@ export function api(options = {}) {
                 let sub
                 try {
                     sub = subscribe({
-                        scope:  query,
+                        scope:  scopeFor(req).query,
                         filter: filterFn,
                         expand,
                         onChange: ({ operation, entity, causedBy }) => {
@@ -828,7 +899,7 @@ export function api(options = {}) {
                 )
             })
 
-            router.put('/entities', allow('update'), auth, async (req, res) => {
+            router.put('/entities', auth, allow('update'), async (req, res) => {
                 try {
                     const { collection, relativePath, content = '' } = req.body
                     await useCollection(runtime, collection).write(relativePath, content)
@@ -839,7 +910,7 @@ export function api(options = {}) {
                 }
             })
 
-            router.delete('/entities', allow('delete'), auth, async (req, res) => {
+            router.delete('/entities', auth, allow('delete'), async (req, res) => {
                 try {
                     const { collection, relativePath } = req.body
                     await useCollection(runtime, collection).remove(relativePath)
@@ -850,7 +921,7 @@ export function api(options = {}) {
                 }
             })
 
-            router.post('/render', allow('render'), auth, async (req, res) => {
+            router.post('/render', auth, allow('render'), async (req, res) => {
                 // Hoisted so the catch can name WHICH entity failed. A
                 // render that throws before this is assigned is itself the
                 // finding — it means the body never parsed.
@@ -868,7 +939,8 @@ export function api(options = {}) {
                     renderId = entityShape.id
                     // When the endpoint declares a scope, reject anything
                     // outside it BEFORE pushing through the renderer.
-                    if (matchesScope && !matchesScope(entityShape)) {
+                    const { matchesScope: inScope } = scopeFor(req)
+                    if (inScope && !inScope(entityShape)) {
                         return res.status(403).json({ error: 'Entity is outside this endpoint\'s scope' })
                     }
                     const { output, entity } = await render(entityShape, options)

@@ -1,10 +1,11 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, writeFile, rm, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import { api, sendRenderOutput } from '../../../src/plugins/api.js'
+import { bearer } from '../../../src/auth.js'
 import { createHarness } from '../plugin-harness.js'
 
 // Lightweight fake of the Express `res` object — captures enough state for
@@ -1439,6 +1440,174 @@ describe('api plugin: not-ready gate', () => {
             assert.equal((await res.json()).total, 2)
         } finally {
             await new Promise((r) => server.close(r))
+        }
+    })
+})
+
+describe('api plugin: principal-bound scope (ADR-0012)', () => {
+    // A credential that carries its OWN row filter, on top of whatever the
+    // endpoint declares. `bearer({ scope })` is the engine's shape for it.
+    async function mount({ endpoints, entities = [], outputFolder }) {
+        const { default: express } = await import('express')
+        const app = express()
+        const h = createHarness({
+            options: { app, workingFolder: '/tmp/mikser-pscope', outputFolder },
+            entities,
+        })
+        api({ endpoints })(h.core)
+        await h.runHook('loaded')
+        const server = await new Promise((resolve) => {
+            const s = app.listen(0, () => resolve(s))
+        })
+        return { server, port: server.address().port, h }
+    }
+
+    const CATALOG = [
+        { id: '/web/a.md',       type: 'document', meta: { href: '/web/a',       published: true } },
+        { id: '/web/b.md',       type: 'document', meta: { href: '/web/b',       published: false } },
+        { id: '/franchise/c.md', type: 'document', meta: { href: '/franchise/c', published: true } },
+        { id: '/private/d.md',   type: 'document', meta: { href: '/private/d',   published: true } },
+    ]
+
+    const listAs = async (port, token) => {
+        const res = await fetch(`http://127.0.0.1:${port}/api/content/entities`, {
+            headers: token ? { authorization: `Bearer ${token}` } : {},
+        })
+        return { status: res.status, body: await res.json() }
+    }
+
+    it('narrows the endpoint scope — never widens it', async () => {
+        const { server, port } = await mount({
+            endpoints: {
+                content: {
+                    // Endpoint ceiling: the web + franchise slice.
+                    query: { 'meta.href': { $regex: '^/(web|franchise)' } },
+                    operations: ['list'],
+                    auth: [
+                        bearer({ token: 'web-tok', subject: 'gpoint-web',
+                                 scope: { 'meta.href': { $regex: '^/web' } } }),
+                        // Declares a scope reaching OUTSIDE the endpoint's —
+                        // the $and must still keep /private out.
+                        bearer({ token: 'greedy-tok', subject: 'greedy',
+                                 scope: { 'meta.href': { $regex: '^/(web|private)' } } }),
+                        bearer({ token: 'plain-tok', subject: 'plain' }),
+                    ],
+                },
+            },
+            entities: CATALOG,
+        })
+        try {
+            const web = await listAs(port, 'web-tok')
+            assert.deepEqual(web.body.items.map(i => i.id).sort(), ['/web/a.md', '/web/b.md'])
+
+            // greedy asked for /web + /private; the endpoint allows /web +
+            // /franchise; the intersection is /web only.
+            const greedy = await listAs(port, 'greedy-tok')
+            assert.deepEqual(greedy.body.items.map(i => i.id).sort(), ['/web/a.md', '/web/b.md'])
+
+            // An unscoped credential still sees the endpoint's full slice.
+            const plain = await listAs(port, 'plain-tok')
+            assert.deepEqual(plain.body.items.map(i => i.id).sort(),
+                             ['/franchise/c.md', '/web/a.md', '/web/b.md'])
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('applies a principal scope when the endpoint declares none', async () => {
+        const { server, port } = await mount({
+            endpoints: {
+                content: {
+                    operations: ['list'],
+                    auth: bearer({ token: 'fr-tok', subject: 'franchise',
+                                   scope: { 'meta.href': { $regex: '^/franchise' } } }),
+                },
+            },
+            entities: CATALOG,
+        })
+        try {
+            const out = await listAs(port, 'fr-tok')
+            assert.deepEqual(out.body.items.map(i => i.id), ['/franchise/c.md'])
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('composes with a FUNCTION endpoint scope, keeping both halves', async () => {
+        const { server, port } = await mount({
+            endpoints: {
+                content: {
+                    query: (e) => e.meta?.published === true,     // post-fetch
+                    operations: ['list'],
+                    auth: bearer({ token: 'web-tok',
+                                   scope: { 'meta.href': { $regex: '^/web' } } }),  // pushed down
+                },
+            },
+            entities: CATALOG,
+        })
+        try {
+            const out = await listAs(port, 'web-tok')
+            // /web/a is published; /web/b is not; everything else is out of
+            // the principal's scope.
+            assert.deepEqual(out.body.items.map(i => i.id), ['/web/a.md'])
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('refuses a function principal scope — it could not be pushed into the query', async () => {
+        const { server, port } = await mount({
+            endpoints: {
+                content: {
+                    operations: ['list'],
+                    auth: bearer({ token: 'fn-tok', scope: (e) => e.meta?.published }),
+                },
+            },
+            entities: CATALOG,
+        })
+        try {
+            const res = await fetch(`http://127.0.0.1:${port}/api/content/entities`, {
+                headers: { authorization: 'Bearer fn-tok' },
+            })
+            assert.equal(res.status, 500)
+        } finally {
+            await new Promise((r) => server.close(r))
+        }
+    })
+
+    it('never writes a principal-scoped response to the shared query cache', async () => {
+        // The cache mirrors the request URL into the output folder, where
+        // nginx serves it without reaching this process. Caching a scoped
+        // response there would hand one caller's rows to everyone.
+        const dir = await mkdtemp(path.join(tmpdir(), 'mikser-pscope-cache-'))
+        const { server, port } = await mount({
+            endpoints: {
+                content: {
+                    operations: ['list'],
+                    cache: true,
+                    auth: [
+                        bearer({ token: 'scoped-tok', subject: 'scoped',
+                                 scope: { 'meta.href': { $regex: '^/web' } } }),
+                        bearer({ token: 'open-tok', subject: 'open' }),
+                    ],
+                },
+            },
+            entities: CATALOG,
+            outputFolder: dir,
+        })
+        try {
+            await listAs(port, 'scoped-tok')
+            await new Promise(r => setTimeout(r, 60))   // fire-and-forget write
+            const afterScoped = await readdir(dir).catch(() => [])
+            assert.deepEqual(afterScoped, [], 'a scoped response must leave no cache file')
+
+            await listAs(port, 'open-tok')
+            await new Promise(r => setTimeout(r, 60))
+            const afterOpen = await readdir(dir).catch(() => [])
+            assert.ok(afterOpen.length > 0, 'an unscoped response still caches')
+        } finally {
+            await new Promise((r) => server.close(r))
+            await rm(dir, { recursive: true, force: true })
         }
     })
 })
