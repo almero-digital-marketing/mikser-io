@@ -82,8 +82,12 @@ export function resolveAuth(config) {
         return verifiers.length === 1 ? verifiers[0] : anyOf(...verifiers)
     }
     if (typeof config === 'string') return bearer({ token: config })
-    if (typeof config === 'function') return { name: 'custom', verify: config }
+    // An object carrying verify() wins BEFORE the bare-function branch: a
+    // verifier may itself be a callable (mikser-io-auth's auth() is both the
+    // plugin and the verifier), and treating that as a raw verify function
+    // would call the plugin with a request.
     if (typeof config.verify === 'function') return config
+    if (typeof config === 'function') return { name: 'custom', verify: config }
     if (config.token) return bearer({ token: config.token })
     return null
 }
