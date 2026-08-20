@@ -86,3 +86,28 @@ describe('server config is read after the config is loaded', () => {
         )
     })
 })
+
+describe('server.requestTimeout', () => {
+    it('is exposed as a config knob because only the engine holds the http.Server', async () => {
+        // Node caps a request at 5 minutes, which for an upload surface is a
+        // size limit in disguise. A plugin cannot reach past app.listen() to
+        // raise it, so server.js does it and publishes the server.
+        const src = await readFile(new URL('../../src/server.js', import.meta.url), 'utf8')
+        assert.match(src, /runtime\.config\.server\?\.requestTimeout/)
+        assert.match(src, /httpServer\.requestTimeout = requestTimeout/)
+        assert.match(src, /runtime\.options\.httpServer = httpServer/)
+    })
+
+    it('clamps headersTimeout so Node does not silently override it', async () => {
+        // headersTimeout above requestTimeout makes Node warn and use the
+        // smaller one, which would look like the setting being ignored.
+        const src = await readFile(new URL('../../src/server.js', import.meta.url), 'utf8')
+        assert.match(src, /headersTimeout = Math\.min\(httpServer\.headersTimeout, requestTimeout\)/)
+    })
+
+    it('treats 0 as "no cap" rather than "immediate timeout"', async () => {
+        const src = await readFile(new URL('../../src/server.js', import.meta.url), 'utf8')
+        assert.match(src, /requestTimeout !== 0/)
+        assert.match(src, /requestTimeout != null/)
+    })
+})

@@ -175,7 +175,7 @@ export function setupServer() {
             runtime.options.app.use(express.static(runtime.options.outputFolder))
 
             await new Promise(resolve => {
-                runtime.options.app.listen(runtime.options.port, () => {
+                const httpServer = runtime.options.app.listen(runtime.options.port, () => {
                     // Public URL wins for operator-clickable log lines —
                     // a reverse-proxy/tunnel/ngrok setup binds locally but
                     // is reached externally at runtime.options.url. Fall
@@ -184,6 +184,36 @@ export function setupServer() {
                     logger.info('Server listening: %s', externalUrl)
                     resolve()
                 })
+
+                // Node caps a single request at 5 minutes (requestTimeout,
+                // default 300_000ms), which is not a timeout in the usual
+                // sense here — it is an upload size limit expressed in
+                // seconds. A large file over a slow link is indistinguishable
+                // from a stalled request, so it gets cut off, and the caller
+                // sees a truncated write rather than an error it can read.
+                //
+                // Only reachable from the http.Server, which the engine owns
+                // — a plugin that mounts an upload surface (webdav, forms with
+                // large attachments) cannot raise it for itself. Hence a
+                // config knob here rather than in the plugin.
+                //
+                // `0` disables the cap entirely. That is a deliberate choice
+                // for a trusted-network build server and a bad one facing the
+                // internet, where it removes the only bound on how long a
+                // client can hold a connection open doing nothing.
+                const requestTimeout = runtime.config.server?.requestTimeout
+                if (requestTimeout != null) {
+                    httpServer.requestTimeout = requestTimeout
+                    // headersTimeout must not exceed requestTimeout, or Node
+                    // warns and the shorter one silently wins. Keep it at the
+                    // smaller of its default and the new request timeout.
+                    if (requestTimeout !== 0) {
+                        httpServer.headersTimeout = Math.min(httpServer.headersTimeout, requestTimeout)
+                    }
+                    logger.info('Server request timeout: %s',
+                        requestTimeout === 0 ? 'disabled' : `${requestTimeout}ms`)
+                }
+                runtime.options.httpServer = httpServer
             })
         })
     })
