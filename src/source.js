@@ -43,7 +43,7 @@ import { globby } from 'globby'
 import pMap from 'p-map'
 import runtime from './runtime.js'
 import { ACTION } from './constants.js'
-import { checksum as fileChecksum } from './utils.js'
+import { checksum as fileChecksum, junkIgnore } from './utils.js'
 import { findById, findEntities, checksumsByCollection } from './catalog.js'
 import { useDatabase } from './database/index.js'
 
@@ -358,7 +358,11 @@ export function useSource(core, options) {
             cwd: absFolder,
             absolute: true,
             onlyFiles: true,
-            ignore,
+            // OS and file-manager litter first, so a plugin's own `ignore`
+            // adds to it rather than having to restate it. globby's
+            // dot: false default already hid the macOS ones; Thumbs.db and
+            // desktop.ini are not dotfiles and were being scanned.
+            ignore: [...junkIgnore(), ...ignore],
         })
         if (phase === 'import') trackProgress(progressLabel, files.length)
         const scanStats = { emitted: 0, skipped: 0, deleted: 0 }

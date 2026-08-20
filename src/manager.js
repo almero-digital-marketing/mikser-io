@@ -4,6 +4,7 @@ import cron from 'node-cron'
 import { onProcess, onFinalized } from './lifecycle.js'
 import { useLogger } from './engine.js'
 import { ACTION } from './constants.js'
+import { junkFilter } from './utils.js'
 
 const tasks = []
 
@@ -67,7 +68,13 @@ export async function deletedHook(name, context) {
     }
 }
 
-export function watch(name, folder, options = { interval: 1000, binaryInterval: 3000, ignored: /[\/\\]\./, ignoreInitial: true }) {
+// Dot-prefixed anything, plus the OS/file-manager litter that is NOT
+// dot-prefixed — Thumbs.db and desktop.ini were measurably being watched.
+// A function rather than a regex because chokidar 4+ dropped glob support in
+// `ignored` and a function is the one form that has stayed stable.
+const ignoreJunk = (filePath) => /[/\\]\./.test(filePath) || junkFilter()(filePath)
+
+export function watch(name, folder, options = { interval: 1000, binaryInterval: 3000, ignored: ignoreJunk, ignoreInitial: true }) {
     if (runtime.options.watch !== true) return
 
     chokidar.watch(folder, options)
