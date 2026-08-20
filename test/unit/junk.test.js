@@ -94,3 +94,36 @@ describe('wiring', () => {
         assert.match(src, /ignored: ignoreJunk/)
     })
 })
+
+describe('registerJunk — plugins contribute their own artifacts', () => {
+    it('adds to both the scan patterns and the watch predicate', async () => {
+        // The engine's list is OS litter and stays that way; it has no
+        // business knowing what a library's sidecar file is called. This is
+        // the mechanism that lets the plugin say so.
+        const { registerJunk } = await import('../../src/utils.js')
+        assert.equal(junkFilter()('a/page.md.example-sidecar'), false)
+        registerJunk({ ignore: ['**/*.example-sidecar'], match: /\.example-sidecar$/ })
+        assert.ok(junkIgnore().includes('**/*.example-sidecar'))
+        assert.equal(junkFilter()('a/page.md.example-sidecar'), true)
+        assert.equal(junkFilter()('a/page.md'), false)
+    })
+
+    it('registrations survive an array override in config', async () => {
+        // An operator narrowing the OS list did not ask to start importing a
+        // library's sidecar files.
+        runtime.config = { ...runtime.config, junk: ['**/*.weird'] }
+        assert.ok(junkIgnore().includes('**/*.example-sidecar'))
+        assert.ok(junkIgnore().includes('**/*.weird'))
+    })
+
+    it('but junk: false still turns everything off', () => {
+        runtime.config = { ...runtime.config, junk: false }
+        assert.deepEqual(junkIgnore(), [])
+        assert.equal(junkFilter()('a/page.md.example-sidecar'), false)
+    })
+
+    it('rejects a match that is neither RegExp nor function', async () => {
+        const { registerJunk } = await import('../../src/utils.js')
+        assert.throws(() => registerJunk({ match: 'a string' }), /RegExp or a function/)
+    })
+})

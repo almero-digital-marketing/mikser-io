@@ -911,17 +911,46 @@ export const JUNK_IGNORE = [
     '**/.~lock.*#',
 ]
 
+// Plugins contribute their own artifacts.
+//
+// The built-in list is OS and file-manager litter, and it stays that way —
+// the engine has no business knowing what a particular library's sidecar file
+// is called. What it can provide is the mechanism: a plugin that writes
+// metadata next to content says so, and both the scan and the watcher honour
+// it. (mikser-io-webdav registers `*.nephelemeta` for exactly this reason:
+// the collection-level file is dot-prefixed and was already invisible, while
+// the per-file one — `page.md.nephelemeta` — is not, and was measurably
+// becoming an entity.)
+const registered = { ignore: [], match: [] }
+
+export function registerJunk({ ignore = [], match } = {}) {
+    registered.ignore.push(...(Array.isArray(ignore) ? ignore : [ignore]))
+    for (const m of (Array.isArray(match) ? match : match ? [match] : [])) {
+        if (m instanceof RegExp) registered.match.push((name) => m.test(name))
+        else if (typeof m === 'function') registered.match.push(m)
+        else throw new Error('registerJunk: `match` must be a RegExp or a function')
+    }
+}
+
 // `junk: false` in config turns the filter off entirely; an array replaces
-// the defaults. One knob, because the default should be right.
+// the built-in list. Plugin registrations survive an array override — an
+// operator narrowing the OS list did not ask to start importing a library's
+// sidecar files.
 export function junkIgnore() {
     const configured = runtime.config?.junk
     if (configured === false) return []
-    if (Array.isArray(configured)) return configured
-    return JUNK_IGNORE
+    if (Array.isArray(configured)) return [...configured, ...registered.ignore]
+    return [...JUNK_IGNORE, ...registered.ignore]
 }
 
 export function junkFilter() {
     const configured = runtime.config?.junk
     if (configured === false) return () => false
-    return isJunkPath
+    if (!registered.match.length) return isJunkPath
+    return (filePath) => {
+        if (isJunkPath(filePath)) return true
+        if (typeof filePath !== 'string') return false
+        const name = filePath.split(/[/\\]/).pop()
+        return registered.match.some(test => test(name))
+    }
 }
