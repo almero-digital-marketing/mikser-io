@@ -297,6 +297,9 @@ export function createManifest(db) {
     const stmtClearFailure = db.prepare(`
         DELETE FROM mikser_failures WHERE id = ? AND destination = ?
     `)
+    const stmtClearFailuresForId = db.prepare(`
+        DELETE FROM mikser_failures WHERE id = ?
+    `)
     const stmtFailuresFor = db.prepare(`
         SELECT id, destination, error, context, firstFailedAt, lastFailedAt, attempts
         FROM mikser_failures WHERE id = ?
@@ -579,6 +582,24 @@ export function createManifest(db) {
                 context: context ?? null,
                 at: at ?? Date.now(),
             })
+        },
+
+        // The entity is gone, so every failure recorded against it is
+        // irrelevant regardless of which destination it was recorded at.
+        //
+        // Deliberately NOT a foreign key with ON DELETE CASCADE, which is how
+        // mikser_refs handles the same situation: a render task's id is not
+        // guaranteed to be a row in mikser_entities — snapshots carry a
+        // `parent` precisely because paginated children render under derived
+        // ids — so an FK would make recordFailure throw from inside the
+        // handler that exists to report a render error, turning a reported
+        // failure into a crash.
+        //
+        // A rename presents as delete + create under a new id, so this covers
+        // that residue too: the old id's rows go with the delete.
+        clearFailures(id) {
+            if (!id) return
+            stmtClearFailuresForId.run(id)
         },
 
         // A render succeeded, so whatever was recorded about it failing is

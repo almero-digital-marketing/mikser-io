@@ -226,6 +226,13 @@ async function applyJournalMutations() {
                     logger.trace('Database %s %s: %s', entity.collection, operation, entity.id)
                     stmtDelete.run(entity.id)
                     // FK ON DELETE CASCADE handles mikser_refs cleanup.
+                    // mikser_failures is cleared explicitly rather than by
+                    // cascade — see manifest.clearFailures for why it cannot
+                    // be a foreign key. Left behind, one row for a deleted
+                    // entity keeps the dispatch set non-empty for the life of
+                    // the database, so layouts' idle-cycle early-out never
+                    // fires again.
+                    runtime.manifest?.clearFailures(entity.id)
                     cacheEvict(entity.id)
                     break
             }

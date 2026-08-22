@@ -112,6 +112,30 @@ describe('a failed render is retried', () => {
         assert.equal(await readFile(path.join(workdir, 'out', 'page-a.html'), 'utf8'), goodOutput)
     })
 
+    it('forgets a failing entity that is deleted', async () => {
+        // The marker drains on success, but an entity that is deleted while
+        // failing will never render again — so nothing would ever clear its
+        // row. One immortal row keeps layouts' dispatch set non-empty for the
+        // life of the database, so its idle-cycle early-out never fires
+        // again, and the count only ever grows.
+        //
+        // Cleared on the catalog's DELETE path rather than by a foreign key:
+        // a render task's id is not guaranteed to be a row in
+        // mikser_entities (paginated children render under derived ids), so
+        // an FK would make recordFailure throw from inside the handler that
+        // exists to report a render error.
+        const { report: before } = await build()
+        assert.equal(before.summary.errors, 2, 'both pages are failing')
+
+        await rm(path.join(workdir, 'documents', 'page-a.md'))
+        const { report: after } = await build()
+        assert.equal(after.summary.errors, 1, 'the deleted entity stops being reported')
+        assert.ok(
+            !after.errors.some(e => e.id === '/documents/page-a.md'),
+            'and is not named among them',
+        )
+    })
+
     it('recovers on its own once the partial is back', async () => {
         // No --force, no touch of the documents: the retry set is what brings
         // them back, and it drains itself on success.
@@ -119,7 +143,10 @@ describe('a failed render is retried', () => {
         const { code, report } = await build()
         assert.equal(code, 0)
         assert.equal(report.summary.errors, 0)
-        assert.ok(report.rendered.some(e => e.id === '/documents/page-a.md'))
+        // page-b, not page-a: the preceding test deletes page-a to check that
+        // a deleted entity's marker is forgotten, so the survivor is what the
+        // retry brings back.
+        assert.ok(report.rendered.some(e => e.id === '/documents/page-b.md'))
     })
 
     it('stays clean afterwards — the marker is gone', async () => {
