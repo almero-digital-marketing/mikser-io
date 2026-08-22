@@ -16,22 +16,12 @@ import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 
 import runtime from '../../src/runtime.js'
-import { createManifest } from '../../src/manifest.js'
+import { createManifest, SNAPSHOTS_SCHEMA } from '../../src/manifest.js'
 import { createSqliteDatabase } from '../../src/database/index.js'
 
-// Minimal schema needed for createManifest to prepare its statements.
-const MANIFEST_SCHEMA = `
-    CREATE TABLE IF NOT EXISTS mikser_snapshots (
-        id          TEXT NOT NULL,
-        destination TEXT NOT NULL,
-        inputHash   TEXT,
-        outputHash  TEXT,
-        refClosure  TEXT,
-        renderedAt  INTEGER,
-        parent      TEXT,
-        PRIMARY KEY (id, destination)
-    ) WITHOUT ROWID;
-`
+// The real schema, imported rather than copied — a copy drifts the moment
+// the table gains a column and fails with a bare SQLITE_ERROR.
+const MANIFEST_SCHEMA = SNAPSHOTS_SCHEMA
 
 // Fresh in-memory database per test so state doesn't leak.
 function makeDb() {

@@ -66,7 +66,10 @@ import { useDatabase, registerSchema } from './database/index.js'
 // PK index, no separate id index needed. Parent index is for pagination
 // cleanup (drop all children of X). WITHOUT ROWID keeps the file
 // smaller.
-registerSchema('mikser_snapshots', `
+// Exported so tests build against the real schema rather than a copy. A
+// copy drifts the moment a column is added, and the failure is a bare
+// SQLITE_ERROR that names nothing.
+export const SNAPSHOTS_SCHEMA = `
     CREATE TABLE IF NOT EXISTS mikser_snapshots (
         id          TEXT NOT NULL,
         destination TEXT NOT NULL,
@@ -78,7 +81,8 @@ registerSchema('mikser_snapshots', `
         PRIMARY KEY (id, destination)
     ) WITHOUT ROWID;
     CREATE INDEX IF NOT EXISTS idx_mikser_snapshots_parent ON mikser_snapshots(parent) WHERE parent IS NOT NULL;
-`)
+`
+registerSchema('mikser_snapshots', SNAPSHOTS_SCHEMA)
 
 // Module-level DB handle + prepared statements for the lifecycle
 // integration. Tests build their own via `createManifest(db)` —
@@ -548,8 +552,41 @@ export function createManifest(db) {
             for (const row of stmtSelectAll.iterate()) {
                 const snap = rowToSnap(row)
                 if (!snap.destination) continue
-                claimed.add(snap.destination.replace(/^\/+/, ''))
-                const filePath = path.join(outputFolder, snap.destination)
+                // `destination` arrives in two shapes and both are legitimate.
+                // A page's is output-relative with a leading slash
+                // (`/bg/index.html`); an asset's is a real filesystem path,
+                // because assets.js builds it from
+                // `runtime.options.assetsFolder` — which resolves inside the
+                // WORKING folder and may sit outside outputFolder entirely
+                // (a `derived/` tree that `shares` symlinks into each language
+                // root is the case that proves it).
+                //
+                // `path.isAbsolute` cannot tell them apart: on POSIX
+                // `/bg/index.html` is absolute too. So resolve by EXISTENCE,
+                // output-relative first — that is the dominant shape, and a
+                // page destination interpreted as a filesystem path would
+                // otherwise be looked for at the root of the disk.
+                //
+                // Only the fallback path is a filesystem path, so it is only
+                // tried when the destination is absolute and joining changed
+                // nothing that resolves.
+                const joined = path.join(outputFolder, snap.destination)
+                let filePath = joined
+                if (!existsSync(joined)
+                    && path.isAbsolute(snap.destination)
+                    && existsSync(snap.destination)) {
+                    filePath = snap.destination
+                }
+                // Orphan detection compares against a globby walk of
+                // outputFolder, so `claimed` has to hold exactly the relative
+                // form that walk produces. A destination resolving outside
+                // outputFolder can never appear in it and is not claimable;
+                // one inside it must be claimed by its relative path, not by
+                // the raw string with its leading slashes stripped.
+                const relative = path.relative(outputFolder, filePath)
+                if (relative && !relative.startsWith('..') && !path.isAbsolute(relative)) {
+                    claimed.add(relative)
+                }
                 if (!existsSync(filePath)) {
                     missing.push({ id: snap.id, destination: snap.destination })
                     continue

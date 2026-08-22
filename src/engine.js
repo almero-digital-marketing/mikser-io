@@ -265,8 +265,15 @@ export async function setup(options) {
             for (const e of unverifiable) logger.warn('No hash:    %s (entity %s)', e.destination, e.id)
             for (const e of orphaned)    logger.warn('Orphan:     %s', e.path)
 
+            // Level picked from the verdict, because the level IS the marker
+            // in pino-pretty's messageFormat: notice renders 🟢, warn 🟡,
+            // error 🔴. A fixed `notice` prints a green tick next to the word
+            // FAIL, which reads as success at a glance even though the exit
+            // code is right.
             const verdict = errors > 0 ? 'FAIL' : (warnings > 0 ? 'WARN' : 'OK')
-            logger.notice('Verify %s: %d snapshots, %d missing, %d mismatched, %d unverifiable, %d orphaned',
+            const report = errors > 0 ? logger.error : (warnings > 0 ? logger.warn : logger.notice)
+            report.call(logger,
+                'Verify %s: %d snapshots, %d missing, %d mismatched, %d unverifiable, %d orphaned',
                 verdict, total, missing.length, mismatched.length, unverifiable.length, orphaned.length)
             process.exit(errors > 0 ? 2 : (warnings > 0 ? 1 : 0))
         }
