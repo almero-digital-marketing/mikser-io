@@ -115,8 +115,34 @@ Four buckets, and the distinction between them is the point:
 `never-rendered`, `inputs-changed`, `ref-changed`, `query-matched`,
 `cache-disabled`, `postprocessor`, `force`, `no-manifest`.
 
-`inputs-changed` carries a `changed` array naming **which** input moved,
-so you do not have to go to the database to find out:
+Each reason carries the detail behind it, so the answer does not require a
+database query. The key is per-reason — `changed`, `matched`,
+`dependency` — because each means something specific:
+
+| reason | detail | says |
+| --- | --- | --- |
+| `inputs-changed` | `changed: ["meta.title"]` | which of the entity's own inputs moved |
+| `query-matched` | `matched: { filter, by }` | which query fired, and which mutated entity tripped it |
+| `ref-changed` | `dependency: { kind, target, key, cause }` | which dependency, and whether it `changed`, was `deleted`, or was `unhashed` (nothing resolved when the edge was recorded) |
+
+`query-matched` is the one worth reading. It fires on pages you were not
+thinking about — a listing whose filter happens to cover the document you
+just edited — and on a page with a dozen query edges, *which* one fired is
+the whole question:
+
+```json
+{ "destination": "/index.html", "reason": "query-matched",
+  "matched": { "filter": { "id": { "$regex": "^/documents/devices/" } },
+               "by": "/documents/devices/hera.md" } }
+```
+
+A `matched.filter` of `null` is a different statement: the page's predicate
+could not be serialized (`findEntities()` with no argument, or a function
+filter), so it re-renders on **any** mutation. That is not a query that
+matched — it is a page with no filter, and narrowing it is the fix the
+catalog already warns about at record time.
+
+`inputs-changed` carries a `changed` array naming **which** input moved:
 
 ```json
 { "id": "/files/hero.jpg",     "reason": "inputs-changed", "changed": ["checksum"] }
@@ -132,9 +158,14 @@ reads as `meta.weight (added)` / `(removed)`, which is the answer when a
 document gains or loses front-matter.
 
 The array is absent on a first render — there is no prior snapshot to
-compare against — and on `ref-changed`, because that is a dependency
-moving rather than the entity's own inputs. Conflating the two would make
-the attribution misleading.
+compare against. It never appears alongside `matched` or `dependency`
+either: a consumer switches on `reason` and reads one field, so a stray
+key from another branch would make that switch wrong.
+
+The same detail appears at `--debug` for a watch run, one line per render.
+It is deliberately not in the build's normal output — the counts are the
+summary and `--json` is the record — but when you are watching one page
+misbehave, the trigger is the point.
 
 `unchanged` is the interesting one. It means invalidation was coarser
 than it needed to be — the render was scheduled, ran, and produced

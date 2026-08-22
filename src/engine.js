@@ -374,7 +374,20 @@ export async function setup(options) {
                     logger.debug('Manifest skip: %s → %s', entity.name || entity.id, entity.destination)
                     return
                 }
-                reportRendered(entity, decision.reason, decision.changed)
+                reportRendered(entity, decision.reason, decision)
+                // Same detail at debug, for tailing a watch run. One line per
+                // render is too much for a build's normal output — the counts
+                // are the summary and --json is the record — but when you are
+                // watching one page misbehave, the trigger is the whole point.
+                if (logger.isLevelEnabled?.('debug') ?? true) {
+                    logger.debug('Render %s: %s%s', entity.id, decision.reason,
+                        decision.changed?.length ? ` (${decision.changed.join(', ')})`
+                        : decision.matched ? ` (${JSON.stringify(decision.matched.filter)}`
+                            + `${decision.matched.by ? ` ← ${decision.matched.by}` : ''})`
+                        : decision.dependency ? ` (${decision.dependency.kind} `
+                            + `${decision.dependency.target} ${decision.dependency.cause})`
+                        : '')
+                }
                 // Project reference-marker keys (`$author`, `$hero`, …)
                 // into their normalized form (`author`, `hero`) before
                 // the entity crosses into the renderer — applies whether

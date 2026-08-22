@@ -28,15 +28,25 @@ export function reportGated(count = 1) {
     store().gated += count
 }
 
-export function reportRendered(entity, reason, changed) {
+// `decision` is the skipDecision that led here. Its detail travels with the
+// reason, because a reason on its own answers a question nobody asked: WHICH
+// input moved, WHICH query matched and what tripped it, WHICH dependency
+// changed and how. All of it is in hand where the decision is made, and a
+// consumer that has to go to the database for it is one the report failed.
+//
+// Detail keys are per-reason rather than one generic field — `changed`,
+// `matched`, `dependency` each mean something specific, and a single
+// polymorphic key would push the type switch onto every consumer.
+export function reportRendered(entity, reason, decision = {}) {
     if (!runtime.options?.json) return
     store().rendered.push({
         id: entity?.id,
         destination: entity?.destination ?? null,
         reason,
-        // Which input moved, when the reason is inputs-changed. Omitted
-        // rather than empty so a consumer can test for its presence.
-        ...(changed?.length ? { changed } : {}),
+        // Omitted rather than empty, so presence is meaningful.
+        ...(decision.changed?.length ? { changed: decision.changed } : {}),
+        ...(decision.matched ? { matched: decision.matched } : {}),
+        ...(decision.dependency ? { dependency: decision.dependency } : {}),
     })
 }
 

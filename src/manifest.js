@@ -389,11 +389,36 @@ export function createManifest(db) {
             const sourceLang = entity?.meta?.lang ?? null
             for (const entry of snapshot.refClosure) {
                 if (entry.kind === 'query') {
-                    if (!entry.filter) return { skip: false, reason: 'query-matched' }
+                    // A null filter is the sentinel for a predicate that
+                    // could not be serialized — findEntities() with no
+                    // argument, or a function filter. It re-renders on ANY
+                    // mutation, which is a materially different situation
+                    // from "this specific query matched" and is reported as
+                    // such: an aggregate page that always re-renders is a
+                    // filter worth narrowing, which is what catalog.js
+                    // already warns about at record time.
+                    if (!entry.filter) {
+                        return {
+                            skip: false,
+                            reason: 'query-matched',
+                            matched: { filter: null, by: null },
+                        }
+                    }
                     if (!mutatedEntities?.size) continue
                     const matcher = sift(entry.filter)
                     for (const mutated of mutatedEntities.values()) {
-                        if (matcher(mutated)) return { skip: false, reason: 'query-matched' }
+                        // Both the filter and the entity that tripped it are
+                        // live here. Reporting only "a query matched" throws
+                        // away the two facts the reader needs — on a page with
+                        // eighteen query edges, which one fired and what set
+                        // it off is the entire question.
+                        if (matcher(mutated)) {
+                            return {
+                                skip: false,
+                                reason: 'query-matched',
+                                matched: { filter: entry.filter, by: mutated.id ?? null },
+                            }
+                        }
                     }
                     continue
                 }
@@ -433,11 +458,26 @@ export function createManifest(db) {
                             continue
                         }
                     }
-                    if (!entry.hash) return { skip: false, reason: 'ref-changed' }
+                    // Which dependency, and why. Three distinct causes reach
+                    // the same reason, and the difference is what the reader
+                    // is after: a layout whose bytes moved, a $-ref whose
+                    // target was deleted, and an edge recorded with no hash
+                    // are three different things to go and look at.
+                    //
+                    //   unhashed  nothing resolved when the edge was recorded,
+                    //             so any mutation of that name re-renders
+                    //   deleted   the target is gone from the catalog
+                    //   changed   the target's own input hash moved
+                    const dependency = (cause) => ({
+                        skip: false,
+                        reason: 'ref-changed',
+                        dependency: { kind: entry.kind, target: entry.target, key, cause },
+                    })
+                    if (!entry.hash) return dependency('unhashed')
                     const currentHash = currentHashes?.get(key)
                     if (currentHash === undefined) continue
-                    if (currentHash === null) return { skip: false, reason: 'ref-changed' }
-                    if (currentHash !== entry.hash) return { skip: false, reason: 'ref-changed' }
+                    if (currentHash === null) return dependency('deleted')
+                    if (currentHash !== entry.hash) return dependency('changed')
                 }
             }
             return { skip: true, reason: 'unchanged' }
