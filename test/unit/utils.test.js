@@ -1320,3 +1320,28 @@ describe('expandEntity — $ wildcard (deep, structure-agnostic ref expansion)',
         await assert.rejects(expandEntity(entity, ['$'], { findRef, maxResolved: 1 }), /maxResolved/)
     })
 })
+
+describe('useSource glob pattern', () => {
+    it('builds a single-extension pattern WITHOUT braces', async () => {
+        // `**/*.{css}` matches nothing — minimatch does not expand a
+        // one-element brace — so a source declaring one extension silently
+        // imported zero files and reported the folder as empty.
+        const src = await readFile(new URL('../../src/source.js', import.meta.url), 'utf8')
+        assert.match(src, /extensions\.length === 1/)
+        assert.match(src, /\*\*\/\*\.\$\{extensions\[0\]\}/)
+    })
+
+    it('and the brace form really does fail, which is why', async () => {
+        const { globby } = await import('globby')
+        const dir = await mkdtemp(path.join(tmpdir(), 'mikser-glob-'))
+        try {
+            await writeFile(path.join(dir, 'a.css'), 'x')
+            assert.deepEqual(await globby('**/*.{css}', { cwd: dir, onlyFiles: true }), [],
+                             'a one-element brace matches nothing')
+            assert.deepEqual(await globby('**/*.css', { cwd: dir, onlyFiles: true }), ['a.css'])
+            assert.deepEqual(await globby('**/*.{css,scss}', { cwd: dir, onlyFiles: true }), ['a.css'])
+        } finally {
+            await rm(dir, { recursive: true, force: true })
+        }
+    })
+})

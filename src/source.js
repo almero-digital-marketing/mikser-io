@@ -270,9 +270,17 @@ export function useSource(core, options) {
     const prefix = idPrefix ?? `/${collection}`
     const cap = collection.replace(/^./, c => c.toUpperCase())
     const progressLabel = progress ?? `${cap} import`
+    // A SINGLE extension must not go through brace syntax: `**/*.{css}`
+    // matches NOTHING in minimatch/globby — a one-element brace is not
+    // expanded — so a source declaring one extension silently imported zero
+    // files and reported "Styles loaded: 0" as though the folder were empty.
+    // Same shape as the other silent-declaration failures: green build,
+    // nothing there.
     const pattern = extensions.includes('*')
         ? '**/*'
-        : `**/*.{${extensions.join(',')}}`
+        : extensions.length === 1
+            ? `**/*.${extensions[0]}`
+            : `**/*.{${extensions.join(',')}}`
 
     // Hot-reload — chokidar dispatches into onSync(collection) when
     // a file inside the folder changes.

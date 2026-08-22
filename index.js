@@ -24,6 +24,7 @@ export * from './src/routes.js'
 // for the v9 plugin shape.
 export { api }           from './src/plugins/api.js'
 export { assets }        from './src/plugins/assets.js'
+export { sources }       from './src/plugins/sources.js'
 export { commands }      from './src/plugins/commands.js'
 export { data }          from './src/plugins/data.js'
 export { documents }     from './src/plugins/documents.js'
