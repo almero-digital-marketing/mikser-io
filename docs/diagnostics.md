@@ -106,9 +106,16 @@ there is no manifest to check against.
 npx mikser --verify || echo "output folder has drifted"
 ```
 
-`Orphan` is the one to read carefully — it is normal for files that
-another plugin writes (assets, files, data), and a real signal for a page
-whose layout stopped producing it.
+A destination is resolved against the output folder first and, when that
+finds nothing, treated as a filesystem path — assets carry an absolute
+destination built from `assetsFolder`, which may sit outside the output
+folder entirely.
+
+`Orphan` still needs reading with that in mind: only files under the
+output folder are walked, and a file is an orphan when no snapshot claims
+it. That is normal for anything written without a render snapshot (the
+`files` and `data` plugins), and a real signal for a page whose layout
+stopped producing it.
 
 ### The rest, briefly
 
