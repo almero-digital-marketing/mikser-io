@@ -440,6 +440,22 @@ export function createManifest(db) {
                     })
                 }
             }
+            if (track?.lookups) {
+                for (const target of track.lookups) {
+                    // findById is extension-tolerant and also resolves a
+                    // meta.href, so the hash is the resolved entity's when
+                    // there is one. No hash means "nothing resolved" —
+                    // shouldSkip treats a hashless edge whose target mutated
+                    // as a re-render, which is what should happen when a page
+                    // that was linked-to-but-missing finally appears.
+                    const resolved = findById(target)
+                    edges.push({
+                        kind: 'lookup',
+                        target,
+                        hash: resolved ? inputHashOf(resolved) : undefined,
+                    })
+                }
+            }
             if (track?.queries) {
                 for (const filter of track.queries) {
                     edges.push({ kind: 'query', filter })

@@ -187,10 +187,28 @@ export default async ({ entity, options, config, context, state, logger, port, t
         // state.layouts.sitemap map that was serialized per render
         // task. Goes through the same WAL-backed read-only handle
         // every worker shares with the engine writer.
-        lookupHref: lookupHrefViaDb,
+        // Both lookups RECORD what they were asked for, via track.lookup.
+        //
+        // They read the catalog directly, and until this they told nobody —
+        // so nothing knew a page depended on the page it links to. Renaming
+        // a target left every page linking to it pointing at a file that no
+        // longer existed, on a green build, because manifest.shouldSkip had
+        // no edge to check. A sidecar's findEntities() was tracked all along;
+        // these two were the asymmetry.
+        //
+        // The recorded target is the string the template asked for, not the
+        // resolved id — see track.lookup for why that also covers a target that
+        // does not exist yet.
+        lookupHref: (href) => {
+            track?.lookup?.(href)
+            return lookupHrefViaDb(href)
+        },
         // Resolve a served-entity reference to its deployed URL, absolute
         // when runtime.options.url is set (ADR-0011).
-        lookupUrl: (ref, preset) => lookupUrlViaDb(ref, preset, options.url),
+        lookupUrl: (ref, preset) => {
+            if (typeof ref === 'string') track?.lookup?.(ref)
+            return lookupUrlViaDb(ref, preset, options.url)
+        },
         content() {
             return readFileSync(entity.source, { encoding: 'utf8' })
         },

@@ -40,8 +40,36 @@ export function filterKey(filter) {
 // The returned object exposes `partials: Set<string>` and
 // `queries: Array<filter | null>` directly. Consumers iterate either
 // shape; both are owned by the track for the lifetime of the run.
-export function createTrack({ partial = true, query = true } = {}) {
+export function createTrack({ partial = true, query = true, lookup = true } = {}) {
     const track = {}
+    if (lookup) {
+        // Lookups a TEMPLATE made by name: runtime.href('/contacts'),
+        // runtime.lookupUrl('/media/clip.mp4'). Both read the catalog
+        // directly, and until this existed neither told anyone — so nothing
+        // recorded that a page depends on the page it links to.
+        //
+        // Measured consequence: rename contacts.md to contact-us.md and only
+        // the renamed page re-renders. Every page linking to it keeps a href
+        // pointing at a file that no longer exists, on a green build.
+        //
+        // The edge kind is 'lookup', NOT 'ref': mikser_refs divides ownership
+        // by kind — indexEntity owns kind='ref' (static frontmatter $-refs)
+        // and clears it per source, while replaceDynamic owns everything
+        // else. Writing these as 'ref' got them inserted by replaceDynamic
+        // and then wiped by the next indexEntity, so the edge existed in
+        // the manifest and never in the refs index — recorded, and still
+        // never scheduling a re-render.
+        //
+        // The target is the STRING the template asked for, not the resolved
+        // entity's id, and that is deliberate: lookupKeys() expands a mutated
+        // entity into its id, its meta.href AND its id-minus-extension, so an
+        // edge on '/contacts' fires whether the target was edited, renamed,
+        // deleted, or created for the first time. Recording the resolved id
+        // instead would miss the case where nothing resolved yet.
+        const lookups = new Set()
+        track.lookups = lookups
+        track.lookup = (target) => { if (target && typeof target === 'string') lookups.add(target) }
+    }
     if (partial) {
         const partials = new Set()
         track.partials = partials
