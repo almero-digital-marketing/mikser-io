@@ -1,7 +1,7 @@
 import crypto from 'node:crypto'
 import { createHash } from 'node:crypto'
 import { hashFile } from 'hasha'
-import { stat, readFile, writeFile, mkdir, unlink, open } from 'node:fs/promises'
+import { stat, lstat, readFile, writeFile, mkdir, unlink, open } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import _ from 'lodash'
 import { minimatch } from 'minimatch'
@@ -930,6 +930,68 @@ export function useCollection(runtime, name) {
             await unlink(uri)
         },
     }
+}
+
+// Write `bytes` to `file`, unless the file already holds exactly those
+// bytes. Returns true if it wrote, false if the file was already correct.
+//
+// Invalidation is deliberately conservative: an entity that merely READ
+// another entity re-renders when that one changes, because the engine
+// cannot know which field was read. That is the right default, and it
+// means renders regularly produce byte-identical output. Writing anyway
+// moves mtime, and three things downstream key off the file rather than
+// its contents:
+//
+//   - live reload watches the output folder, so editing one photograph
+//     reloaded the browser on pages that had not changed
+//   - rsync, `aws s3 sync` and most CDN tools compare size plus mtime,
+//     so unchanged pages re-upload
+//   - `find out -newer` cannot answer "what did this build change?"
+//
+// Doing it here rather than narrowing the dependency edges fixes every
+// conservative-invalidation case at once, and stays correct as the graph
+// gets more precise instead of becoming redundant.
+//
+// Ordering matters: the size check comes first so the common
+// output-really-changed case never pays for a read, and lstat (not stat)
+// because a destination that is currently a SYMLINK has to be replaced
+// by a real file even when the bytes behind it match — the type of the
+// destination is part of the output, not just its contents.
+export async function writeOutput(file, bytes) {
+    // Size first, and WITHOUT materialising a buffer: Buffer.byteLength
+    // measures a string in place, while Buffer.from copies it (~250µs for
+    // a 1MB page, against ~25µs for the lstat). Since a size mismatch is
+    // the common outcome on a build that changed something, the cheap
+    // path must not pay for the expensive one.
+    const size = Buffer.isBuffer(bytes) ? bytes.length : Buffer.byteLength(bytes)
+    let identical = false
+    try {
+        const info = await lstat(file)
+        if (info.isFile() && info.size === size) {
+            const existing = await readFile(file)
+            identical = Buffer.isBuffer(bytes)
+                ? bytes.equals(existing)
+                : existing.equals(Buffer.from(bytes))
+        }
+    } catch (err) {
+        // Missing or unreadable — fall through and write. Anything else
+        // is a bug in this function, and swallowing it would look
+        // exactly like "the file wasn't there": a missing `lstat` import
+        // made every comparison fail open, so the skip silently never
+        // happened while the tests still passed.
+        if (err.code !== 'ENOENT' && err.code !== 'EACCES') throw err
+    }
+    if (identical) return false
+    await mkdir(path.dirname(file), { recursive: true })
+    // Unlink first so an existing hard link or symlink at this path is
+    // broken rather than written through.
+    try {
+        await unlink(file)
+    } catch { /* not there, or not removable — writeFile will say so */ }
+    // Pass the original value through — writeFile encodes a string
+    // directly, so converting first would add a copy for nothing.
+    await writeFile(file, bytes)
+    return true
 }
 
 // ── operating-system and file-manager litter ────────────────────────────

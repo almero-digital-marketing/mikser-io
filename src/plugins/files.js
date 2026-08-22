@@ -86,25 +86,41 @@ export function files(options = {}) {
                         link: await link(source)
                     })
                     break
-                case ACTION.UPDATE:
+                case ACTION.UPDATE: {
                     const current = await findEntity({ id })
-                    if (current?.checksum != checksum) {
+                    // `checksum` is the source-checksum FUNCTION from the
+                    // plugin context, not a value. Comparing the stored
+                    // string against it was never equal, so the guard
+                    // always passed and every sync re-wrote the entity —
+                    // `synced = false` was unreachable.
+                    const currentChecksum = await checksum(source)
+                    if (current?.checksum != currentChecksum) {
                         await updateEntity({
                             id,
                             uri,
-                            name: relativePath,
+                            // `name` — the prefixed form, as CREATE uses.
+                            // This read `relativePath`, so an update
+                            // dropped the outputFolder prefix while
+                            // meta.url two lines down kept it. The assets
+                            // plugin builds preset destinations from
+                            // `name`, so a file replaced under watch had
+                            // its derivatives written somewhere else than
+                            // the same file freshly imported, and
+                            // meta.presets recorded the wrong path.
+                            name,
                             collection,
                             type,
                             format,
                             source,
                             meta: { url: '/' + name },
-                            checksum: await checksum(source),
+                            checksum: currentChecksum,
                             link: await link(source)
                         })
                     } else {
                         synced = false
                     }
                     break
+                }
                 case ACTION.DELETE:
                     await removeLink(relativePath)
                     await deleteEntity({

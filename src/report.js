@@ -13,7 +13,7 @@ import runtime from './runtime.js'
 
 function store() {
     runtime.state ??= {}
-    runtime.state.report ??= { rendered: [], skipped: [], warnings: [], gated: 0 }
+    runtime.state.report ??= { rendered: [], skipped: [], unchanged: [], warnings: [], gated: 0 }
     return runtime.state.report
 }
 
@@ -31,6 +31,17 @@ export function reportGated(count = 1) {
 export function reportRendered(entity, reason) {
     if (!runtime.options?.json) return
     store().rendered.push({ id: entity?.id, destination: entity?.destination ?? null, reason })
+}
+
+// A render that RAN and produced bytes identical to what was already on
+// disk. Distinct from both other outcomes and the interesting one of the
+// three: `rendered` means the output moved, `skipped` means the manifest
+// decided not to look, and this means invalidation was coarser than it
+// needed to be. Nothing downstream should have been disturbed, and the
+// count is the measure of how much conservative invalidation costs.
+export function reportUnchanged(entity) {
+    if (!runtime.options?.json) return
+    store().unchanged.push({ id: entity?.id, destination: entity?.destination ?? null })
 }
 
 export function reportSkipped(entity, reason) {
@@ -54,9 +65,13 @@ export function buildReport() {
     return {
         rendered: report.rendered,
         skipped: report.skipped,
+        unchanged: report.unchanged,
         warnings: report.warnings,
         summary: {
             rendered: report.rendered.length,
+            // Of those renders, how many produced bytes identical to
+            // what was already on disk — see reportUnchanged.
+            unchanged: report.unchanged.length,
             // Renders that were CONSIDERED and skipped by the manifest.
             skipped: report.skipped.length,
             // Entities gated at import because their source was unchanged, so

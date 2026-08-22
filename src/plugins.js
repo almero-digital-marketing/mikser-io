@@ -87,7 +87,21 @@ onLoad(() => {
     }
 
     if (!factoryEntries.length && !registeredRenderers && !registeredPostprocessors) {
-        logger.info('No plugins loaded')
+        // "No plugins loaded" is a legitimate state for a project with no
+        // config at all, and a near-certain mistake for one that HAS a
+        // config — the two printed the same line, so a config that
+        // produced no plugins looked like a deliberate choice. Say which
+        // case this is.
+        if (runtime.options.configChecksum) {
+            logger.warn(
+                'No plugins loaded, but a config was read from %s — ' +
+                'it exported no `plugins` array, or the array was empty. ' +
+                'Nothing will be built.',
+                runtime.options.config,
+            )
+        } else {
+            logger.info('No plugins loaded')
+        }
         return
     }
 
