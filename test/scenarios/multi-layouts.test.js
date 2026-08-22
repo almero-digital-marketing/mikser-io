@@ -37,7 +37,11 @@ export default {
         documents(),
         frontMatter(),
         yaml(),
-        layouts({ autoLayouts: true }),
+        // cleanUrls is pinned false: these assertions are on flat output paths
+        // (welcome.html, not welcome/index.html). The default became true in
+        // mikser-io-layouts 2.0.0, and the URL shape is incidental to what is
+        // under test here — so it is pinned rather than followed.
+        layouts({ autoLayouts: true, cleanUrls: false }),
         renderHbs(),
     ],
 }

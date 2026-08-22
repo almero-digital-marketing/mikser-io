@@ -29,7 +29,7 @@ const MINIMAL_CONFIG = `
 import { documents, frontMatter, yaml, renderHbs } from 'mikser-io'
 import { layouts } from 'mikser-io-layouts'
 export default {
-    plugins: [documents(), frontMatter(), yaml(), layouts({ autoLayouts: true }), renderHbs()],
+    plugins: [documents(), frontMatter(), yaml(), layouts({ autoLayouts: true, cleanUrls: false }), renderHbs()],
     layouts: { autoLayouts: true },
 }
 `
