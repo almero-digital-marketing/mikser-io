@@ -54,7 +54,23 @@ rendered    2026-08-22 21:07:52   → /page-a.html   [STALE: input hash moved si
 ```
 
 A snapshot written before per-input recording says so rather than
-guessing. Note that `--explain` compares the CATALOG's entity against the
+guessing.
+
+A destination whose **last render attempt threw** reads as such, rather
+than as current:
+
+```
+rendered    2026-08-22 21:52:24   → /page-a.html   [STALE: last render attempt failed]
+  failed     2026-08-22 21:52:25  The partial partials/btn could not be found
+             3 attempts since 2026-08-22 21:52:24
+  partial    /layouts/partials/btn.hbs  b6ab7ccc  [TARGET DELETED SINCE]
+would re-render — the last render attempt failed and nothing has changed since
+```
+
+`[TARGET DELETED SINCE]` is the same distinction one level down: an edge's
+binding is what it resolved to *when recorded*, so a target deleted
+afterwards still shows an id and a hash and reads as healthy unless the
+catalog is asked. Note that `--explain` compares the CATALOG's entity against the
 snapshot: if you have edited a file and not yet built, the verdict is
 `source differs from the catalog` — the edit has not been imported yet, so
 there is nothing to attribute. Build, then ask.
@@ -116,6 +132,17 @@ A failed render appears in `errors` and **not** in `rendered`: that bucket
 means the output moved, and a throw writes nothing. The previous good bytes
 stay on disk, which is what makes a failed render survivable — and also
 what makes it invisible without this bucket.
+
+A failed render is **retried on every subsequent build** until it
+succeeds, reported as `reason: "retry-failed"`. Nothing else would schedule
+it — the entity's own source has not changed, so it is gated at import, and
+the manifest still describes the last good render — so without the retry a
+build after a failing one reported success with the site still stale.
+
+Retries are unbounded and deliberately noisy: a page that fails every cycle
+is failing every cycle. `errors[].since` and `errors[].attempts` are what
+make that readable — "broke just now" and "broken for an hour" are
+different situations. The marker clears itself on the first success.
 
 **A one-shot build with render errors exits `1`.** That is the signal a CI
 gate needs, because `mikser && mikser --verify` would otherwise pass a

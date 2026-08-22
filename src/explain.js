@@ -10,7 +10,7 @@
 // Follows --verify's shape: report and exit, no build phases run.
 import { inputHashOf, inputPartsOf, diffInputParts, lookupKeys, checksum as fileChecksum } from './utils.js'
 import { filterKey } from './track.js'
-import { findEntity, findEntities } from './catalog.js'
+import { findEntity, findEntities, findById } from './catalog.js'
 import runtime from './runtime.js'
 
 const shortHash = (h) => (h ? String(h).slice(0, 8) : null)
@@ -118,6 +118,11 @@ export async function explain(reference) {
     const currentHash = inputHashOf(entity)
     const currentParts = inputPartsOf(entity)
     const queryMatches = await countQueryMatches(snapshots)
+    // Checked before the hash comparison in the verdict: a destination whose
+    // last attempt threw will re-render regardless of what the hashes say.
+    const failedSnapshots = snapshots
+        .map(snap => runtime.manifest?.failureAt?.(entity.id, snap.destination))
+        .filter(Boolean)
 
     // The catalog is as of the LAST BUILD. If the file has been edited since,
     // nothing here knows it yet — the hashes would all agree and the verdict
@@ -186,6 +191,21 @@ export async function explain(reference) {
             // The single most useful field: does this entity's current hash
             // match what it was last rendered at?
             stale: snap.inputHash !== currentHash,
+            // The last render ATTEMPT for this destination, if it threw.
+            // Without this, a destination whose render is failing reports
+            // `[current]` and `would be SKIPPED` — both true of the recorded
+            // state, and together the wrong answer to the only question
+            // --explain is ever asked.
+            failed: (() => {
+                const f = runtime.manifest?.failureAt?.(entity.id, snap.destination)
+                if (!f) return null
+                return {
+                    error: f.error,
+                    since: when(f.firstFailedAt),
+                    lastAttempt: when(f.lastFailedAt),
+                    attempts: f.attempts ?? 1,
+                }
+            })(),
             // WHICH input moved, not merely that one did. This is the whole
             // question behind "why did this re-render" — answering it from
             // the recorded parts costs nothing, and not answering it sends
@@ -220,6 +240,14 @@ export async function explain(reference) {
                         bound: entry.targetIds?.length ? entry.targetIds
                             : entry.targetId ? [entry.targetId]
                             : [],
+                        // `bound` is what the edge resolved to WHEN RECORDED.
+                        // A target deleted since then still shows an id and a
+                        // hash, which reads as healthy — so check the catalog
+                        // rather than describing the record as if it were
+                        // current.
+                        gone: (entry.targetIds?.length ? entry.targetIds
+                            : entry.targetId ? [entry.targetId]
+                            : []).filter(id => !findById(id)),
                         hash: shortHash(entry.hash),
                     }),
         })),
@@ -231,6 +259,9 @@ export async function explain(reference) {
                   + '(Some plugins compose a checksum from several files, so verify before concluding.)'
                 : snapshots.length === 0
             ? 'never rendered — no manifest snapshot. Either it has no layout, or its layout produced no destination.'
+            : failedSnapshots.length
+                ? `would re-render — the last render attempt failed and nothing has changed since `
+                  + `(${failedSnapshots[0].error})`
             : snapshots.some(s => s.inputHash !== currentHash)
                 ? renderVerdict(snapshots, currentHash, currentParts)
                 : 'would be SKIPPED — input hash unchanged. A dependency in refClosure changing is the only other thing that would re-render it.',
@@ -285,7 +316,15 @@ export function formatExplain(report) {
     }
     for (const r of report.renders) {
         row('rendered', `${r.renderedAt ?? 'unknown'}   → ${r.destination}`
-            + (r.stale ? '   [STALE: input hash moved since]' : '   [current]'))
+            + (r.failed ? '   [STALE: last render attempt failed]'
+                : r.stale ? '   [STALE: input hash moved since]'
+                : '   [current]'))
+        if (r.failed) {
+            out.push(`  failed     ${r.failed.lastAttempt}  ${r.failed.error}`)
+            if (r.failed.attempts > 1) {
+                out.push(`             ${r.failed.attempts} attempts since ${r.failed.since}`)
+            }
+        }
         const closure = r.refClosure
         row('refClosure', `${closure.length} edge${closure.length === 1 ? '' : 's'}`)
         for (const e of closure) {
@@ -308,7 +347,8 @@ export function formatExplain(report) {
             const bound = e.bound?.length
                 ? (e.bound.length === 1 && e.bound[0] === e.target ? '' : ` → ${e.bound.join(', ')}`)
                 : '  [UNRESOLVED — nothing answers to this name]'
-            out.push(`  ${e.kind.padEnd(10)} ${e.target}${bound}${e.hash ? `  ${e.hash}` : ''}`)
+            const gone = e.gone?.length ? '  [TARGET DELETED SINCE]' : ''
+            out.push(`  ${e.kind.padEnd(10)} ${e.target}${bound}${e.hash ? `  ${e.hash}` : ''}${gone}`)
         }
     }
 

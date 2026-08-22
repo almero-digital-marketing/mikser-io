@@ -526,6 +526,9 @@ export async function setup(options) {
                         await updateEntry({ id, output: entry.output, deps: edges })
                     }
 
+                    // A success clears whatever was recorded about this
+                    // destination failing, so the retry set drains itself.
+                    runtime.manifest?.clearFailure(entity)
                     reportRendered(entity, decision.reason, decision)
                     logger.debug('Rendered: [%s] %s → %s', options.renderer, entity.name || entity.id, entity.destination)
                 } catch (err) {
@@ -537,10 +540,24 @@ export async function setup(options) {
                         // it a build that fails every page reports rendered:N,
                         // warnings:0 and exits 0 — three clean signals and only
                         // the human log knowing otherwise.
+                        // Durable, so the next cycle knows to try again and
+                        // --explain stops calling this destination current.
+                        runtime.manifest?.recordFailure(entity, {
+                            error: err.message,
+                            context: context.trim() || null,
+                            at: Date.now(),
+                        })
+                        const failure = runtime.manifest?.failureAt(entity.id, entity.destination)
                         reportError(entity, err, {
                             renderer: options.renderer ?? null,
                             layout: entity.layout?.id ?? null,
                             context: context.trim() || null,
+                            // When it STARTED failing, and how many attempts.
+                            // "broke just now" and "broken since 14:02" are
+                            // different situations and the reader needs to
+                            // tell them apart at a glance.
+                            since: failure?.firstFailedAt ?? null,
+                            attempts: failure?.attempts ?? 1,
                         })
                     }
                     logger.debug('Render canceled')

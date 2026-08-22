@@ -313,26 +313,30 @@ describe('layout & partial deletion while mikser off', () => {
             'deleted partial should be gone from catalog')
     })
 
-    it('after partial is restored to identical content — emits CREATE, but no re-render needed', async () => {
+    it('after partial is restored to identical content — consumers are retried', async () => {
         await writeFile(
             path.join(workdir, 'layouts/partials/footer.hbs'),
             FOOTER_PARTIAL,
         )
 
         const { code, combined } = await runMikser(workdir)
-        assert.equal(code, 0)
+        assert.equal(code, 0, 'the retry succeeds, so the build is clean again')
         // 1 emit (the partial wasn't in catalog after the delete sweep,
         // so source treats it as new).
         assert.match(combined, /Layouts loaded: 2, 1 emitted, 1 unchanged/)
-        // BUT: the restored content matches the hash consumers
-        // recorded last time they successfully rendered. Dispatcher's
-        // hash-aware seeding correctly sees "same content as before" →
-        // no consumer is invalidated. The on-disk output from the
-        // failed-render cycle is broken; operator can `mikser --verify`
-        // to detect that and `--force` to repair. Not re-rendering by
-        // default is correct: nothing in the dependency graph actually
-        // changed.
-        assertRendered(combined, 0)
+        // The restored content matches the hash consumers recorded at their
+        // last SUCCESSFUL render, so hash-aware seeding invalidates nobody —
+        // nothing in the dependency graph changed. What brings them back is
+        // the failure marker from the cycle that threw: those renders are
+        // retried until one succeeds, and the marker then clears.
+        //
+        // This asserted 0 renders, on the reasoning that nothing in the graph
+        // had changed. True, and it left the output from the failed cycle in
+        // place with every signal reporting success — the claim in the old
+        // comment that `--verify` would detect it does not hold, because a
+        // failed render writes no snapshot and the manifest stays consistent
+        // with the last good one.
+        assertRendered(combined, 2)
     })
 
     it('after partial is restored with NEW content — consumers invalidate and re-render', async () => {

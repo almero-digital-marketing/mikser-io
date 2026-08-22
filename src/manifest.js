@@ -85,6 +85,38 @@ export const SNAPSHOTS_SCHEMA = `
 `
 registerSchema('mikser_snapshots', SNAPSHOTS_SCHEMA)
 
+// Failed render attempts, durably.
+//
+// A failed render writes no snapshot — deliberately, so the last good bytes
+// survive — which leaves nothing anywhere saying the attempt happened. The
+// consequences all follow from that one absence: the entity is gated at
+// import next cycle (its own source did not change), so it is never
+// re-dispatched; the manifest still describes the last good render, so
+// --verify is clean; and --explain reports `[current]` and `would be
+// SKIPPED` for a page whose render is throwing — the one tool whose job is
+// "why is this not rebuilding", answering "because there is nothing to do".
+//
+// Keyed by (id, destination) like snapshots, but a SEPARATE table because a
+// render that has never once succeeded has no snapshot to hang a column on.
+//
+// firstFailedAt is kept distinct from lastFailedAt so a report can say
+// "since 14:02" — the difference between "this broke just now" and "this has
+// been broken for an hour" is most of what a reader wants.
+export const FAILURES_SCHEMA = `
+    CREATE TABLE IF NOT EXISTS mikser_failures (
+        id            TEXT NOT NULL,
+        destination   TEXT NOT NULL,
+        error         TEXT,
+        context       TEXT,
+        firstFailedAt INTEGER,
+        lastFailedAt  INTEGER,
+        attempts      INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (id, destination)
+    ) WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS idx_mikser_failures_id ON mikser_failures(id);
+`
+registerSchema('mikser_failures', FAILURES_SCHEMA)
+
 // Module-level DB handle + prepared statements for the lifecycle
 // integration. Tests build their own via `createManifest(db)` —
 // the lifecycle hook below grabs useDatabase() and stashes the
@@ -252,6 +284,32 @@ async function hashOutputFile(destination) {
 export function createManifest(db) {
     if (!db) throw new Error('createManifest: db is required')
 
+    const stmtRecordFailure = db.prepare(`
+        INSERT INTO mikser_failures
+            (id, destination, error, context, firstFailedAt, lastFailedAt, attempts)
+        VALUES (@id, @destination, @error, @context, @at, @at, 1)
+        ON CONFLICT(id, destination) DO UPDATE SET
+            error = excluded.error,
+            context = excluded.context,
+            lastFailedAt = excluded.lastFailedAt,
+            attempts = mikser_failures.attempts + 1
+    `)
+    const stmtClearFailure = db.prepare(`
+        DELETE FROM mikser_failures WHERE id = ? AND destination = ?
+    `)
+    const stmtFailuresFor = db.prepare(`
+        SELECT id, destination, error, context, firstFailedAt, lastFailedAt, attempts
+        FROM mikser_failures WHERE id = ?
+    `)
+    const stmtFailureAt = db.prepare(`
+        SELECT id, destination, error, context, firstFailedAt, lastFailedAt, attempts
+        FROM mikser_failures WHERE id = ? AND destination = ?
+    `)
+    const stmtAllFailures = db.prepare(`
+        SELECT id, destination, error, context, firstFailedAt, lastFailedAt, attempts
+        FROM mikser_failures
+    `)
+
     const stmtLookupById = db.prepare(`
         SELECT id, destination, inputHash, inputParts, outputHash, refClosure, renderedAt, parent
         FROM mikser_snapshots WHERE id = ? ORDER BY destination
@@ -359,6 +417,8 @@ export function createManifest(db) {
         //   query-matched    an entity matching a recorded query mutated
         //   cache-disabled   meta.cache === false
         //   force            --force: skip nothing, ask nothing
+        //   retry-failed     the last render attempt for this destination
+        //                    threw; nothing else would reschedule it
         skipDecision(entity, mutatedRefs, currentHashes, mutatedEntities) {
             // --force means "ignore what you think you know". THREE gates
             // can stop a render — source.js's import checksum gate,
@@ -373,6 +433,31 @@ export function createManifest(db) {
             // no-match warning tells the operator to use it.
             if (runtime.options?.force) return { skip: false, reason: 'force' }
             if (entity?.meta?.cache === false) return { skip: false, reason: 'cache-disabled' }
+            // A render whose last attempt threw must be retried, and checked
+            // before anything else: every other branch reasons about hashes,
+            // and the hashes are consistent — the entity did not change, the
+            // snapshot still describes the last GOOD render. Consistency is
+            // exactly why the failure is invisible without this.
+            //
+            // Retried unbounded, and noisily. A page that fails every cycle IS
+            // failing every cycle, and a build that stops mentioning it after
+            // the third attempt is making the same trade as reporting
+            // `rendered: 12, exit 0`. What makes it tolerable is presentation
+            // — one line per failing entity, and `since` on the report so a
+            // reader can tell "broke just now" from "broken since 14:02" —
+            // not backoff.
+            const failure = this.failureAt(entity?.id, entity?.destination)
+            if (failure) {
+                return {
+                    skip: false,
+                    reason: 'retry-failed',
+                    failure: {
+                        error: failure.error,
+                        since: failure.firstFailedAt ?? null,
+                        attempts: failure.attempts ?? 1,
+                    },
+                }
+            }
             const snapshot = this.lookup(entity)
             if (!snapshot?.inputHash) return { skip: false, reason: 'never-rendered' }
             if (inputHashOf(entity) !== snapshot.inputHash) {
@@ -481,6 +566,51 @@ export function createManifest(db) {
                 }
             }
             return { skip: true, reason: 'unchanged' }
+        },
+
+        // Record that a render attempt threw. `at` is passed in rather than
+        // read from the clock here so the caller owns the timestamp.
+        recordFailure(entity, { error, context, at }) {
+            if (!entity?.id || !entity?.destination) return
+            stmtRecordFailure.run({
+                id: entity.id,
+                destination: entity.destination,
+                error: error ?? null,
+                context: context ?? null,
+                at: at ?? Date.now(),
+            })
+        },
+
+        // A render succeeded, so whatever was recorded about it failing is
+        // no longer true. Called on every success, not only after a failure —
+        // it is a cheap DELETE and forgetting it would strand the marker.
+        clearFailure(entity) {
+            if (!entity?.id || !entity?.destination) return
+            stmtClearFailure.run(entity.id, entity.destination)
+        },
+
+        // Every recorded failure for an entity, across destinations.
+        failuresFor(id) {
+            return id ? stmtFailuresFor.all(id) : []
+        },
+
+        // One, at a known destination.
+        failureAt(id, destination) {
+            if (!id || !destination) return null
+            return stmtFailureAt.get(id, destination) ?? null
+        },
+
+        // Every entity id with a recorded failure. The dispatch set a
+        // task-production plugin unions in so a failed render is retried:
+        // the entity's own source has not changed, so nothing else will
+        // schedule it, and going quiet about a page that will not build is
+        // the failure mode this whole area exists to avoid.
+        failedIds() {
+            return [...new Set(stmtAllFailures.all().map(row => row.id))]
+        },
+
+        allFailures() {
+            return stmtAllFailures.all()
         },
 
         // Record a successful render. Single INSERT OR REPLACE.

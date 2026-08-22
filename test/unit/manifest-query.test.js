@@ -16,7 +16,7 @@ import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 
 import runtime from '../../src/runtime.js'
-import { createManifest, SNAPSHOTS_SCHEMA } from '../../src/manifest.js'
+import { createManifest, SNAPSHOTS_SCHEMA, FAILURES_SCHEMA } from '../../src/manifest.js'
 import { createSqliteDatabase } from '../../src/database/index.js'
 
 // The real schema, imported rather than copied — a copy drifts the moment
@@ -29,7 +29,12 @@ function makeDb() {
         runtimeFolder: '/tmp',
         version: 'test',
         config: { filename: ':memory:' },
-        schemas: new Map([['mikser_snapshots', MANIFEST_SCHEMA]]),
+        schemas: new Map([
+            ['mikser_snapshots', MANIFEST_SCHEMA],
+            // The manifest reads mikser_failures too — a retried render is
+            // decided from it, so a db without it is not a manifest.
+            ['mikser_failures', FAILURES_SCHEMA],
+        ]),
     })
     db.open()
     return db

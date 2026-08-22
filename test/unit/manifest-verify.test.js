@@ -28,7 +28,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 
 import runtime from '../../src/runtime.js'
-import { createManifest, SNAPSHOTS_SCHEMA, resolveOutputPath } from '../../src/manifest.js'
+import { createManifest, SNAPSHOTS_SCHEMA, resolveOutputPath, FAILURES_SCHEMA } from '../../src/manifest.js'
 import { createSqliteDatabase } from '../../src/database/index.js'
 
 const sha1 = (buf) => crypto.createHash('sha1').update(buf).digest('hex')
@@ -38,7 +38,10 @@ function makeDb() {
         runtimeFolder: '/tmp',
         version: 'test',
         config: { filename: ':memory:' },
-        schemas: new Map([['mikser_snapshots', SNAPSHOTS_SCHEMA]]),
+        schemas: new Map([
+            ['mikser_snapshots', SNAPSHOTS_SCHEMA],
+            ['mikser_failures', FAILURES_SCHEMA],
+        ]),
     })
     db.open()
     return db
