@@ -9,7 +9,8 @@
 //
 // Follows --verify's shape: report and exit, no build phases run.
 import { inputHashOf, inputPartsOf, diffInputParts, lookupKeys, checksum as fileChecksum } from './utils.js'
-import { findEntity } from './catalog.js'
+import { filterKey } from './track.js'
+import { findEntity, findEntities } from './catalog.js'
 import runtime from './runtime.js'
 
 const shortHash = (h) => (h ? String(h).slice(0, 8) : null)
@@ -26,6 +27,62 @@ async function resolve(reference) {
     // id-minus-extension: /documents/bg/index → /documents/bg/index.md
     const like = await findEntity({ id: { $regex: `^${reference.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.[^./]+$` } })
     return like ?? null
+}
+
+// How many entities each recorded query filter matches RIGHT NOW.
+//
+// A query edge is a predicate — "any entity matching this" — and the
+// recording layer deliberately stores the filter without its results, so
+// that an entity appearing later still invalidates the render. That is the
+// property that makes aggregate pages work and it must not change.
+//
+// Explaining is a different situation: read-only, reporting instead of
+// building, with the catalog already open. So the count is computed here,
+// at read time, where it costs nothing and answers "is this reference
+// dangling?" for the edge kind that carries most of a real site's
+// references.
+//
+// Run through findEntities rather than hand-rolled SQL: stored filters
+// include $regex and anything else sift accepts, and one code path is the
+// only way the count means the same thing the render meant.
+//
+// A null filter is the sentinel for a predicate that could not be
+// serialized (a function filter, or findEntities() with no argument). It
+// invalidates on any mutation by design, and there is nothing to evaluate,
+// so it reports null rather than a misleading zero.
+async function countQueryMatches(snapshots) {
+    const counts = new Map()
+    for (const snap of snapshots) {
+        for (const entry of snap.refClosure ?? []) {
+            if (entry.kind !== 'query') continue
+            const key = filterKey(entry.filter ?? null)
+            if (counts.has(key)) continue
+            if (entry.filter == null) {
+                counts.set(key, null)
+                continue
+            }
+            try {
+                // recordQuery no-ops outside a render's queryContext, so
+                // explaining a page cannot record edges onto it.
+                const matches = await findEntities(entry.filter)
+                counts.set(key, { count: matches.length, sample: matches[0]?.id ?? null })
+            } catch {
+                // A stored filter the catalog can no longer evaluate is worth
+                // saying so about, not worth failing the whole report for.
+                counts.set(key, 'unevaluable')
+            }
+        }
+    }
+    return counts
+}
+
+// Project a counted filter into the report's shape.
+function queryCount(counts, filter) {
+    const hit = counts.get(filterKey(filter ?? null))
+    if (hit === null) return { matched: null }
+    if (hit === 'unevaluable') return { matched: null, unevaluable: true }
+    if (!hit) return { matched: null }
+    return { matched: hit.count, ...(hit.count === 1 && hit.sample ? { sample: hit.sample } : {}) }
 }
 
 // The verdict line names what moved when it can. That line is the one
@@ -60,6 +117,7 @@ export async function explain(reference) {
     const snapshots = runtime.manifest?.snapshotsFor(entity.id) ?? []
     const currentHash = inputHashOf(entity)
     const currentParts = inputPartsOf(entity)
+    const queryMatches = await countQueryMatches(snapshots)
 
     // The catalog is as of the LAST BUILD. If the file has been edited since,
     // nothing here knows it yet — the hashes would all agree and the verdict
@@ -141,7 +199,17 @@ export async function explain(reference) {
             parent: snap.parent ?? null,
             refClosure: (snap.refClosure ?? []).map(entry =>
                 entry.kind === 'query'
-                    ? { kind: 'query', filter: entry.filter }
+                    ? {
+                        kind: 'query',
+                        filter: entry.filter,
+                        // An explicit integer, because a MISSING key is
+                        // ambiguous to a consumer: an audit script reading
+                        // absence as "unresolved" reports every query edge
+                        // as dangling. `null` means the filter could not be
+                        // evaluated (unserializable predicate); a number is
+                        // a number.
+                        ...queryCount(queryMatches, entry.filter),
+                    }
                     : {
                         kind: entry.kind,
                         target: entry.target,
@@ -222,7 +290,16 @@ export function formatExplain(report) {
         row('refClosure', `${closure.length} edge${closure.length === 1 ? '' : 's'}`)
         for (const e of closure) {
             if (e.kind === 'query') {
-                out.push(`  query      ${JSON.stringify(e.filter)}`)
+                // The count is the point: a query matching nothing is the
+                // dangling-reference case for the edge kind that carries most
+                // of a real site's references, and it printed identically to
+                // one that matched.
+                const state = e.unevaluable ? '  [FILTER CANNOT BE EVALUATED]'
+                    : e.matched === null ? '  (untracked predicate — any mutation invalidates)'
+                    : e.matched === 0 ? '  [MATCHES NOTHING]'
+                    : e.matched === 1 ? `  → ${e.sample ?? '1 entity'}`
+                    : `  → ${e.matched} entities`
+                out.push(`  query      ${JSON.stringify(e.filter)}${state}`)
                 continue
             }
             // Show the name asked for and the entity it bound to, since

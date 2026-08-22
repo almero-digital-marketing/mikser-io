@@ -59,20 +59,39 @@ snapshot: if you have edited a file and not yet built, the verdict is
 `source differs from the catalog` — the edit has not been imported yet, so
 there is nothing to attribute. Build, then ask.
 
-Each `refClosure` edge shows the name that was asked for and the entity
-it bound to, and flags the ones that bound to nothing:
+Each `refClosure` edge shows what was asked for and what answers to it,
+and flags the ones nothing answers to:
 
 ```
-refClosure  4 edges
+refClosure  6 edges
   ref        /hero.txt → /files/hero.txt  24dc5b87
   ref        /does-not-exist  [UNRESOLVED — nothing answers to this name]
   layout     /layouts/page.hbs  f274678c
   lookup     /contacts  [UNRESOLVED — nothing answers to this name]
+  query      {"meta.href":"/system/navigation"}  → /documents/navigation.yml
+  query      {"meta.href":"/cosmetics/celestetic"}  [MATCHES NOTHING]
 ```
 
-An `[UNRESOLVED]` edge is usually the answer on its own. Add `--json` for
-the same report as a machine-readable object. Exits `3` when the entity
-cannot be found.
+A dangling edge is usually the answer on its own, and `query` edges are
+where most of it hides on a site whose references go through a sidecar's
+`findEntity` — there, `ref` and `lookup` may be zero and `query`
+everything.
+
+Query counts are computed when you ask, not when the edge was recorded.
+That is deliberate: an edge stores the filter WITHOUT its results, so an
+entity appearing tomorrow still invalidates the page that links to it
+today. An edge that recorded its bindings would record nothing for a query
+matching nothing, and creating the target later would re-render nothing.
+
+In `--json`, every query edge carries `matched` explicitly — an integer,
+or `null` for a predicate that could not be serialized (`findEntities()`
+with no argument, or a function filter), which invalidates on any mutation
+by design. `matched: 1` also carries `sample` with the id. The field is
+always present, so a consumer never has to read absence as meaning
+anything.
+
+Add `--json` for the whole report as a machine-readable object. Exits `3`
+when the entity cannot be found.
 
 ### `--json`
 
