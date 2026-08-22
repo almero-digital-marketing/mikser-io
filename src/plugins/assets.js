@@ -6,6 +6,7 @@ import { globby } from 'globby'
 import _ from 'lodash'
 import map from 'p-map'
 import { reportWarning } from '../report.js'
+import { isFullCycle } from '../utils.js'
 
 // Normalize a `options.presets[name]` value to a consistent
 // { matches, options } shape so callers don't have to inspect which form
@@ -120,6 +121,14 @@ export function assets(options = {}) {
         if (matchTally.reported) return
         const configured = Object.keys(options.presets || {})
         if (!configured.length || !matchTally.evaluated) return
+        // Only when the cycle evaluated everything. On an incremental run the
+        // evaluated set is whatever changed, so a healthy preset matches
+        // nothing in a run of two and the warning fires on every build —
+        // which trains the reader to filter it, and the filtered-out line is
+        // the real one. The message already told the reader to use --force to
+        // check the whole catalog; that condition gates it now instead of
+        // annotating it.
+        if (!isFullCycle(runtime)) return
         matchTally.reported = true
 
         for (const preset of configured) {
@@ -129,8 +138,7 @@ export function assets(options = {}) {
             logger.warn(
                 'Assets preset %j matched none of the %d entities evaluated (patterns: %s). ' +
                 'Patterns run against entity.id, which files({ outputFolder }) does NOT prefix — ' +
-                'the prefix appears on name and meta.url only. On an incremental run unchanged ' +
-                'entities are not re-evaluated; use --force to check the whole catalog.',
+                'the prefix appears on name and meta.url only.',
                 preset, matchTally.evaluated, matches.join(', '))
         }
     }

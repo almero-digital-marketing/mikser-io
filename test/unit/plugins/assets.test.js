@@ -12,7 +12,7 @@ import { createHarness } from '../plugin-harness.js'
 // optional local preset file, run the assets plugin through onLoaded +
 // onImport, and hand the harness back for assertions. Cleans up the
 // temp dir afterward.
-async function withPresetProject({ npmPresets = {}, localPresets = {}, assetsOptions, entities = [] }, fn) {
+async function withPresetProject({ npmPresets = {}, localPresets = {}, assetsOptions, entities = [], runOptions = {} }, fn) {
     const workingFolder = await mkdtemp(path.join(tmpdir(), 'mikser-presets-'))
     try {
         // Lay down npm-style packages under node_modules.
@@ -32,7 +32,10 @@ async function withPresetProject({ npmPresets = {}, localPresets = {}, assetsOpt
         }
 
         const h = createHarness({
-            options: { workingFolder, outputFolder: path.join(workingFolder, 'out') },
+            // `force` marks a full cycle. The no-match warning is gated on
+            // one, because an incremental run evaluates only what changed and
+            // a healthy preset legitimately matches none of it.
+            options: { workingFolder, outputFolder: path.join(workingFolder, 'out'), ...runOptions },
             entities,
         })
         assets(assetsOptions ?? {})(h.core)
@@ -282,10 +285,41 @@ describe('assets plugin: a preset that matched nothing', () => {
     }
     const preset = `export const revision = 1\nexport const format = 'webp'\nexport default () => {}\n`
 
+    it('stays silent on an incremental cycle', async () => {
+        // The inverse case, and the reason the gate exists. An incremental
+        // run evaluates only what changed, so a healthy preset matches none
+        // of the one or two entities in a settled build. Warning there fires
+        // on every build, and a warning that always fires gets filtered —
+        // which loses the real one with it.
+        await withPresetProject({
+            entities: [fileEntity],
+            npmPresets: { resize: preset, thumb: preset },
+            // No force, no firstRun, no cache invalidation.
+            assetsOptions: {
+                presets: {
+                    resize: { match: '@/media/*' },
+                    thumb:  { match: '/files/media/devices/**' },
+                },
+            },
+        }, async (h) => {
+            await h.addJournalEntry({ operation: h.constants.OPERATION.CREATE, entity: fileEntity })
+            await h.runHook('processed')
+            await h.runHook('finalize')
+
+            const warnings = h.logs.filter(l =>
+                l.level === 'warn' && l.args.join(' ').includes('Assets preset'))
+            assert.deepEqual(
+                warnings, [],
+                'an incremental cycle cannot support the conclusion, so it must not draw it',
+            )
+        })
+    })
+
     it('warns, naming the preset, its patterns, and what they match against', async () => {
         await withPresetProject({
             entities: [fileEntity],
             npmPresets: { resize: preset, thumb: preset },
+            runOptions: { force: true },
             assetsOptions: {
                 presets: {
                     resize: { match: '@/media/*' },                  // matches name
@@ -305,7 +339,9 @@ describe('assets plugin: a preset that matched nothing', () => {
             assert.ok(!text.includes('"resize"'), 'does not name the preset that matched')
             assert.match(text, /\/files\/media\/devices/, 'quotes the patterns')
             assert.match(text, /entity\.id/, 'says what patterns are matched against')
-            assert.match(text, /--force/, 'says how to check the whole catalog')
+            // No longer advises --force: the warning only fires on a full
+            // cycle, so it would be telling the reader to do what they did.
+            assert.ok(!text.includes('--force'), 'does not advise what the reader just did')
         })
     })
 

@@ -27,9 +27,9 @@ export default {
 `
 
 const workdir = freshWorkdir('json-report')
-const build = () => new Promise(resolve => {
+const build = (...args) => new Promise(resolve => {
     let stdout = '', stderr = ''
-    const p = spawn('node', ['--no-warnings', 'app.js', '--working-folder', workdir, '--json'], {
+    const p = spawn('node', ['--no-warnings', 'app.js', '--working-folder', workdir, '--json', ...args], {
         cwd: MIKSER_ROOT,
         env: { ...process.env, NO_COLOR: '1', NODE_PATH: path.dirname(MIKSER_ROOT) },
     })
@@ -61,7 +61,7 @@ describe('--json build report', () => {
         // a breaking change to anyone asserting on it.
         const KNOWN = new Set(['unchanged', 'never-rendered', 'inputs-changed',
                                'ref-changed', 'query-matched', 'cache-disabled',
-                               'postprocessor', 'no-manifest'])
+                               'postprocessor', 'force', 'no-manifest'])
         const report = JSON.parse((await build()).stdout)
         for (const r of [...report.rendered, ...report.skipped]) {
             assert.ok(KNOWN.has(r.reason), `unexpected reason ${JSON.stringify(r.reason)}`)
@@ -70,11 +70,11 @@ describe('--json build report', () => {
     })
 
     it('a warning carries a machine-readable code plus its fields', async () => {
-        // Touch a file first: the no-match warnings are silent when nothing
-        // was evaluated, so a fully cached build legitimately reports none.
-        await writeFile(path.join(workdir, 'documents', 'bg', 'aparati', 'onix.md'),
-                        '---\ntitle: Onix v2\n---\nbody\n')
-        const report = JSON.parse((await build()).stdout)
+        // --force, because a no-match warning only fires on a cycle that
+        // evaluated the whole catalog. An incremental run re-evaluates only
+        // what changed, so a healthy pattern matches none of it and the
+        // conclusion "this pattern matches nothing" is not supportable.
+        const report = JSON.parse((await build('--force')).stdout)
         const warning = report.warnings.find(w => w.code === 'layout-pattern-no-match')
         assert.ok(warning, `expected layout-pattern-no-match, got ${JSON.stringify(report.warnings)}`)
         assert.equal(warning.pattern, '@/nonesuch/*')

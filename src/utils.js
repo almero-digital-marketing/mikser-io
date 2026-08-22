@@ -990,6 +990,29 @@ export async function writeOutput(file, bytes) {
     return true
 }
 
+// Did this cycle evaluate the whole corpus, or only what changed?
+//
+// The distinction is what makes a "declared X matched nothing" warning
+// worth printing. On an incremental cycle only changed entities are
+// re-evaluated, so a pattern or preset legitimately matches nothing in a
+// run of two — printing it there means the warning fires on every healthy
+// build, and a warning that always fires is one people filter out, taking
+// the real instance with it.
+//
+// True for: --force, a first-run or wiped database, and a cache
+// invalidation. Those are exactly the cases where the import gate is
+// bypassed and every entity is presented for evaluation.
+// Takes the runtime rather than reading the singleton, so a plugin passes
+// the one it was injected with — which is the singleton in a real build and
+// the harness's stand-in under test.
+export function isFullCycle(rt = runtime) {
+    return !!(
+        rt?.options?.force
+        || rt?.options?.firstRun
+        || rt?.catalog?.cacheInvalidated
+    )
+}
+
 // ── operating-system and file-manager litter ────────────────────────────
 //
 // Exposing a source folder over a network filesystem (mikser-io-webdav) or

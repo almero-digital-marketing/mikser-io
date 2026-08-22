@@ -331,6 +331,11 @@ export function createSqliteDatabase({
             logger: logger ?? null,
         }
 
+        // Published so plugins can tell an everything-was-evaluated cycle
+        // from an incremental one without reaching into the db handle. Read
+        // through `isFullCycle()` in utils.js rather than directly.
+        runtime.options.firstRun = provisioningCtx.firstRun
+
         // Fire provisioning callbacks before schema apply, so they can
         // load runtime extensions (sqlite-vec's vec0, etc.) that the
         // schemas about to apply might reference, register custom

@@ -190,9 +190,34 @@ function snapToRow(snap) {
     }
 }
 
-async function hashOutputFile(destination) {
+// Where a `destination` actually is on disk.
+//
+// Two shapes are in circulation and both are legitimate. A page's is
+// output-relative with a leading slash (`/bg/index.html`); an asset's is a
+// real filesystem path, because assets.js builds it from
+// `runtime.options.assetsFolder`, which resolves inside the WORKING folder
+// and can sit outside outputFolder entirely.
+//
+// `path.isAbsolute` cannot separate them — on POSIX `/bg/index.html` is
+// absolute too — so resolve by EXISTENCE, output-relative first since that
+// is the dominant shape. A page destination treated as a filesystem path
+// would otherwise be looked for at the root of the disk.
+//
+// Shared, because the two callers needing it drifted into two separate
+// bugs: verify() reported every asset missing while printing its real
+// path, and hashOutputFile silently recorded no outputHash for one, which
+// left 78% of a real project's snapshots presence-checked only.
+export function resolveOutputPath(destination, outputFolder = runtime.options?.outputFolder) {
     if (!destination) return undefined
-    const filePath = path.join(runtime.options.outputFolder, destination)
+    const joined = path.join(outputFolder ?? '', destination)
+    if (existsSync(joined)) return joined
+    if (path.isAbsolute(destination) && existsSync(destination)) return destination
+    return joined
+}
+
+async function hashOutputFile(destination) {
+    const filePath = resolveOutputPath(destination)
+    if (!filePath) return undefined
     try {
         const buf = await readFile(filePath)
         return sha1(buf)
@@ -552,31 +577,7 @@ export function createManifest(db) {
             for (const row of stmtSelectAll.iterate()) {
                 const snap = rowToSnap(row)
                 if (!snap.destination) continue
-                // `destination` arrives in two shapes and both are legitimate.
-                // A page's is output-relative with a leading slash
-                // (`/bg/index.html`); an asset's is a real filesystem path,
-                // because assets.js builds it from
-                // `runtime.options.assetsFolder` — which resolves inside the
-                // WORKING folder and may sit outside outputFolder entirely
-                // (a `derived/` tree that `shares` symlinks into each language
-                // root is the case that proves it).
-                //
-                // `path.isAbsolute` cannot tell them apart: on POSIX
-                // `/bg/index.html` is absolute too. So resolve by EXISTENCE,
-                // output-relative first — that is the dominant shape, and a
-                // page destination interpreted as a filesystem path would
-                // otherwise be looked for at the root of the disk.
-                //
-                // Only the fallback path is a filesystem path, so it is only
-                // tried when the destination is absolute and joining changed
-                // nothing that resolves.
-                const joined = path.join(outputFolder, snap.destination)
-                let filePath = joined
-                if (!existsSync(joined)
-                    && path.isAbsolute(snap.destination)
-                    && existsSync(snap.destination)) {
-                    filePath = snap.destination
-                }
+                const filePath = resolveOutputPath(snap.destination, outputFolder)
                 // Orphan detection compares against a globby walk of
                 // outputFolder, so `claimed` has to hold exactly the relative
                 // form that walk produces. A destination resolving outside

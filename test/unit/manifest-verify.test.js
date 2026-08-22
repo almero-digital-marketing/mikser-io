@@ -20,7 +20,7 @@
 // Nothing is wrong with either producer alone, which is why the asymmetry
 // is the case worth pinning.
 
-import { describe, it, beforeEach, afterEach } from 'node:test'
+import { describe, it, before, after, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -28,7 +28,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 
 import runtime from '../../src/runtime.js'
-import { createManifest, SNAPSHOTS_SCHEMA } from '../../src/manifest.js'
+import { createManifest, SNAPSHOTS_SCHEMA, resolveOutputPath } from '../../src/manifest.js'
 import { createSqliteDatabase } from '../../src/database/index.js'
 
 const sha1 = (buf) => crypto.createHash('sha1').update(buf).digest('hex')
@@ -156,5 +156,61 @@ describe('manifest.verify()', () => {
         assert.deepEqual(diff.missing, [])
         assert.deepEqual(diff.mismatched, [])
         assert.deepEqual(diff.orphaned, [])
+    })
+})
+
+describe('resolveOutputPath', () => {
+    // The resolver both verify() and hashOutputFile use. They each had their
+    // own copy of the join and each grew a different bug from it: verify
+    // reported every asset missing, and hashOutputFile recorded no
+    // outputHash for one — which left most of a project's snapshots
+    // presence-checked only, with nothing saying so.
+    let root, outputFolder, outside
+
+    before(async () => {
+        root = await mkdtemp(path.join(tmpdir(), 'mikser-resolve-'))
+        outputFolder = path.join(root, 'out')
+        outside = path.join(root, 'derived')
+        await mkdir(outputFolder, { recursive: true })
+        await mkdir(outside, { recursive: true })
+        await writeFile(path.join(outputFolder, 'page.html'), 'page')
+        await writeFile(path.join(outside, 'hero.webp'), 'webp')
+    })
+
+    after(async () => { await rm(root, { recursive: true, force: true }) })
+
+    it('resolves an output-relative destination under the output folder', () => {
+        assert.equal(
+            resolveOutputPath('/page.html', outputFolder),
+            path.join(outputFolder, 'page.html'),
+        )
+    })
+
+    it('resolves an absolute destination outside the output folder', () => {
+        const abs = path.join(outside, 'hero.webp')
+        assert.equal(resolveOutputPath(abs, outputFolder), abs)
+    })
+
+    it('prefers the output-relative reading when both could resolve', async () => {
+        // A page destination is absolute-looking. If the same path also
+        // existed at the root of the disk, the output folder still wins.
+        assert.equal(
+            resolveOutputPath('/page.html', outputFolder),
+            path.join(outputFolder, 'page.html'),
+        )
+    })
+
+    it('returns the joined path for something that does not exist', () => {
+        // Callers report this string, and for a missing page the joined form
+        // is the one that says where it was expected.
+        assert.equal(
+            resolveOutputPath('/gone.html', outputFolder),
+            path.join(outputFolder, 'gone.html'),
+        )
+    })
+
+    it('returns undefined for no destination', () => {
+        assert.equal(resolveOutputPath(undefined, outputFolder), undefined)
+        assert.equal(resolveOutputPath('', outputFolder), undefined)
     })
 })
