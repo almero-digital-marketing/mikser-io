@@ -86,17 +86,51 @@ export function assets(options = {}) {
     const type = 'preset'
     const checksumMap = new Set()
 
+    // A preset that matches nothing builds green and says nothing, which is
+    // how a mistyped pattern ships. `files({ outputFolder })` prefixes `name`
+    // and `meta.url` but NOT `id`, and `match` runs against `id` — so
+    // '/files/media/devices/**' looks right and matches zero. Tallied here,
+    // reported once per process at onFinalize.
+    const matchTally = { evaluated: 0, matched: new Set(), reported: false }
+
     async function getEntityPresets(entity) {
         const entityPresets = []
+        matchTally.evaluated++
         for (let preset in (options.presets || {})) {
             const { matches } = normalizePresetConfig(options.presets[preset])
             for (let match of matches) {
                 if (matchEntity(entity, match)) {
                     entityPresets.push(preset)
+                    matchTally.matched.add(preset)
                 }
             }
         }
         return entityPresets
+    }
+
+    // Report presets that matched none of the entities this run evaluated.
+    //
+    // Deliberately phrased as what was OBSERVED rather than "this preset is
+    // broken": an incremental cycle only re-evaluates changed entities, so a
+    // preset can legitimately match nothing in a run of three. The count and
+    // the --force hint let the reader tell the two apart, which a bare
+    // "matched nothing" would not. Once per process, so watch mode is quiet.
+    function reportUnmatchedPresets(logger) {
+        if (matchTally.reported) return
+        const configured = Object.keys(options.presets || {})
+        if (!configured.length || !matchTally.evaluated) return
+        matchTally.reported = true
+
+        for (const preset of configured) {
+            if (matchTally.matched.has(preset)) continue
+            const { matches } = normalizePresetConfig(options.presets[preset])
+            logger.warn(
+                'Assets preset %j matched none of the %d entities evaluated (patterns: %s). ' +
+                'Patterns run against entity.id, which files({ outputFolder }) does NOT prefix — ' +
+                'the prefix appears on name and meta.url only. On an incremental run unchanged ' +
+                'entities are not re-evaluated; use --force to check the whole catalog.',
+                preset, matchTally.evaluated, matches.join(', '))
+        }
     }
 
     // Resolve a preset name to an importable module location. Local
@@ -436,6 +470,8 @@ export function assets(options = {}) {
     onFinalize(async () => {
         const logger = useLogger()
         const { presets } = runtime.state.assets
+
+        reportUnmatchedPresets(logger)
 
         let revisions = await globby('**/*.md5', { cwd: runtime.options.assetsFolder })
         for (let revision of revisions) {

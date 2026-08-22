@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { format } from 'node:util'
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -266,6 +267,76 @@ describe('assets plugin: per-preset options from config', () => {
             assert.ok(task, 'expected a render task')
             assert.equal(task.options.width, 128, 'module options pass through untouched')
             assert.equal(task.options.renderer, 'preset')
+        })
+    })
+})
+
+describe('assets plugin: a preset that matched nothing', () => {
+    // The failure this reports: files({ outputFolder }) prefixes `name` and
+    // `meta.url` but NOT `id`, and a bare pattern is matched against `id`. So
+    // '/files/media/devices/**' looks right, matches zero, and the build goes
+    // green while pages serve the camera originals.
+    const fileEntity = {
+        id: '/files/hero.jpg', name: 'media/hero', collection: 'files',
+        type: 'file', format: 'jpg', checksum: 'abc',
+    }
+    const preset = `export const revision = 1\nexport const format = 'webp'\nexport default () => {}\n`
+
+    it('warns, naming the preset, its patterns, and what they match against', async () => {
+        await withPresetProject({
+            entities: [fileEntity],
+            npmPresets: { resize: preset, thumb: preset },
+            assetsOptions: {
+                presets: {
+                    resize: { match: '@/media/*' },                  // matches name
+                    thumb:  { match: '/files/media/devices/**' },    // matches nothing
+                },
+            },
+        }, async (h) => {
+            await h.addJournalEntry({ operation: h.constants.OPERATION.CREATE, entity: fileEntity })
+            await h.runHook('processed')
+            await h.runHook('finalize')
+
+            const warnings = h.logs.filter(l =>
+                l.level === 'warn' && l.args.join(' ').includes('Assets preset'))
+            assert.equal(warnings.length, 1, `expected one warning, got ${warnings.length}`)
+            const text = format(...warnings[0].args)
+            assert.match(text, /"thumb"/, 'names the preset that matched nothing')
+            assert.ok(!text.includes('"resize"'), 'does not name the preset that matched')
+            assert.match(text, /\/files\/media\/devices/, 'quotes the patterns')
+            assert.match(text, /entity\.id/, 'says what patterns are matched against')
+            assert.match(text, /--force/, 'says how to check the whole catalog')
+        })
+    })
+
+    it('says nothing when every preset matched', async () => {
+        await withPresetProject({
+            entities: [fileEntity],
+            npmPresets: { resize: preset },
+            assetsOptions: { presets: { resize: { match: '@/media/*' } } },
+        }, async (h) => {
+            await h.addJournalEntry({ operation: h.constants.OPERATION.CREATE, entity: fileEntity })
+            await h.runHook('processed')
+            await h.runHook('finalize')
+            assert.deepEqual(
+                h.logs.filter(l => l.level === 'warn' && l.args.join(' ').includes('Assets preset')),
+                [])
+        })
+    })
+
+    it('stays quiet when nothing was evaluated, so an idle cycle is not noise', async () => {
+        await withPresetProject({
+            entities: [fileEntity],
+            npmPresets: { thumb: preset },
+            assetsOptions: { presets: { thumb: { match: '/nope/**' } } },
+        }, async (h) => {
+            // No journal entries: nothing evaluated, so nothing can be said
+            // about whether the pattern is wrong.
+            await h.runHook('processed')
+            await h.runHook('finalize')
+            assert.deepEqual(
+                h.logs.filter(l => l.level === 'warn' && l.args.join(' ').includes('Assets preset')),
+                [])
         })
     })
 })
