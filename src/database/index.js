@@ -247,10 +247,38 @@ export function createSqliteDatabase({
         handle = new Database(dbPath)
         setupConnection()
 
-        const recorded = handle.prepare('SELECT value FROM mikser_meta WHERE key = ?')
-            .get('schema_version')?.value
+        const stmtMeta = handle.prepare('SELECT value FROM mikser_meta WHERE key = ?')
+        const recorded = stmtMeta.get('schema_version')?.value
+
+        // A config change invalidates the cache for the same reason a version
+        // change does: the derived state was computed under different rules.
+        //
+        // Before this, editing mikser.config.js invalidated nothing — flipping
+        // an option that changes every page's destination reported "36
+        // unchanged" and left the previous output in place. The config was
+        // read; it simply took part in no invalidation, so the only symptom
+        // was output that did not match the config and nothing saying so.
+        //
+        // Treated exactly like a version mismatch rather than something
+        // narrower: a config edit can change how sources are PARSED (a mapper
+        // transform, documents() options) as well as how they are rendered,
+        // so invalidating only the render manifest would still leave stale
+        // entities. Per ADR-0002 the files are the source of truth, so
+        // rebuilding is always safe — just slower.
+        const recordedConfig = stmtMeta.get('config_checksum')?.value
+        const currentConfig = runtime.options.configChecksum ?? null
+        const configChanged = Boolean(recordedConfig && currentConfig && recordedConfig !== currentConfig)
+
         let upgradedFromVersion = null
-        if (recorded && recorded !== version) {
+        if (configChanged && !(recorded && recorded !== version)) {
+            logger?.warn(
+                'Config changed since the last run. Wiping the cache and rebuilding from sources ' +
+                '(files are the source of truth — no source data is affected). Note this tracks the ' +
+                'bytes of %s only: a change in a module it imports is not seen.',
+                runtime.options.config,
+            )
+        }
+        if ((recorded && recorded !== version) || configChanged) {
             // Schema mismatch on upgrade or downgrade. Per ADR-0002 the
             // files on disk are the source of truth and this database
             // is a derived cache, so the right behavior is to wipe the
@@ -261,10 +289,12 @@ export function createSqliteDatabase({
             // expect a cold-start rebuild on this run. No data loss
             // beyond the cache itself; everything in mikser.sqlite is
             // recoverable from the working folder.
-            logger?.warn(
-                'Database schema mismatch: stored=%s, current=%s. Wiping the cache and rebuilding from sources (files are the source of truth — no source data is affected).',
-                recorded, version,
-            )
+            if (recorded && recorded !== version) {
+                logger?.warn(
+                    'Database schema mismatch: stored=%s, current=%s. Wiping the cache and rebuilding from sources (files are the source of truth — no source data is affected).',
+                    recorded, version,
+                )
+            }
             handle.close()
             handle = null
 
@@ -277,12 +307,16 @@ export function createSqliteDatabase({
                 }
             }
 
-            upgradedFromVersion = recorded
+            // Non-null marks the provisioning context as firstRun/upgraded,
+            // which is the right shape for a config change too: what the
+            // provisioners see is an empty-state database either way.
+            upgradedFromVersion = recorded ?? 'config'
             handle = new Database(dbPath)
             setupConnection()
         }
-        handle.prepare('INSERT OR REPLACE INTO mikser_meta (key, value) VALUES (?, ?)')
-            .run('schema_version', version)
+        const stmtStamp = handle.prepare('INSERT OR REPLACE INTO mikser_meta (key, value) VALUES (?, ?)')
+        stmtStamp.run('schema_version', version)
+        if (currentConfig) stmtStamp.run('config_checksum', currentConfig)
 
         // Build provisioning context. firstRun is true when the file
         // didn't exist before this open OR when the schema mismatch
