@@ -159,6 +159,13 @@ export function files(options = {}) {
             // journal with phantom mutations and triggering downstream
             // re-dispatch of aggregate layouts whose recorded query deps
             // matched the collection.
+            // --force (and a wiped catalog) must defeat the gate, the same
+            // way source.js's gateChecksum lets them defeat its own. This
+            // plugin carries a second, independent gate, and it honoured
+            // neither — so no amount of forcing ever re-derived a file's
+            // name / meta.url / meta.presets, and a catalog holding bad
+            // `files` rows had no repair path short of deleting them.
+            const forced = runtime.options.force || runtime.catalog?.cacheInvalidated
             const priorChecksums = checksumsByCollection(collection)
             await pMap(paths, async relativePath => {
                 const { uri, source } = await ensureLink(relativePath)
@@ -175,7 +182,7 @@ export function files(options = {}) {
                 // the journal stays accurate (mutations = actual changes),
                 // and downstream aggregate-layout invalidation isn't fired
                 // spuriously.
-                if (priorChecksums.get(id) === newChecksum) return
+                if (!forced && priorChecksums.get(id) === newChecksum) return
                 await createEntity({
                     id,
                     uri,

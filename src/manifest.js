@@ -306,7 +306,20 @@ export function createManifest(db) {
         //   ref-changed      a $-ref or partial it depends on moved
         //   query-matched    an entity matching a recorded query mutated
         //   cache-disabled   meta.cache === false
+        //   force            --force: skip nothing, ask nothing
         skipDecision(entity, mutatedRefs, currentHashes, mutatedEntities) {
+            // --force means "ignore what you think you know". THREE gates can
+            // stop a render — source.js's import checksum gate, layouts'
+            // dispatch filter, and this one — and force reached only the
+            // first two. Since this one runs last, a forced build re-imported
+            // everything (gated=0), re-dispatched everything, and then
+            // dropped all of it here with reason `unchanged`: rendered=0, and
+            // a summary that read like a successful build.
+            //
+            // That made --force useless in exactly the situation it exists
+            // for, which is when the invalidation graph is under suspicion —
+            // including the advice the preset no-match warning gives.
+            if (runtime.options?.force) return { skip: false, reason: 'force' }
             if (entity?.meta?.cache === false) return { skip: false, reason: 'cache-disabled' }
             const snapshot = this.lookup(entity)
             if (!snapshot?.inputHash) return { skip: false, reason: 'never-rendered' }
