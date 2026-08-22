@@ -44,6 +44,6 @@ export function load({ runtime }) {
     }
 }
 
-export function renderFile(options = {}) {
+export function fileHelpers(options = {}) {
     return { name: options.name ?? 'file', options, load }
 }

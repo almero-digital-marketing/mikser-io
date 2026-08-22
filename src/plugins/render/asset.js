@@ -10,6 +10,6 @@ export function load({ runtime, entity, state, options }) {
     }
 }
 
-export function renderAsset(options = {}) {
+export function assetUrlHelper(options = {}) {
     return { name: options.name ?? 'asset', options, load }
 }

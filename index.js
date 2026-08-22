@@ -45,9 +45,18 @@ export { yaml }          from './src/plugins/yaml.js'
 // loader stores in `runtime.renderers`; the same module also still
 // exports `load`/`render` at the top level so Piscina worker dispatch
 // can resolve via dynamic import. ADR-0010.
-export { renderAsset }    from './src/plugins/render/asset.js'
-export { renderFile }     from './src/plugins/render/file.js'
-export { renderHbs }      from './src/plugins/render/hbs.js'
-export { renderHref }     from './src/plugins/render/href.js'
-export { renderPreset }   from './src/plugins/render/preset.js'
-export { renderResource } from './src/plugins/render/resource.js'
+// Renderers — these have a render() and turn an entity into a file.
+export { renderHbs }    from './src/plugins/render/hbs.js'
+export { renderPreset } from './src/plugins/render/preset.js'
+
+// Template helpers — these only install functions on `runtime` for templates
+// to call. They render nothing, which is what the old render* names hid: two
+// of the six factories in this folder are renderers and four are not, and
+// naming all six after the object they concern rather than the job they do
+// led someone to add renderPreset() expecting a helper and watch every page
+// render throw. Renamed in 10.0.0; there are no aliases.
+export { assetUrlHelper }    from './src/plugins/render/asset.js'
+export { hrefUrlHelpers }    from './src/plugins/render/href.js'
+export { resourceUrlHelper } from './src/plugins/render/resource.js'
+export { fileHelpers }       from './src/plugins/render/file.js'
+

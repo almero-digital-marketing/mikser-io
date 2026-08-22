@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import * as renderFile from '../../../src/plugins/render/file.js'
+import * as fileHelpers from '../../../src/plugins/render/file.js'
 
 // render-file is a "load() only" plugin — it attaches utility
 // functions to the runtime object. We invoke load() with a fake
@@ -17,7 +17,7 @@ describe('render-file plugin', () => {
     describe('runtime.json', () => {
         it('stringifies primitives', () => {
             const r = fakeRuntime()
-            renderFile.load({ runtime: r })
+            fileHelpers.load({ runtime: r })
 
             assert.equal(r.json('hello'),       '"hello"')
             assert.equal(r.json(42),             '42')
@@ -28,7 +28,7 @@ describe('render-file plugin', () => {
 
         it('stringifies arrays + objects with full structural fidelity', () => {
             const r = fakeRuntime()
-            renderFile.load({ runtime: r })
+            fileHelpers.load({ runtime: r })
 
             assert.equal(r.json([1, 'two', null]),  '[1,"two",null]')
             assert.equal(r.json({ a: 1, b: [2, 3] }), '{"a":1,"b":[2,3]}')
@@ -36,7 +36,7 @@ describe('render-file plugin', () => {
 
         it('escapes quotes inside strings — produces a syntactically valid JS literal', () => {
             const r = fakeRuntime()
-            renderFile.load({ runtime: r })
+            fileHelpers.load({ runtime: r })
 
             // This is the whole point of having a json helper:
             // embedding strings that may contain quotes / newlines
@@ -50,7 +50,7 @@ describe('render-file plugin', () => {
 
         it('returns a plain string (not a SafeString) — caller chooses escaping via {{{}}} vs {{}}', () => {
             const r = fakeRuntime()
-            renderFile.load({ runtime: r })
+            fileHelpers.load({ runtime: r })
 
             // No SafeString wrap on purpose. Triple-stash in the
             // template means "raw"; double-stash means "escaped". The
@@ -66,13 +66,13 @@ describe('render-file plugin', () => {
     describe('runtime.array', () => {
         it('returns an empty array when called with no args', () => {
             const r = fakeRuntime()
-            renderFile.load({ runtime: r })
+            fileHelpers.load({ runtime: r })
             assert.deepEqual(r.array(), [])
         })
 
         it('returns its positional args as an array', () => {
             const r = fakeRuntime()
-            renderFile.load({ runtime: r })
+            fileHelpers.load({ runtime: r })
 
             assert.deepEqual(r.array(1, 2, 3),               [1, 2, 3])
             assert.deepEqual(r.array('a', 'b'),               ['a', 'b'])
@@ -81,7 +81,7 @@ describe('render-file plugin', () => {
 
         it('strips the trailing Handlebars options object (with .hash) so it doesn\'t leak into the array', () => {
             const r = fakeRuntime()
-            renderFile.load({ runtime: r })
+            fileHelpers.load({ runtime: r })
 
             // Handlebars helpers receive a trailing options object on
             // every call. If we didn't strip it, {{array}} would
@@ -93,7 +93,7 @@ describe('render-file plugin', () => {
 
         it('preserves trailing plain objects (no .hash) — they are real array elements', () => {
             const r = fakeRuntime()
-            renderFile.load({ runtime: r })
+            fileHelpers.load({ runtime: r })
 
             // A user calling `{{array obj1 obj2}}` where obj2 has no
             // `.hash` is using array() to build a list of real
@@ -106,7 +106,7 @@ describe('render-file plugin', () => {
     describe('existing helpers still work (regression check)', () => {
         it('registers readFile, jsonFile, glob, json, array', () => {
             const r = fakeRuntime()
-            renderFile.load({ runtime: r })
+            fileHelpers.load({ runtime: r })
 
             for (const name of ['readFile', 'jsonFile', 'glob', 'json', 'array']) {
                 assert.equal(typeof r[name], 'function', `expected runtime.${name} to be a function`)
@@ -120,7 +120,7 @@ describe('render-file plugin', () => {
                 await writeFile(path.join(tmp, 'a.json'), '{"x":1}')
 
                 const r = fakeRuntime()
-                renderFile.load({ runtime: r })
+                fileHelpers.load({ runtime: r })
 
                 assert.equal(r.readFile(path.join(tmp, 'a.txt')), 'hello')
                 assert.deepEqual(r.jsonFile(path.join(tmp, 'a.json')), { x: 1 })

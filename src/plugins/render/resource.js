@@ -16,6 +16,6 @@ export function load({ runtime, entity, state, options }) {
     }
 }
 
-export function renderResource(options = {}) {
+export function resourceUrlHelper(options = {}) {
     return { name: options.name ?? 'resource', options, load }
 }

@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url'
 import {
     documents, frontMatter, yaml, files, resources, assets,
-    renderHbs, renderHref, renderAsset, renderResource,
+    renderHbs, hrefUrlHelpers, assetUrlHelper, resourceUrlHelper,
 } from 'mikser-io'
 import { layouts }        from 'mikser-io-layouts'
 import { renderLiquid }   from 'mikser-io-render-liquid'
@@ -49,9 +49,9 @@ export default async ({ options }) => ({
         renderLiquid(),
         renderEta(),
         renderMarkdown(),
-        renderHref(),
-        renderResource(),
-        renderAsset(),
+        hrefUrlHelpers(),
+        resourceUrlHelper(),
+        assetUrlHelper(),
         postPdf(),
         postMjml(),
         vector({

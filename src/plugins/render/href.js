@@ -41,6 +41,6 @@ export function load({ entity, runtime, options }) {
     runtime.next = entity.page + 1 < entity.pages ? entity.page + 1 : false
 }
 
-export function renderHref(options = {}) {
+export function hrefUrlHelpers(options = {}) {
     return { name: options.name ?? 'href', options, load }
 }
