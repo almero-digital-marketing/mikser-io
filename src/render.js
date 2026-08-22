@@ -74,9 +74,16 @@ function lookupHrefViaDb(href) {
 // `origin` (runtime.options.url) makes it absolute so static outputs —
 // emails, feeds — carry a whole URL; absent, it stays base-relative.
 // Unresolved refs return unchanged, staying visible like lookupHref.
-function lookupUrlViaDb(ref, preset, origin) {
+function lookupUrlViaDb(ref, preset, origin, track) {
     if (typeof ref !== 'string') return ref
     const row = stmtIdLookup.get(ref)
+    // Record the dependency here, where the row is already read, rather
+    // than in the wrapper — a second lookup per call would be paid on
+    // every image and media reference in a template. stmtIdLookup is an
+    // exact-id read, so a hit means the bound entity IS `ref`; a miss
+    // records the name with no binding, which is a forward reference and
+    // still a real dependency.
+    track?.lookup?.(ref, row ? ref : null)
     if (!row) return ref
     const meta = JSON.parse(row.data).meta || {}
     // A template helper called with one arg still receives the renderer's
@@ -196,19 +203,22 @@ export default async ({ entity, options, config, context, state, logger, port, t
         // no edge to check. A sidecar's findEntities() was tracked all along;
         // these two were the asymmetry.
         //
-        // The recorded target is the string the template asked for, not the
-        // resolved id — see track.lookup for why that also covers a target that
-        // does not exist yet.
+        // Both record the name asked for AND what it bound to. The
+        // entities are already in the result, so extracting the ids is
+        // free — see track.lookup for why both halves are needed.
         lookupHref: (href) => {
-            track?.lookup?.(href)
-            return lookupHrefViaDb(href)
+            const result = lookupHrefViaDb(href)
+            // Either a bare entity or a { lang: entity } map — see
+            // lookupHrefViaDb's contract above.
+            const ids = !result ? []
+                : typeof result.id === 'string' ? [result.id]
+                : Object.values(result).map(e => e?.id).filter(Boolean)
+            track?.lookup?.(href, ids)
+            return result
         },
         // Resolve a served-entity reference to its deployed URL, absolute
         // when runtime.options.url is set (ADR-0011).
-        lookupUrl: (ref, preset) => {
-            if (typeof ref === 'string') track?.lookup?.(ref)
-            return lookupUrlViaDb(ref, preset, options.url)
-        },
+        lookupUrl: (ref, preset) => lookupUrlViaDb(ref, preset, options.url, track),
         content() {
             return readFileSync(entity.source, { encoding: 'utf8' })
         },

@@ -25,7 +25,7 @@
 
 import { describe, it, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { rename, rm, readFile, readdir } from 'node:fs/promises'
+import { rename, rm, writeFile, readFile, readdir } from 'node:fs/promises'
 import path from 'node:path'
 import { setupFixture, runMikser, cleanup, freshWorkdir, stripAnsi } from './_harness.js'
 
@@ -109,14 +109,26 @@ describe('lookup invalidation: runtime.href() targets are tracked', () => {
         assert.notEqual(await linkIn('page-a.html'), 'contact-us.html')
     })
 
-    // KNOWN GAP, pre-dates lookup tracking and affects static $-refs the
-    // same way: the engine seeds the inverse-closure walk from a mutated
-    // entity's CURRENT lookupKeys (engine.js, `for (const key of
-    // lookupKeys(entity))`). When an entity keeps its file but changes
-    // its `meta.href`, the OLD key — the one dependents actually
-    // recorded an edge against — is in no seed set, so nothing walks
-    // back to them. Closing it needs the previous identity keys, which
-    // the journal does not carry; the old row is still readable in
-    // catalog.applyJournalMutations right before stmtUpsert.
-    it.todo('re-renders when the target CHANGES its href (needs old-key seeding)')
+    it('re-renders when the target CHANGES its href', async () => {
+        // The case that motivated recording bindings. The target keeps
+        // its file, so there is no DELETE payload carrying the old name
+        // and no new id — only `meta.href` moves, and the old key is the
+        // one every dependent recorded. Name-based invalidation cannot
+        // see this; the edge's target_id can, because it names the
+        // entity rather than what the entity is currently called.
+        await setupFixture(workdir, FIXTURE)
+        await runMikser(workdir)
+        assert.equal(await linkIn('page-a.html'), 'contacts.html')
+
+        await writeFile(
+            path.join(workdir, 'documents', 'contacts.md'),
+            '---\ntitle: Contacts\nhref: /reach-us\n---\nbody\n',
+        )
+        await runMikser(workdir)
+
+        // /contacts resolves to nothing now, so the helper falls back to
+        // the raw name. What matters is that page-a was rebuilt at all
+        // instead of keeping a link to a destination no entity owns.
+        assert.notEqual(await linkIn('page-a.html'), 'contacts.html')
+    })
 })

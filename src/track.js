@@ -60,15 +60,26 @@ export function createTrack({ partial = true, query = true, lookup = true } = {}
         // the manifest and never in the refs index — recorded, and still
         // never scheduling a re-render.
         //
-        // The target is the STRING the template asked for, not the resolved
-        // entity's id, and that is deliberate: lookupKeys() expands a mutated
-        // entity into its id, its meta.href AND its id-minus-extension, so an
-        // edge on '/contacts' fires whether the target was edited, renamed,
-        // deleted, or created for the first time. Recording the resolved id
-        // instead would miss the case where nothing resolved yet.
-        const lookups = new Set()
+        // Records BOTH the string asked for and what it resolved to.
+        // The string alone cannot survive the target renaming itself;
+        // the resolved id alone cannot express a link to a page that
+        // does not exist yet. mikser_refs keeps both columns for the
+        // same reason, and the two invalidation directions read one
+        // each.
+        //
+        // A name can resolve to several entities — language variants
+        // share a meta.href — so the value is a Set of ids, empty when
+        // the lookup found nothing.
+        const lookups = new Map()
         track.lookups = lookups
-        track.lookup = (target) => { if (target && typeof target === 'string') lookups.add(target) }
+        track.lookup = (target, resolvedIds) => {
+            if (!target || typeof target !== 'string') return
+            let ids = lookups.get(target)
+            if (!ids) lookups.set(target, ids = new Set())
+            for (const id of Array.isArray(resolvedIds) ? resolvedIds : resolvedIds ? [resolvedIds] : []) {
+                if (id && typeof id === 'string') ids.add(id)
+            }
+        }
     }
     if (partial) {
         const partials = new Set()

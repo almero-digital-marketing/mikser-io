@@ -14,7 +14,26 @@
 //                               the engine after each successful render
 //                               via the track API. field = '' (empty).
 //
-// Lookups are indexed SELECTs over (target_ref, kind) and (source_id):
+// Every row carries BOTH the question and the answer:
+//
+//   target_ref  — the string the dependent asked for. May be an id, a
+//                 meta.href, a meta.url (ADR-0011 served path), or an
+//                 id with its extension stripped.
+//   target_id   — the entity it actually resolved to, '' when nothing
+//                 did. NOT NULL because WITHOUT ROWID requires it of
+//                 primary-key columns, and it is in the key so one
+//                 dependent can bind one name to several entities
+//                 (language variants).
+//
+// Both are load-bearing. Answering "who depends on X?" from target_ref
+// alone means guessing which strings X could have answered to, which
+// fails the moment X changes its name — the recorded string is then
+// derivable from no live state. target_id alone cannot express a
+// forward or dangling reference, nor re-bind when an entity later
+// claims a name nobody could resolve before.
+//
+// Lookups are indexed SELECTs over (target_ref, kind), (target_id) and
+// (source_id):
 //
 //   inbound  :: "Which entities reference this target_ref?"
 //   outbound :: "Which target_refs does this source emit?"
@@ -47,17 +66,25 @@ import { registerSchema, useDatabase } from './database/index.js'
 // who references X). The primary key's leading source_id column
 // already covers forward (everything X references) without a
 // separate index.
-registerSchema('mikser_refs', `
+//
+// Exported so tests build their index over the REAL schema instead of a
+// hand-copied one. The copy in test/unit/refs.test.js silently drifted
+// out of date the moment target_id was added — 25 tests failed with a
+// bare SQLITE_ERROR pointing at nothing in particular.
+export const REFS_SCHEMA = `
     CREATE TABLE IF NOT EXISTS mikser_refs (
         source_id   TEXT NOT NULL,
         target_ref  TEXT NOT NULL,
+        target_id   TEXT NOT NULL DEFAULT '',
         kind        TEXT NOT NULL,
         field       TEXT NOT NULL DEFAULT '',
-        PRIMARY KEY (source_id, target_ref, kind, field),
+        PRIMARY KEY (source_id, target_ref, kind, field, target_id),
         FOREIGN KEY (source_id) REFERENCES mikser_entities(id) ON DELETE CASCADE
     ) WITHOUT ROWID;
     CREATE INDEX IF NOT EXISTS idx_mikser_refs_target ON mikser_refs(target_ref);
-`)
+    CREATE INDEX IF NOT EXISTS idx_mikser_refs_target_id ON mikser_refs(target_id);
+`
+registerSchema('mikser_refs', REFS_SCHEMA)
 
 // Build the index handle over the provided sqlite database. Prepares
 // the SQL statements once at construction; subsequent reads/writes
@@ -81,6 +108,14 @@ export function createIndex(db) {
     const stmtInboundAny = db.prepare(`
         SELECT DISTINCT source_id FROM mikser_refs
         WHERE target_ref = ?
+    `)
+    // Identity-direction inbound: everything BOUND to this entity, under
+    // whatever name it was asked for. Immune to the target renaming
+    // itself, which is the whole point — the binding was recorded when
+    // it was made instead of re-derived from the target's current names.
+    const stmtInboundByTargetId = db.prepare(`
+        SELECT DISTINCT source_id FROM mikser_refs
+        WHERE target_id = ? AND target_id != ''
     `)
     const stmtInboundDynamic = db.prepare(`
         SELECT source_id, kind FROM mikser_refs
@@ -109,6 +144,45 @@ export function createIndex(db) {
         SELECT COUNT(DISTINCT source_id) AS c FROM mikser_refs WHERE kind != 'ref'
     `)
 
+    // Synchronous resolution of a ref string to entity ids. Mirrors
+    // `refFilter` in utils.js — id, meta.href, meta.url, then
+    // id-minus-extension — but as sync SQL, because indexEntity runs
+    // inside catalog.applyJournalMutations' transaction and
+    // better-sqlite3 transactions are sync-only.
+    //
+    // Returns every match, not the first: a name shared by language
+    // variants binds to all of them, and over-binding only ever means
+    // more invalidation, which the manifest's hash check then filters.
+    const stmtResolveExact = db.prepare(`
+        SELECT id FROM mikser_entities
+        WHERE id = ? OR meta_href = ? OR meta_url = ?
+    `)
+    const stmtResolveExtended = db.prepare(`
+        SELECT id FROM mikser_entities WHERE id GLOB ?
+    `)
+    function resolveRefIds(ref) {
+        if (typeof ref !== 'string' || !ref) return []
+        const ids = new Set()
+        for (const row of stmtResolveExact.all(ref, ref, ref)) ids.add(row.id)
+        // The extension-tolerant form. GLOB narrows to `<ref>.something`
+        // using the primary key's prefix; the regex then enforces
+        // EXACTLY one trailing extension and no further path segment,
+        // matching refFilter's `^ref\.[^./]+$`.
+        //
+        // SQLite's GLOB has no escape syntax, so a ref containing GLOB
+        // metacharacters cannot be used as a literal prefix. Skip the
+        // narrowing rather than run a pattern that means something else
+        // than the caller wrote; the exact forms above still apply, and
+        // the name-direction query still covers the edge.
+        if (/[*?[\]]/.test(ref)) return [...ids]
+        const escaped = ref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        const oneExtension = new RegExp(`^${escaped}\\.[^./]+$`)
+        for (const row of stmtResolveExtended.all(`${ref}.*`)) {
+            if (oneExtension.test(row.id)) ids.add(row.id)
+        }
+        return [...ids]
+    }
+
     // Write statements
     const stmtClearStaticForSource = db.prepare(`
         DELETE FROM mikser_refs WHERE source_id = ? AND kind = 'ref'
@@ -117,8 +191,8 @@ export function createIndex(db) {
         DELETE FROM mikser_refs WHERE source_id = ? AND kind != 'ref'
     `)
     const stmtInsertEdge = db.prepare(`
-        INSERT OR IGNORE INTO mikser_refs (source_id, target_ref, kind, field)
-        VALUES (?, ?, ?, ?)
+        INSERT OR IGNORE INTO mikser_refs (source_id, target_ref, target_id, kind, field)
+        VALUES (?, ?, ?, ?, ?)
     `)
 
     // -- Read API ------------------------------------------------------
@@ -168,25 +242,45 @@ export function createIndex(db) {
     // schemas / findRef use. Cycle-safe via the result Set.
     function inverseClosureOf(seeds, getEntityById) {
         const closure = new Set()
-        const keysToWalk = []
+        const toWalk = []
+
+        const enqueue = (id, entity) => {
+            if (!id || closure.has(id)) return
+            closure.add(id)
+            toWalk.push({ id, entity })
+        }
 
         for (const seed of seeds ?? []) {
             const entity = typeof seed === 'string' ? null : seed
-            const id = entity?.id ?? (typeof seed === 'string' ? seed : null)
-            if (!id) continue
-            if (closure.has(id)) continue
-            closure.add(id)
-            keysToWalk.push(...lookupKeys(entity ?? { id }))
+            enqueue(entity?.id ?? (typeof seed === 'string' ? seed : null), entity)
         }
 
-        while (keysToWalk.length > 0) {
-            const key = keysToWalk.shift()
-            const referrers = stmtInboundAny.all(key)
-            for (const { source_id: id } of referrers) {
-                if (closure.has(id)) continue
-                closure.add(id)
-                const entity = getEntityById?.(id)
-                keysToWalk.push(...lookupKeys(entity ?? { id }))
+        while (toWalk.length > 0) {
+            const { id, entity } = toWalk.shift()
+            const referrers = new Set()
+
+            // Identity direction: edges BOUND to this entity. Survives
+            // the entity renaming itself, because the binding was
+            // recorded at resolve time rather than reconstructed from
+            // whatever names it happens to carry now.
+            for (const row of stmtInboundByTargetId.all(id)) referrers.add(row.source_id)
+
+            // Name direction: edges that ASKED for a name this entity
+            // answers to. Covers unresolved/forward references, and an
+            // entity that has just started answering to a name nobody
+            // could resolve before.
+            //
+            // Union rather than replacement: strictly a superset of the
+            // pre-binding behaviour, so nothing that invalidated before
+            // can stop invalidating now. Over-approximating here is
+            // cheap — manifest.skipDecision still compares hashes and
+            // drops anything that did not actually change.
+            for (const key of lookupKeys(entity ?? { id })) {
+                for (const row of stmtInboundAny.all(key)) referrers.add(row.source_id)
+            }
+
+            for (const sourceId of referrers) {
+                enqueue(sourceId, getEntityById?.(sourceId))
             }
         }
 
@@ -208,7 +302,18 @@ export function createIndex(db) {
         stmtClearStaticForSource.run(entity.id)
         if (!entity.meta) return
         for (const { path, ref } of extractRefs(entity.meta)) {
-            stmtInsertEdge.run(entity.id, ref, 'ref', path)
+            // Resolve now and record what it bound to. An unresolvable
+            // ref still gets its row with target_id '' — a forward
+            // reference is a real dependency, and the name-direction
+            // query is what will find it when the target appears.
+            const targetIds = resolveRefIds(ref)
+            if (!targetIds.length) {
+                stmtInsertEdge.run(entity.id, ref, '', 'ref', path)
+                continue
+            }
+            for (const targetId of targetIds) {
+                stmtInsertEdge.run(entity.id, ref, targetId, 'ref', path)
+            }
         }
     }
 
@@ -220,9 +325,16 @@ export function createIndex(db) {
         db.transaction(() => {
             stmtClearDynamicForSource.run(sourceId)
             if (!edges?.length) return
-            for (const { kind, target } of edges) {
+            for (const { kind, target, targetId, targetIds } of edges) {
                 if (!kind || !target) continue
-                stmtInsertEdge.run(sourceId, target, kind, '')
+                // Render-time edges already know what they resolved to —
+                // the lookup helper had the entity in hand — so no
+                // re-resolution here. `targetIds` carries the plural
+                // case (one name, several language variants).
+                const ids = targetIds?.length ? targetIds : targetId ? [targetId] : ['']
+                for (const id of ids) {
+                    stmtInsertEdge.run(sourceId, target, id, kind, '')
+                }
             }
         })
     }
@@ -260,6 +372,12 @@ export function createIndex(db) {
         dynamicInboundFor,
         dynamicOutboundFor,
         inverseClosureOf,
+        // Synchronous ref -> entity ids, mirroring refFilter's four
+        // forms. Exposed because the manifest needs the same binding
+        // the index records: hashing a static $-ref with catalog's
+        // findById only ever worked for id-form refs, since findById is
+        // an exact primary-key read.
+        resolveRefIds,
         // Write
         indexEntity,
         replaceDynamic,
@@ -458,6 +576,11 @@ export function createRefs(db, prebuiltIndex = null) {
         dynamicInboundFor:  (target) => index.dynamicInboundFor(target),
 
         inverseClosureOf: (seeds) => index.inverseClosureOf(seeds, findById),
+
+        // Resolve a ref string to the entity ids it binds to — the same
+        // four forms refFilter uses, synchronously. The manifest needs
+        // it to hash a static $-ref correctly.
+        resolveRefIds: (ref) => index.resolveRefIds(ref),
 
         // Replace dynamic edges for a source — called by the engine
         // after a successful render via the track API.

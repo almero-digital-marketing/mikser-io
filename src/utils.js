@@ -17,15 +17,26 @@ import runtime from './runtime.js'
 // Pure: synchronous, no I/O, no engine state.
 export function inputHashOf(entity) {
     if (!entity) return ''
-    // For file-only entities (no meta/content surface) the upstream
-    // file-content checksum from `checksum()` above is the authoritative
-    // fingerprint and is already computed.
-    if (entity.checksum && entity.meta == null && entity.content == null) {
-        return crypto.createHash('sha1').update(String(entity.checksum)).digest('hex')
-    }
     return crypto.createHash('sha1').update(JSON.stringify({
         meta: entity.meta ?? null,
         content: entity.content ?? null,
+        // The bytes' fingerprint, for entities whose content is not in
+        // hand. Files are the whole reason: `files()` sets meta.url on
+        // every file entity, so `meta` is never null, so the old
+        // "file-only entity" special case (meta == null && content ==
+        // null) never fired for a real file — and the fall-through
+        // hashed {meta, content} with content null. The result was an
+        // inputHash that did not move when an image, video or download
+        // changed on disk. The file itself is copied rather than
+        // rendered, so nothing looked wrong; what broke was every
+        // dependent, whose refClosure dep-hash for that file was frozen
+        // and whose skipDecision therefore always said "unchanged".
+        //
+        // Excluded when content IS present: content is then the
+        // authoritative copy of the same bytes, and folding in a
+        // checksum computed a different way would make the hash depend
+        // on how the checksum happens to be derived.
+        checksum: entity.content == null ? entity.checksum ?? null : null,
         // `inputs` is how a plugin declares bytes that are NOT part of the
         // entity's own content but that its output depends on. Whatever is
         // put here participates in the hash, so a change to it invalidates
@@ -41,16 +52,26 @@ export function inputHashOf(entity) {
     })).digest('hex')
 }
 
-// Canonical lookup variants for an entity — the same three forms the
+// Canonical lookup variants for an entity — the same four forms the
 // schemas plugin, refs subscribers, and the catalog's findRef all use
 // to resolve `$author: '/authors/jane'` against an entity at
 // `/documents/authors/jane.yml` with `meta.href: '/authors/jane'`.
 // Pure: synchronous, no I/O.
+//
+// MUST stay in lockstep with `refFilter` below, which is the forward
+// direction of the same relation. `meta.url` used to be missing here
+// while refFilter had it: a `$hero: /hero.txt` ref to a served path
+// (ADR-0011) recorded an edge against `/hero.txt`, but the file entity
+// at `/files/hero.txt` produced keys `['/files/hero.txt',
+// '/files/hero']` — so nothing ever matched the edge and editing the
+// asset invalidated nothing. Every $-ref to an image, video or
+// download was silently non-invalidating.
 export function lookupKeys(entity) {
     const id = entity?.id
     if (!id) return []
     const keys = [id]
     if (entity.meta?.href) keys.push(entity.meta.href)
+    if (entity.meta?.url) keys.push(entity.meta.url)
     if (typeof id === 'string') {
         const stripped = id.replace(/\.[^./]+$/, '')
         if (stripped !== id) keys.push(stripped)
@@ -59,7 +80,7 @@ export function lookupKeys(entity) {
 }
 
 // Predicate inverse of `lookupKeys`: does `entity` answer to `refValue`
-// via any of the three canonical forms? Used by anywhere a per-entity
+// via any of the four canonical forms? Used by anywhere a per-entity
 // JS test of "does this match the ref" is needed without going through
 // the catalog (e.g. testing an in-hand entity).
 //
@@ -71,6 +92,7 @@ export function matchesRef(entity, refValue) {
     if (!entity || typeof refValue !== 'string') return false
     if (entity.id === refValue) return true
     if (entity.meta?.href === refValue) return true
+    if (entity.meta?.url === refValue) return true
     if (typeof entity.id === 'string' && entity.id.replace(/\.[^./]+$/, '') === refValue) return true
     return false
 }

@@ -4,6 +4,7 @@ import { mkdtemp, writeFile, readFile, rm, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import fm from 'front-matter'
+import sift from 'sift'
 
 import {
     normalize,
@@ -19,6 +20,9 @@ import {
     loopbackOnly,
     isRefKey,
     refFilter,
+    lookupKeys,
+    matchesRef,
+
     projectMeta,
     extractRefs,
     writeEntity,
@@ -1343,5 +1347,59 @@ describe('useSource glob pattern', () => {
         } finally {
             await rm(dir, { recursive: true, force: true })
         }
+    })
+})
+
+
+// The three faces of ref resolution must agree. `refFilter` is the
+// forward direction (query the catalog by ref), `matchesRef` the
+// in-hand predicate, `lookupKeys` the reverse direction (which strings
+// could have named this entity). refFilter's comment has always said
+// "keep in lockstep ... tests cover the symmetry" — they did not, and
+// meta.url was added to refFilter alone. The reverse map silently
+// stopped matching every $-ref written as a served path, so editing an
+// asset invalidated none of its consumers.
+//
+// This is the test that claim referred to. Any form added to one of the
+// three now has to be added to all three.
+describe('ref resolution symmetry (lookupKeys / matchesRef / refFilter)', () => {
+    const ENTITIES = [
+        { label: 'document with href',
+          entity: { id: '/documents/en/contacts.md', meta: { href: '/contacts' } } },
+        { label: 'served file with url',
+          entity: { id: '/files/img/hero.jpg', meta: { url: '/img/hero.jpg' } } },
+        { label: 'data entity, no meta forms',
+          entity: { id: '/data/authors/jane.yml', meta: {} } },
+        { label: 'entity with href AND url',
+          entity: { id: '/files/media/clip.mp4', meta: { href: '/clip', url: '/media/clip.mp4' } } },
+        { label: 'extensionless id',
+          entity: { id: '/virtual/index', meta: {} } },
+    ]
+
+    for (const { label, entity } of ENTITIES) {
+        it(`every lookupKeys form resolves back — ${label}`, () => {
+            const keys = lookupKeys(entity)
+            assert.ok(keys.length > 0, 'expected at least the id')
+            for (const key of keys) {
+                assert.ok(
+                    matchesRef(entity, key),
+                    `matchesRef rejected "${key}", which lookupKeys produced`,
+                )
+                assert.ok(
+                    sift(refFilter(key))(entity),
+                    `refFilter("${key}") did not match the entity lookupKeys derived it from`,
+                )
+            }
+        })
+    }
+
+    it('includes the served path, so an asset ref can be matched in reverse', () => {
+        // The specific regression: refFilter resolves a $-ref written as
+        // a served path, so the reverse map has to offer that same string
+        // or the edge recorded against it is unreachable.
+        const file = { id: '/files/img/hero.jpg', meta: { url: '/img/hero.jpg' } }
+        assert.ok(sift(refFilter('/img/hero.jpg'))(file), 'refFilter must resolve a served path')
+        assert.ok(lookupKeys(file).includes('/img/hero.jpg'), 'lookupKeys must offer it back')
+        assert.ok(matchesRef(file, '/img/hero.jpg'), 'matchesRef must agree')
     })
 })

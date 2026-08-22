@@ -96,12 +96,20 @@ function sha1(payload) {
 function buildRefClosure(entity, deps) {
     const closure = []
     const seen = new Set()
-    function pushTarget(kind, target, hash) {
+    // `targetId`/`targetIds` are the recorded BINDING — which entity the
+    // ref actually resolved to. They have to survive into the snapshot:
+    // this projection used to keep only {kind, target, hash}, so the
+    // binding was written to mikser_refs, dropped here, and skipDecision
+    // had nothing but the name to compare. The scheduler found the
+    // dependent and the manifest then skipped it.
+    function pushTarget(kind, target, hash, targetId, targetIds) {
         if (!target) return
         const key = `${kind}:${target}`
         if (seen.has(key)) return
         seen.add(key)
         const entry = { kind, target }
+        if (targetId) entry.targetId = targetId
+        if (targetIds?.length) entry.targetIds = targetIds
         if (hash) entry.hash = hash
         closure.push(entry)
     }
@@ -113,14 +121,26 @@ function buildRefClosure(entity, deps) {
     }
     if (entity.meta) {
         for (const { ref } of extractRefs(entity.meta)) {
-            const target = findById(ref)
-            pushTarget('ref', ref, target ? inputHashOf(target) : undefined)
+            // Resolve through the refs index, which mirrors refFilter's
+            // four forms. findById alone — as this used to do — is an
+            // exact primary-key read: a $-ref written as a meta.href or
+            // a served meta.url path (ADR-0011) resolved to nothing, so
+            // the edge was stored with no hash and no binding, and the
+            // manifest could not tell the target had changed.
+            const ids = runtime.refs?.resolveRefIds?.(ref) ?? (findById(ref) ? [ref] : [])
+            const bound = ids.length === 1 ? findById(ids[0]) : null
+            pushTarget(
+                'ref', ref,
+                bound ? inputHashOf(bound) : undefined,
+                ids.length === 1 ? ids[0] : undefined,
+                ids.length > 1 ? ids : undefined,
+            )
         }
     }
     if (Array.isArray(deps)) {
         for (const dep of deps) {
             if (dep.kind === 'query') pushQuery(dep.filter ?? null)
-            else pushTarget(dep.kind, dep.target, dep.hash)
+            else pushTarget(dep.kind, dep.target, dep.hash, dep.targetId, dep.targetIds)
         }
     }
     return closure
@@ -303,26 +323,48 @@ export function createManifest(db) {
                     }
                     continue
                 }
-                if (!mutatedRefs?.has(entry.target)) continue
-                // Language scope: if the source has a meta.lang AND the
-                // mutation came from a different meta.lang, the ref
-                // doesn't actually depend on what changed. A `null` lang
-                // in the mutation set means a shared (un-localized)
-                // entity touched the same key — that does invalidate
-                // language-specific sources because the shared entity
-                // is the only variant. Sources without a meta.lang are
-                // language-agnostic and accept any mutation lang.
-                if (sourceLang) {
-                    const mutatedLangs = mutatedRefs.get(entry.target)
-                    if (mutatedLangs && !mutatedLangs.has(sourceLang) && !mutatedLangs.has(null)) {
-                        continue
+                // An edge is checked against every key it could have been
+                // hit by: the entity it BOUND to, and the name it asked
+                // for. entity.id is always lookupKeys()[0], so the engine's
+                // mutation maps are already keyed by id — reading them by
+                // targetId needs no change there, and a binding survives
+                // the target renaming itself.
+                //
+                // Both, not the first match, because the two can disagree:
+                // the bound entity may have been re-persisted unchanged in
+                // the same cycle that a DIFFERENT entity started answering
+                // to the same name. Stopping at the binding would compare
+                // an unchanged hash and skip, silently ignoring the new
+                // claimant. The name key also carries unresolved/forward
+                // edges, which is how a link to a not-yet-existing page
+                // invalidates once that page appears.
+                const keys = [
+                    ...(entry.targetIds ?? []),
+                    ...(entry.targetId ? [entry.targetId] : []),
+                    entry.target,
+                ]
+                for (const key of keys) {
+                    if (!mutatedRefs?.has(key)) continue
+                    // Language scope: if the source has a meta.lang AND the
+                    // mutation came from a different meta.lang, the ref
+                    // doesn't actually depend on what changed. A `null` lang
+                    // in the mutation set means a shared (un-localized)
+                    // entity touched the same key — that does invalidate
+                    // language-specific sources because the shared entity
+                    // is the only variant. Sources without a meta.lang are
+                    // language-agnostic and accept any mutation lang.
+                    if (sourceLang) {
+                        const mutatedLangs = mutatedRefs.get(key)
+                        if (mutatedLangs && !mutatedLangs.has(sourceLang) && !mutatedLangs.has(null)) {
+                            continue
+                        }
                     }
+                    if (!entry.hash) return { skip: false, reason: 'ref-changed' }
+                    const currentHash = currentHashes?.get(key)
+                    if (currentHash === undefined) continue
+                    if (currentHash === null) return { skip: false, reason: 'ref-changed' }
+                    if (currentHash !== entry.hash) return { skip: false, reason: 'ref-changed' }
                 }
-                if (!entry.hash) return { skip: false, reason: 'ref-changed' }
-                const currentHash = currentHashes?.get(entry.target)
-                if (currentHash === undefined) continue
-                if (currentHash === null) return { skip: false, reason: 'ref-changed' }
-                if (currentHash !== entry.hash) return { skip: false, reason: 'ref-changed' }
             }
             return { skip: true, reason: 'unchanged' }
         },
@@ -427,6 +469,7 @@ export function createManifest(db) {
                 edges.push({
                     kind: 'layout',
                     target: entity.layout.id,
+                    targetId: entity.layout.id,
                     hash: inputHashOf(entity.layout),
                 })
             }
@@ -436,23 +479,35 @@ export function createManifest(db) {
                     edges.push({
                         kind: 'partial',
                         target,
+                        targetId: partial ? target : undefined,
                         hash: partial ? inputHashOf(partial) : undefined,
                     })
                 }
             }
             if (track?.lookups) {
-                for (const target of track.lookups) {
-                    // findById is extension-tolerant and also resolves a
-                    // meta.href, so the hash is the resolved entity's when
-                    // there is one. No hash means "nothing resolved" —
-                    // shouldSkip treats a hashless edge whose target mutated
-                    // as a re-render, which is what should happen when a page
+                for (const [target, ids] of track.lookups) {
+                    // The lookup helper resolved this already and handed
+                    // over the ids, so the hash comes from the BOUND
+                    // entity. Hashing findById(target) instead — as this
+                    // did — silently produced no hash at all whenever the
+                    // target was an href or url form, because findById is
+                    // an exact primary-key read: it resolves neither
+                    // meta.href nor meta.url nor a stripped extension.
+                    // Every such edge was hashless, so the manifest could
+                    // not tell "target moved" from "target changed".
+                    //
+                    // No hash still means "nothing resolved", and
+                    // skipDecision re-renders a hashless edge whose target
+                    // mutated — which is what should happen when a page
                     // that was linked-to-but-missing finally appears.
-                    const resolved = findById(target)
+                    const targetIds = [...ids]
+                    const bound = targetIds.length === 1 ? findById(targetIds[0]) : null
                     edges.push({
                         kind: 'lookup',
                         target,
-                        hash: resolved ? inputHashOf(resolved) : undefined,
+                        targetId: targetIds.length === 1 ? targetIds[0] : undefined,
+                        targetIds: targetIds.length > 1 ? targetIds : undefined,
+                        hash: bound ? inputHashOf(bound) : undefined,
                     })
                 }
             }

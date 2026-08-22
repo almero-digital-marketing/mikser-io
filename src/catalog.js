@@ -207,16 +207,19 @@ async function applyJournalMutations() {
     }
     if (!mutations.length) return
     db.transaction(() => {
+        // Two passes, deliberately. indexEntity resolves each $-ref
+        // against mikser_entities to record what it bound to, so it has
+        // to run after every row this cycle is in place — otherwise a
+        // ref to an entity that happens to be upserted later in the same
+        // batch binds to nothing, purely because of journal order.
+        const toIndex = []
         for (const { operation, entity } of mutations) {
             switch (operation) {
                 case OPERATION.CREATE:
                 case OPERATION.UPDATE:
                     logger.trace('Database %s %s: %s', entity.collection, operation, entity.id)
                     stmtUpsert.run(entityToRow(entity))
-                    // Static $-ref edges from entity.meta. Refs index
-                    // does delete-then-insert internally so this is
-                    // idempotent across UPDATE.
-                    refsIndex?.indexEntity(entity)
+                    toIndex.push(entity)
                     cacheEvict(entity.id)   // next read returns fresh data
                     break
                 case OPERATION.DELETE:
@@ -227,6 +230,10 @@ async function applyJournalMutations() {
                     break
             }
         }
+        // Static $-ref edges from entity.meta. Refs index does
+        // delete-then-insert per source internally, so this stays
+        // idempotent across UPDATE.
+        for (const entity of toIndex) refsIndex?.indexEntity(entity)
     })
 }
 

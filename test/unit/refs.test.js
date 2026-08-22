@@ -10,31 +10,27 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { createIndex, createSubscribers } from '../../src/refs.js'
+import { createIndex, createSubscribers, REFS_SCHEMA } from '../../src/refs.js'
 import { createSqliteDatabase } from '../../src/database/index.js'
 
-// mikser_entities schema (parent of the FK). Bare-bones — refs
-// tests don't exercise catalog columns.
+// mikser_entities schema (parent of the FK). A stub — refs tests don't
+// exercise catalog behaviour — but it must carry every column the index
+// READS, not just the FK target: indexEntity resolves each $-ref
+// against id / meta_href / meta_url to record what it bound to.
 const CATALOG_SCHEMA = `
     CREATE TABLE IF NOT EXISTS mikser_entities (
-        id   TEXT PRIMARY KEY,
-        data TEXT NOT NULL
+        id        TEXT PRIMARY KEY,
+        meta_href TEXT,
+        meta_url  TEXT,
+        data      TEXT NOT NULL
     ) WITHOUT ROWID;
 `
 
-// mikser_refs schema. Mirrors the production registration in
-// src/refs.js — duplicated here so refs tests don't import side-
-// effecting modules just to grab a schema string.
-const REFS_SCHEMA = `
-    CREATE TABLE IF NOT EXISTS mikser_refs (
-        source_id   TEXT NOT NULL,
-        target_ref  TEXT NOT NULL,
-        kind        TEXT NOT NULL,
-        field       TEXT NOT NULL DEFAULT '',
-        PRIMARY KEY (source_id, target_ref, kind, field)
-    ) WITHOUT ROWID;
-    CREATE INDEX IF NOT EXISTS idx_mikser_refs_target ON mikser_refs(target_ref);
-`
+// REFS_SCHEMA is imported from src/refs.js rather than copied. The copy
+// that used to live here drifted the moment the table gained a column,
+// and the whole file failed with an opaque SQLITE_ERROR. src/refs.js is
+// already imported above for createIndex, so there is no extra
+// side-effect in taking the schema from the same place.
 
 // Open a fresh in-memory database with the two-table schema. Each
 // test gets its own DB so state doesn't bleed between tests.
@@ -52,11 +48,41 @@ function makeTestDb() {
     return db
 }
 
+// Seed the parent rows an edge's FK requires, and let indexEntity
+// resolve against them. The hand-copied schema this file used to carry
+// had quietly dropped the FOREIGN KEY clause, so tests could index an
+// entity that was never in mikser_entities — something production
+// cannot do, since catalog.applyJournalMutations upserts every row
+// before indexing any of them. Wrapping indexEntity keeps all the
+// existing call sites and makes them faithful.
+function seedEntity(db, entity) {
+    if (!entity?.id) return
+    db.prepare(`
+        INSERT OR REPLACE INTO mikser_entities (id, meta_href, meta_url, data)
+        VALUES (?, ?, ?, ?)
+    `).run(entity.id, entity.meta?.href ?? null, entity.meta?.url ?? null, JSON.stringify(entity))
+}
+
+function withSeeding(db, index) {
+    return {
+        ...index,
+        indexEntity(entity) {
+            seedEntity(db, entity)
+            return index.indexEntity(entity)
+        },
+        rebuild(entities) {
+            for (const e of entities ?? []) seedEntity(db, e)
+            return index.rebuild(entities)
+        },
+    }
+}
+
 // Build a bare index over a fresh DB. Used by tests that exercise the
 // index data structure (indexEntity, rebuild, outboundFor, etc.)
 // without needing a subscriber rig.
 function makeIdx() {
-    return createIndex(makeTestDb())
+    const db = makeTestDb()
+    return withSeeding(db, createIndex(db))
 }
 
 // Build an index + subscribers harness over a fresh DB, pre-seeded
@@ -65,9 +91,14 @@ function makeIdx() {
 function makeRig(entities = []) {
     const db = makeTestDb()
     const byId = new Map(entities.map(e => [e.id, e]))
-    const index = createIndex(db)
-    for (const e of entities) index.indexEntity(e)
-    const subs = createSubscribers(index, (id) => byId.get(id))
+    const raw = createIndex(db)
+    const index = withSeeding(db, raw)
+    // Two passes, as production does: every row in place before any
+    // edge is indexed, so a ref to an entity later in the list still
+    // binds instead of dangling on list order alone.
+    for (const e of entities) seedEntity(db, e)
+    for (const e of entities) raw.indexEntity(e)
+    const subs = createSubscribers(raw, (id) => byId.get(id))
     return { index, subs, byId, db }
 }
 

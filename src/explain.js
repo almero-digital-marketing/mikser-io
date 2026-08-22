@@ -114,7 +114,18 @@ export async function explain(reference) {
             refClosure: (snap.refClosure ?? []).map(entry =>
                 entry.kind === 'query'
                     ? { kind: 'query', filter: entry.filter }
-                    : { kind: entry.kind, target: entry.target, hash: shortHash(entry.hash) }),
+                    : {
+                        kind: entry.kind,
+                        target: entry.target,
+                        // What the name actually resolved to. A binding
+                        // that is absent means the edge is dangling —
+                        // the single most useful thing to know when a
+                        // page will not re-render and nobody can say why.
+                        bound: entry.targetIds?.length ? entry.targetIds
+                            : entry.targetId ? [entry.targetId]
+                            : [],
+                        hash: shortHash(entry.hash),
+                    }),
         })),
         // What a plain build would do next, stated plainly.
         verdict: source?.error === 'file is gone'
@@ -182,9 +193,17 @@ export function formatExplain(report) {
         const closure = r.refClosure
         row('refClosure', `${closure.length} edge${closure.length === 1 ? '' : 's'}`)
         for (const e of closure) {
-            out.push(e.kind === 'query'
-                ? `  query      ${JSON.stringify(e.filter)}`
-                : `  ${e.kind.padEnd(10)} ${e.target}${e.hash ? `  ${e.hash}` : ''}`)
+            if (e.kind === 'query') {
+                out.push(`  query      ${JSON.stringify(e.filter)}`)
+                continue
+            }
+            // Show the name asked for and the entity it bound to, since
+            // the two can differ (an href or a served path resolves to
+            // an id) and a missing binding is itself the diagnosis.
+            const bound = e.bound?.length
+                ? (e.bound.length === 1 && e.bound[0] === e.target ? '' : ` → ${e.bound.join(', ')}`)
+                : '  [UNRESOLVED — nothing answers to this name]'
+            out.push(`  ${e.kind.padEnd(10)} ${e.target}${bound}${e.hash ? `  ${e.hash}` : ''}`)
         }
     }
 
