@@ -44,6 +44,7 @@ import pMap from 'p-map'
 import runtime from './runtime.js'
 import { ACTION } from './constants.js'
 import { checksum as fileChecksum, checksumOf, junkIgnore } from './utils.js'
+import { reportGated } from './report.js'
 import { findById, findEntities, checksumsByCollection } from './catalog.js'
 import { useDatabase } from './database/index.js'
 
@@ -450,6 +451,9 @@ export function useSource(core, options) {
         const chksum = await gateChecksum(file, id, { reload, priorChecksums, bytes })
         if (chksum === null) {
             if (stats) stats.skipped++
+            // Never becomes a render task, so it would otherwise be invisible
+            // in the --json report. Counted, not listed.
+            reportGated()
             return
         }
 

@@ -10,6 +10,7 @@ import { useJournal, updateEntry } from './journal.js'
 import { globby } from 'globby'
 import { OPERATION, TASKS } from './constants.js'
 import { changeExtension, formatErrorContext, projectMeta, lookupKeys } from './utils.js'
+import { reportRendered, reportSkipped, emitReport } from './report.js'
 import render from './render.js'
 import postprocess, { loadPlugin as loadPostPlugin } from './postprocess.js'
 import map from 'p-map'
@@ -352,13 +353,21 @@ export async function setup(options) {
                 // next run. A postprocess-aware manifest that also
                 // skips when the postprocess output is current would
                 // close the gap — not yet implemented.
-                if (!options.postprocessor && runtime.manifest?.shouldSkip(entity, mutatedRefs, currentHashes, mutatedEntities)) {
+                const decision = options.postprocessor
+                    // A postprocessor consumes the intermediate rendered
+                    // file, so skipping would leave its input missing.
+                    ? { skip: false, reason: 'postprocessor' }
+                    : runtime.manifest?.skipDecision(entity, mutatedRefs, currentHashes, mutatedEntities)
+                        ?? { skip: false, reason: 'no-manifest' }
+                if (decision.skip) {
                     skipped++
                     entry.output = { success: true, skipped: 'manifest' }
                     await updateEntry({ id, output: entry.output })
+                    reportSkipped(entity, decision.reason)
                     logger.debug('Manifest skip: %s → %s', entity.name || entity.id, entity.destination)
                     return
                 }
+                reportRendered(entity, decision.reason)
                 // Project reference-marker keys (`$author`, `$hero`, …)
                 // into their normalized form (`author`, `hero`) before
                 // the entity crosses into the renderer — applies whether
@@ -737,6 +746,10 @@ export async function setup(options) {
             }
         }
         logger.notice('Mikser completed')
+        // After the cycle, and only under --json. stdout has been kept clear
+        // for exactly this (the logger writes to stderr under --json), so the
+        // document is the only thing on it and can be piped to jq.
+        emitReport()
     })
 
     onCancelled(async () => {

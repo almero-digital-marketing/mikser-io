@@ -5,6 +5,7 @@ import { createRequire } from 'node:module'
 import { globby } from 'globby'
 import _ from 'lodash'
 import map from 'p-map'
+import { reportWarning } from '../report.js'
 
 // Normalize a `options.presets[name]` value to a consistent
 // { matches, options } shape so callers don't have to inspect which form
@@ -124,6 +125,7 @@ export function assets(options = {}) {
         for (const preset of configured) {
             if (matchTally.matched.has(preset)) continue
             const { matches } = normalizePresetConfig(options.presets[preset])
+            reportWarning('preset-no-match', { preset, evaluated: matchTally.evaluated, patterns: matches })
             logger.warn(
                 'Assets preset %j matched none of the %d entities evaluated (patterns: %s). ' +
                 'Patterns run against entity.id, which files({ outputFolder }) does NOT prefix — ' +

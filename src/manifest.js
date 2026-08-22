@@ -269,20 +269,37 @@ export function createManifest(db) {
         // Should this render be skipped? See the original docstring in
         // the prior NDJSON-backed implementation — logic is unchanged,
         // backing storage is the only thing that changed.
+        // Boolean wrapper, kept because that is what the render loop asked
+        // for first. skipDecision carries the same logic plus WHY, which is
+        // what a machine-readable build report needs — "Rendered: 16" is a
+        // number nobody can assert on.
         shouldSkip(entity, mutatedRefs, currentHashes, mutatedEntities) {
-            if (entity?.meta?.cache === false) return false
+            return this.skipDecision(entity, mutatedRefs, currentHashes, mutatedEntities).skip
+        },
+
+        // { skip, reason } — reason is set either way, and the vocabulary is
+        // stable so it can be asserted against:
+        //
+        //   unchanged        nothing this render depends on moved
+        //   never-rendered   no snapshot: first build, or it never rendered
+        //   inputs-changed   the entity's own hash moved
+        //   ref-changed      a $-ref or partial it depends on moved
+        //   query-matched    an entity matching a recorded query mutated
+        //   cache-disabled   meta.cache === false
+        skipDecision(entity, mutatedRefs, currentHashes, mutatedEntities) {
+            if (entity?.meta?.cache === false) return { skip: false, reason: 'cache-disabled' }
             const snapshot = this.lookup(entity)
-            if (!snapshot?.inputHash) return false
-            if (inputHashOf(entity) !== snapshot.inputHash) return false
-            if (!snapshot.refClosure?.length) return true
+            if (!snapshot?.inputHash) return { skip: false, reason: 'never-rendered' }
+            if (inputHashOf(entity) !== snapshot.inputHash) return { skip: false, reason: 'inputs-changed' }
+            if (!snapshot.refClosure?.length) return { skip: true, reason: 'unchanged' }
             const sourceLang = entity?.meta?.lang ?? null
             for (const entry of snapshot.refClosure) {
                 if (entry.kind === 'query') {
-                    if (!entry.filter) return false
+                    if (!entry.filter) return { skip: false, reason: 'query-matched' }
                     if (!mutatedEntities?.size) continue
                     const matcher = sift(entry.filter)
                     for (const mutated of mutatedEntities.values()) {
-                        if (matcher(mutated)) return false
+                        if (matcher(mutated)) return { skip: false, reason: 'query-matched' }
                     }
                     continue
                 }
@@ -301,13 +318,13 @@ export function createManifest(db) {
                         continue
                     }
                 }
-                if (!entry.hash) return false
+                if (!entry.hash) return { skip: false, reason: 'ref-changed' }
                 const currentHash = currentHashes?.get(entry.target)
                 if (currentHash === undefined) continue
-                if (currentHash === null) return false
-                if (currentHash !== entry.hash) return false
+                if (currentHash === null) return { skip: false, reason: 'ref-changed' }
+                if (currentHash !== entry.hash) return { skip: false, reason: 'ref-changed' }
             }
-            return true
+            return { skip: true, reason: 'unchanged' }
         },
 
         // Record a successful render. Single INSERT OR REPLACE.
