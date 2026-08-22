@@ -26,6 +26,18 @@ export function inputHashOf(entity) {
     return crypto.createHash('sha1').update(JSON.stringify({
         meta: entity.meta ?? null,
         content: entity.content ?? null,
+        // `inputs` is how a plugin declares bytes that are NOT part of the
+        // entity's own content but that its output depends on. Whatever is
+        // put here participates in the hash, so a change to it invalidates
+        // every consumer through the normal refClosure path.
+        //
+        // The case that needed it: a layout's `.js` sidecar. It is the
+        // entity's data layer, it is not its content, and it was in no hash
+        // at all — so editing it re-rendered nothing, silently, in a fresh
+        // build. Moving the layout's gate `checksum` was not enough, because
+        // an entity that HAS content is hashed on {meta, content} and its
+        // checksum is ignored. This is the seam that was missing.
+        inputs: entity.inputs ?? null,
     })).digest('hex')
 }
 
