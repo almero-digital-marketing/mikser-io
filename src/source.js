@@ -43,7 +43,7 @@ import { globby } from 'globby'
 import pMap from 'p-map'
 import runtime from './runtime.js'
 import { ACTION } from './constants.js'
-import { checksum as fileChecksum, junkIgnore } from './utils.js'
+import { checksum as fileChecksum, checksumOf, junkIgnore } from './utils.js'
 import { findById, findEntities, checksumsByCollection } from './catalog.js'
 import { useDatabase } from './database/index.js'
 
@@ -74,7 +74,14 @@ const SCAN_CONCURRENCY = 16
 // no SQL) instead of per-file findById. The single-file chokidar
 // event handler (no scan context) doesn't pass it and falls back to
 // findById, which is fine for low-frequency one-off mutations.
-export async function gateChecksum(file, id, { reload = false, priorChecksums } = {}) {
+// `bytes`, when given, is content the caller has ALREADY read: the checksum
+// is derived from those exact bytes rather than from a second, independent
+// read. That is the whole point — two reads of a file being written can
+// disagree, and the losing combination (empty content + a checksum correct
+// for the finished file) is permanent, because every later sync then
+// short-circuits on "unchanged".
+export async function gateChecksum(file, id, { reload = false, priorChecksums, bytes } = {}) {
+    const compute = () => (bytes !== undefined ? checksumOf(bytes) : fileChecksum(file))
     const canGate = !reload
         && !runtime.options.force
         && !runtime.catalog?.cacheInvalidated
@@ -83,12 +90,12 @@ export async function gateChecksum(file, id, { reload = false, priorChecksums } 
             ? priorChecksums.get(id)
             : findById(id)?.checksum
         if (priorChecksum) {
-            const current = await fileChecksum(file)
+            const current = await compute()
             if (priorChecksum === current) return null
             return current
         }
     }
-    return await fileChecksum(file)
+    return await compute()
 }
 
 // Delete sweep. After a scan, find every catalog entity in `collection`
@@ -413,7 +420,26 @@ export function useSource(core, options) {
             : `${prefix}/${relativePath.replace(/\\/g, '/')}`
         scanned?.add(id)
 
-        const chksum = await gateChecksum(file, id, { reload, priorChecksums })
+        // When this source stores content, read the file ONCE and let both
+        // the checksum and the stored body come from the same bytes. The
+        // previous shape hashed the file in gateChecksum and then read it
+        // again below — two reads, and a torn write between them persisted
+        // an empty body next to a valid checksum, permanently.
+        //
+        // No extra cost: the gate already read the whole file to hash it.
+        // Only for `content` sources; large media goes through files.js,
+        // which stores no body and must not be slurped into memory.
+        let bytes
+        if (content) {
+            try {
+                bytes = await readFile(file)
+            } catch (err) {
+                logger.warn('%s read failed for %s: %s', collection, name, err.message)
+                return
+            }
+        }
+
+        const chksum = await gateChecksum(file, id, { reload, priorChecksums, bytes })
         if (chksum === null) {
             if (stats) stats.skipped++
             return
@@ -430,12 +456,9 @@ export function useSource(core, options) {
             checksum: chksum,
         }
         if (content) {
-            try {
-                base.content = await readFile(file, 'utf8')
-            } catch (err) {
-                logger.warn('%s read failed for %s: %s', collection, name, err.message)
-                return
-            }
+            // Decoded from the bytes the checksum was taken over — not
+            // re-read. See the gate above.
+            base.content = bytes.toString('utf8')
         }
         try {
             const extra = await load({ file, name, relativePath, entity: base })

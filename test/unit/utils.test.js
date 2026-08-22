@@ -291,13 +291,18 @@ describe('checksum', () => {
         }
     })
 
-    it('uses size+hash format for files >= 300 KB', async () => {
+    it('uses size+head+tail format for files >= 300 KB', async () => {
+        // Was `<size>:<md5 of first 300KB>`. The tail digest was added
+        // because the two-part form silently missed any change beyond byte
+        // 307200 that preserved the file's length — the checksum matched,
+        // the sync reported "unchanged", and the edit was dropped
+        // permanently. See test/unit/checksum.test.js for that case.
         const dir = await mkdtemp(path.join(tmpdir(), 'mikser-test-'))
         try {
             const file = path.join(dir, 'big.bin')
             await writeFile(file, Buffer.alloc(310 * 1024, 0x41)) // 310 KB of 'A'
             const a = await checksum(file)
-            assert.match(a, /^\d+:[0-9a-f]{32}$/i) // <size>:<md5>
+            assert.match(a, /^\d+:[0-9a-f]{32}:[0-9a-f]{32}$/i) // <size>:<md5 head>:<md5 tail>
         } finally {
             await rm(dir, { recursive: true, force: true })
         }

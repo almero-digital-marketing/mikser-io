@@ -1,9 +1,8 @@
 import crypto from 'node:crypto'
-import { hashFile, hash } from 'hasha'
-import { stat, readFile, writeFile, mkdir, unlink } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { hashFile } from 'hasha'
+import { stat, readFile, writeFile, mkdir, unlink, open } from 'node:fs/promises'
 import { createRequire } from 'node:module'
-import TruncateStream from 'truncate-stream'
-import { createReadStream } from 'node:fs'
 import _ from 'lodash'
 import { minimatch } from 'minimatch'
 import path from 'path'
@@ -301,17 +300,68 @@ export class AbortError extends Error {
     }
 }
 
+const CHECKSUM_MAX_BYTES = 300 * 1024
+
+// Checksum from bytes the CALLER ALREADY HAS — no I/O, and therefore no
+// second read to disagree with the first.
+//
+// The hazard this exists to remove: a plugin that stores content does
+//
+//     meta: { body: await readFile(source, 'utf8') },
+//     checksum: await checksum(source),
+//
+// which is two independent reads of the same file. A watcher firing on the
+// truncate half of a write gets '' from readFile while checksum(), a moment
+// later, sees the finished file. The entity is stored with an empty body and
+// a checksum that is CORRECT FOR THE FINAL CONTENT — so every later sync
+// short-circuits on "unchanged" and the empty body is permanent. Only
+// --clear recovers it, and nothing anywhere reports a problem.
+//
+// Byte-compatible with checksum(uri) below, deliberately: the two must be
+// interchangeable or swapping a caller over would invalidate its catalog.
+export function checksumOf(content) {
+    const buf = Buffer.isBuffer(content) ? content : Buffer.from(String(content), 'utf8')
+    if (buf.length < CHECKSUM_MAX_BYTES) {
+        return createHash('md5').update(buf).digest('hex')
+    }
+    const head = createHash('md5').update(buf.subarray(0, CHECKSUM_MAX_BYTES)).digest('hex')
+    const tail = createHash('md5').update(buf.subarray(buf.length - CHECKSUM_MAX_BYTES)).digest('hex')
+    return `${buf.length}:${head}:${tail}`
+}
+
+// Checksum a file by path.
+//
+// Files under 300 KB are hashed whole. Larger ones are hashed at both ends
+// plus their length, which reads 600 KB instead of gigabytes — the point of
+// the truncation is that a 1.4 GB video must not be streamed on every cycle.
+//
+// The TAIL is new. The previous form was `size + md5(first 300KB)`, which
+// silently misses any change beyond byte 307200 that preserves the file's
+// length: the checksum matches, the sync reports "unchanged", and the edit
+// is dropped exactly as permanently as the torn-read case above. Hashing
+// both ends does not make this collision-proof — nothing short of a full
+// hash does — but it turns "any late edit of the same length" into
+// "a late edit that also collides on 128 bits".
 export async function checksum(uri) {
-    const maxBytes = 300 * 1024
     const { size } = await stat(uri)
-    if (size < maxBytes) {
+    if (size < CHECKSUM_MAX_BYTES) {
         return await hashFile(uri, { algorithm: 'md5' })
-    } else {
-        const truncate = new TruncateStream({ maxBytes })
-        const fileStream = createReadStream(uri)
-        fileStream.pipe(truncate)
-        const checksum = size.toString() + ':' + await hash(truncate, { algorithm: 'md5' })
-        return checksum
+    }
+    const head = await hashRange(uri, 0, CHECKSUM_MAX_BYTES)
+    const tail = await hashRange(uri, size - CHECKSUM_MAX_BYTES, CHECKSUM_MAX_BYTES)
+    return `${size}:${head}:${tail}`
+}
+
+// md5 of `length` bytes starting at `start`. A positional read, so the
+// bytes in between are never touched.
+async function hashRange(uri, start, length) {
+    const handle = await open(uri, 'r')
+    try {
+        const buf = Buffer.allocUnsafe(length)
+        const { bytesRead } = await handle.read(buf, 0, length, start)
+        return createHash('md5').update(buf.subarray(0, bytesRead)).digest('hex')
+    } finally {
+        await handle.close()
     }
 }
 
