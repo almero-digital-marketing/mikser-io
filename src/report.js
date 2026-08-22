@@ -13,7 +13,7 @@ import runtime from './runtime.js'
 
 function store() {
     runtime.state ??= {}
-    runtime.state.report ??= { rendered: [], skipped: [], unchanged: [], warnings: [], gated: 0 }
+    runtime.state.report ??= { rendered: [], skipped: [], unchanged: [], errors: [], warnings: [], gated: 0 }
     return runtime.state.report
 }
 
@@ -77,15 +77,53 @@ export function reportWarning(code, fields = {}) {
     store().warnings.push({ code, ...fields })
 }
 
+// A render that RAN and THREW. Recorded unconditionally — not gated on
+// --json like the other buckets — because the exit code depends on the
+// count, and a build that fails 12 renders must not exit 0 just because
+// nobody asked for a report.
+//
+// Failed entities do NOT appear in `rendered`. That bucket means the output
+// moved, and a throw writes nothing: the previous good bytes stay on disk,
+// which is what makes the failure survivable and also what makes it
+// invisible. `rendered: 12` beside zero written files is the misleading
+// half, and summing buckets should not require knowing that.
+export function reportError(entity, err, context = {}) {
+    const store = errorStore()
+    store.push({
+        id: entity?.id ?? null,
+        destination: entity?.destination ?? null,
+        error: err?.message ?? String(err),
+        ...context,
+    })
+}
+
+// Errors are counted even without --json, so they need a store that does
+// not depend on the report being requested.
+function errorStore() {
+    runtime.state ??= {}
+    runtime.state.renderErrors ??= []
+    return runtime.state.renderErrors
+}
+
+// How many renders threw this cycle. Read by the engine to decide the
+// process exit code.
+export function renderErrorCount() {
+    return errorStore().length
+}
+
 export function buildReport() {
     const report = store()
     return {
         rendered: report.rendered,
         skipped: report.skipped,
         unchanged: report.unchanged,
+        // Renders that ran and threw. A build with a non-empty `errors` is a
+        // failed build, whatever the other counts say.
+        errors: errorStore(),
         warnings: report.warnings,
         summary: {
             rendered: report.rendered.length,
+            errors: errorStore().length,
             // Of those renders, how many produced bytes identical to
             // what was already on disk — see reportUnchanged.
             unchanged: report.unchanged.length,

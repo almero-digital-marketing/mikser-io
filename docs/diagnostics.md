@@ -102,14 +102,27 @@ under this flag, so stdout parses whole.
 npx mikser --json | jq '.summary'
 ```
 
-Four buckets, and the distinction between them is the point:
+Five buckets, and the distinction between them is the point:
 
 | Bucket | Meaning |
 | --- | --- |
-| `rendered` | the render ran, with a `reason` per entity |
+| `rendered` | the render ran and the output moved, with a `reason` per entity |
 | `skipped` | the manifest decided not to render, with a `reason` |
 | `unchanged` | the render ran and produced bytes identical to what was already on disk |
+| `errors` | the render ran and **threw** — with `id`, `destination`, `error`, `layout` |
 | `gated` | a count — the source was unchanged, so no render was ever scheduled |
+
+A failed render appears in `errors` and **not** in `rendered`: that bucket
+means the output moved, and a throw writes nothing. The previous good bytes
+stay on disk, which is what makes a failed render survivable — and also
+what makes it invisible without this bucket.
+
+**A one-shot build with render errors exits `1`.** That is the signal a CI
+gate needs, because `mikser && mikser --verify` would otherwise pass a
+build in which nothing rendered: `--verify` compares the output against the
+manifest, both of which still describe the last good render. Watch mode
+keeps running — a failed render there is a state to fix on the next cycle,
+not a reason to tear down the watcher.
 
 `reason` is a stable vocabulary you can assert on: `unchanged`,
 `never-rendered`, `inputs-changed`, `ref-changed`, `query-matched`,

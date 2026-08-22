@@ -10,7 +10,7 @@ import { useJournal, updateEntry } from './journal.js'
 import { globby } from 'globby'
 import { OPERATION, TASKS } from './constants.js'
 import { changeExtension, formatErrorContext, projectMeta, lookupKeys } from './utils.js'
-import { reportRendered, reportSkipped, emitReport } from './report.js'
+import { reportRendered, reportSkipped, reportError, renderErrorCount, emitReport } from './report.js'
 import render from './render.js'
 import postprocess, { loadPlugin as loadPostPlugin } from './postprocess.js'
 import map from 'p-map'
@@ -374,7 +374,11 @@ export async function setup(options) {
                     logger.debug('Manifest skip: %s → %s', entity.name || entity.id, entity.destination)
                     return
                 }
-                reportRendered(entity, decision.reason, decision)
+                // Reported on the way OUT, not here: `rendered` means the
+                // output moved, and a render that throws writes nothing. The
+                // decision is carried down to the success path so the reason
+                // and its detail still travel with it.
+                //
                 // Same detail at debug, for tailing a watch run. One line per
                 // render is too much for a build's normal output — the counts
                 // are the summary and --json is the record — but when you are
@@ -522,11 +526,22 @@ export async function setup(options) {
                         await updateEntry({ id, output: entry.output, deps: edges })
                     }
 
+                    reportRendered(entity, decision.reason, decision)
                     logger.debug('Rendered: [%s] %s → %s', options.renderer, entity.name || entity.id, entity.destination)
                 } catch (err) {
                     if (!signal.aborted) {
                         await updateEntry({ id, output: { success: false } })
-                        logger.error('Render error: %s%s %s', entity.id, formatErrorContext(entity, err, runtime.options), err.message)
+                        const context = formatErrorContext(entity, err, runtime.options)
+                        logger.error('Render error: %s%s %s', entity.id, context, err.message)
+                        // The machine-readable half of that same line. Without
+                        // it a build that fails every page reports rendered:N,
+                        // warnings:0 and exits 0 — three clean signals and only
+                        // the human log knowing otherwise.
+                        reportError(entity, err, {
+                            renderer: options.renderer ?? null,
+                            layout: entity.layout?.id ?? null,
+                            context: context.trim() || null,
+                        })
                     }
                     logger.debug('Render canceled')
                 }
@@ -537,8 +552,12 @@ export async function setup(options) {
             concurrency: runtime.options.threads,
             signal
         })
-        renderJobs.size && logger.info('Rendered: %d', renderJobs.size - skipped)
+        // Jobs minus skips minus THROWS. Counting a failed render as
+        // rendered is the same overstatement the report used to make.
+        const failed = renderErrorCount()
+        renderJobs.size && logger.info('Rendered: %d', renderJobs.size - skipped - failed)
         skipped && logger.info('Manifest skipped: %d', skipped)
+        failed && logger.error('Render errors: %d', failed)
     })
 
     onBeforePostprocess(async (signal) => {
@@ -765,11 +784,31 @@ export async function setup(options) {
                 }
             }
         }
-        logger.notice('Mikser completed')
+        // A cycle with failed renders is not a completed build, and the word
+        // people read is this one.
+        const failed = renderErrorCount()
+        if (failed) logger.error('Mikser completed with %d render error%s', failed, failed === 1 ? '' : 's')
+        else logger.notice('Mikser completed')
+
         // After the cycle, and only under --json. stdout has been kept clear
         // for exactly this (the logger writes to stderr under --json), so the
         // document is the only thing on it and can be piped to jq.
         emitReport()
+
+        // Non-zero for a one-shot build, so `mikser && mikser --verify` cannot
+        // pass with every page in the site stale. `exitCode` rather than
+        // process.exit so the report above is flushed and shutdown runs.
+        //
+        // Watch mode keeps going: a failed render there is a state to fix in
+        // the next cycle, not a reason to tear down the watcher. That is also
+        // what makes the failure self-concealing in watch — the errors scroll
+        // past between two green builds — so the exit code is precisely the
+        // signal CI needs and the one interactive use must not have.
+        //
+        // 1, not 2: --verify already uses 2 for output drift and --explain 3
+        // for not-found. "The build ran and some renders threw" is its own
+        // thing.
+        if (failed && !runtime.options.watch) process.exitCode = 1
     })
 
     onCancelled(async () => {

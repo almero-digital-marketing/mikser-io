@@ -292,7 +292,14 @@ describe('layout & partial deletion while mikser off', () => {
         await rm(path.join(workdir, 'layouts/partials/footer.hbs'))
 
         const { code, combined } = await runMikser(workdir)
-        assert.equal(code, 0, 'mikser process should not crash')
+        // Loud means non-zero. This asserted exit 0 — "should not crash" —
+        // which conflated crashing with reporting: a build whose renders
+        // threw is a failed build, and a CI gate chaining `mikser && mikser
+        // --verify` needs to see that. It still completes cleanly rather
+        // than aborting, which is what the sweep assertions below check.
+        assert.equal(code, 1, 'a build whose renders threw must exit non-zero')
+        assert.match(combined, /Mikser completed with \d+ render error/,
+            'it completes the cycle rather than aborting')
         assert.match(combined, /Layouts loaded: 1.*1 removed/,
             'sweep should emit DELETE for the missing partial')
         assert.match(combined, /Render error/,
