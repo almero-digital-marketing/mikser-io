@@ -374,7 +374,7 @@ export async function setup(options) {
                     logger.debug('Manifest skip: %s → %s', entity.name || entity.id, entity.destination)
                     return
                 }
-                reportRendered(entity, decision.reason)
+                reportRendered(entity, decision.reason, decision.changed)
                 // Project reference-marker keys (`$author`, `$hero`, …)
                 // into their normalized form (`author`, `hero`) before
                 // the entity crosses into the renderer — applies whether

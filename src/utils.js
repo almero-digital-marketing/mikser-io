@@ -15,9 +15,11 @@ import runtime from './runtime.js'
 // seeding. Excludes volatile fields like stamp/time/uri so re-discovery
 // on startup doesn't produce a different hash for an unchanged file.
 // Pure: synchronous, no I/O, no engine state.
-export function inputHashOf(entity) {
-    if (!entity) return ''
-    return crypto.createHash('sha1').update(JSON.stringify({
+// The payload both `inputHashOf` and `inputPartsOf` describe. One
+// definition, because a hash and an attribution of that hash that disagree
+// about what went into it is worse than having no attribution.
+function inputPayload(entity) {
+    return {
         meta: entity.meta ?? null,
         content: entity.content ?? null,
         // The bytes' fingerprint, for entities whose content is not in
@@ -46,7 +48,69 @@ export function inputHashOf(entity) {
         // an entity that HAS content is hashed on {meta, content} and its
         // checksum is ignored. This is the seam that was missing.
         inputs: entity.inputs ?? null,
-    })).digest('hex')
+    }
+}
+
+export function inputHashOf(entity) {
+    if (!entity) return ''
+    return crypto.createHash('sha1').update(JSON.stringify(inputPayload(entity))).digest('hex')
+}
+
+// Per-component hashes of the same payload, flat and one level deep:
+//
+//   { 'meta.title': 'ab12cd34', content: '…', 'inputs.shared': '…' }
+//
+// Recorded alongside the combined hash so a later run can say WHICH input
+// moved rather than only that one did. `inputs-changed` on its own sends
+// the reader to a database query to answer something already known here.
+//
+// Components that are null are omitted rather than hashed, so a component
+// appearing or disappearing reads as an added or removed key — which is
+// the answer in its own right when a document gains front-matter or a
+// layout gains a sidecar.
+//
+// Depth one: naming `meta.title` is the difference between a useful answer
+// and "something under meta". Deeper nesting would grow the snapshot for
+// diminishing returns — the key names the field to look at, and the field
+// is then in front of you.
+export function inputPartsOf(entity) {
+    if (!entity) return {}
+    const parts = {}
+    const short = (value) => crypto.createHash('sha1')
+        .update(JSON.stringify(value ?? null)).digest('hex').slice(0, 8)
+    const payload = inputPayload(entity)
+    for (const [component, value] of Object.entries(payload)) {
+        if (value == null) continue
+        if (component === 'meta' || component === 'inputs') {
+            if (typeof value !== 'object' || Array.isArray(value)) {
+                parts[component] = short(value)
+                continue
+            }
+            for (const [key, inner] of Object.entries(value)) {
+                parts[`${component}.${key}`] = short(inner)
+            }
+            continue
+        }
+        parts[component] = short(value)
+    }
+    return parts
+}
+
+// What moved between two part maps. Returns the keys, split by how they
+// differ, so a caller can say "content changed" or "meta.title added"
+// without re-deriving the comparison.
+export function diffInputParts(before, after) {
+    const from = before ?? {}
+    const to = after ?? {}
+    const changed = [], added = [], removed = []
+    for (const key of Object.keys(to)) {
+        if (!(key in from)) added.push(key)
+        else if (from[key] !== to[key]) changed.push(key)
+    }
+    for (const key of Object.keys(from)) {
+        if (!(key in to)) removed.push(key)
+    }
+    return { changed: changed.sort(), added: added.sort(), removed: removed.sort() }
 }
 
 // Canonical lookup variants for an entity — the same four forms the

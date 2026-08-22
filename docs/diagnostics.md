@@ -35,10 +35,29 @@ npx mikser --explain /documents/en/posts/hello.md
 ```
 
 It prints the entity's layout and **why that layout matched**, its
-destination, its `inputHash`, whether the file on disk still agrees with
-the catalog, every recorded render with its `refClosure`, and a verdict
-in plain words — `would be SKIPPED — input hash unchanged`, or `would
-re-render`, or `source file is gone`.
+destination, its `inputHash` and the components that went into it,
+whether the file on disk still agrees with the catalog, every recorded
+render with its `refClosure`, and a verdict in plain words.
+
+When an entity's inputs have moved since a render, the verdict names what
+moved rather than only that something did:
+
+```
+would re-render — meta.title changed since it was last rendered
+```
+
+and the render line carries the same detail per snapshot:
+
+```
+rendered    2026-08-22 21:07:52   → /page-a.html   [STALE: input hash moved since]
+  moved      content, meta.weight (added)
+```
+
+A snapshot written before per-input recording says so rather than
+guessing. Note that `--explain` compares the CATALOG's entity against the
+snapshot: if you have edited a file and not yet built, the verdict is
+`source differs from the catalog` — the edit has not been imported yet, so
+there is nothing to attribute. Build, then ask.
 
 Each `refClosure` edge shows the name that was asked for and the entity
 it bound to, and flags the ones that bound to nothing:
@@ -76,6 +95,27 @@ Four buckets, and the distinction between them is the point:
 `reason` is a stable vocabulary you can assert on: `unchanged`,
 `never-rendered`, `inputs-changed`, `ref-changed`, `query-matched`,
 `cache-disabled`, `postprocessor`, `force`, `no-manifest`.
+
+`inputs-changed` carries a `changed` array naming **which** input moved,
+so you do not have to go to the database to find out:
+
+```json
+{ "id": "/files/hero.jpg",     "reason": "inputs-changed", "changed": ["checksum"] }
+{ "id": "/documents/page.md",  "reason": "inputs-changed", "changed": ["meta.title"] }
+{ "id": "/documents/page.md",  "reason": "inputs-changed", "changed": ["content"] }
+{ "id": "/layouts/post.hbs",   "reason": "inputs-changed", "changed": ["inputs.shared"] }
+```
+
+`checksum` means the bytes on disk moved; `content` means the body did;
+`meta.<field>` names the front-matter field; `inputs.<key>` is a declared
+input such as a layout's sidecar digest. A field that appeared or vanished
+reads as `meta.weight (added)` / `(removed)`, which is the answer when a
+document gains or loses front-matter.
+
+The array is absent on a first render — there is no prior snapshot to
+compare against — and on `ref-changed`, because that is a dependency
+moving rather than the entity's own inputs. Conflating the two would make
+the attribution misleading.
 
 `unchanged` is the interesting one. It means invalidation was coarser
 than it needed to be — the render was scheduled, ran, and produced

@@ -4,7 +4,7 @@ import { writeFile, rm, mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import { checksum, checksumOf } from '../../src/utils.js'
+import { checksum, checksumOf, inputHashOf, inputPartsOf, diffInputParts } from '../../src/utils.js'
 
 let dir
 const tmp = async (name, buf) => {
@@ -80,5 +80,67 @@ describe('the truncation hazard', () => {
 
     it('a small file is a bare hash, with no length prefix', () => {
         assert.match(checksumOf(Buffer.from('x')), /^[0-9a-f]{32}$/)
+    })
+})
+
+describe('inputPartsOf / diffInputParts', () => {
+    // The attribution behind `inputs-changed`. inputPartsOf hashes the SAME
+    // payload inputHashOf does, one level deep, so the two cannot disagree
+    // about what went into the hash.
+    it('names meta fields individually', () => {
+        const parts = inputPartsOf({ id: '/a', meta: { title: 'A', href: '/a' }, content: 'body' })
+        assert.deepEqual(Object.keys(parts).sort(), ['content', 'meta.href', 'meta.title'])
+    })
+
+    it('includes checksum only when content is absent', () => {
+        const file = inputPartsOf({ id: '/f', meta: { url: '/f' }, checksum: 'c1' })
+        assert.ok('checksum' in file, 'a file entity is fingerprinted by its checksum')
+        const doc = inputPartsOf({ id: '/d', meta: {}, content: 'body', checksum: 'c1' })
+        assert.ok(!('checksum' in doc), 'content is authoritative when present')
+    })
+
+    it('omits null components rather than hashing them', () => {
+        const parts = inputPartsOf({ id: '/a', content: 'body' })
+        assert.deepEqual(Object.keys(parts), ['content'])
+    })
+
+    it('reports a changed field by name', () => {
+        const before = inputPartsOf({ id: '/a', meta: { title: 'A' }, content: 'b' })
+        const after = inputPartsOf({ id: '/a', meta: { title: 'B' }, content: 'b' })
+        assert.deepEqual(diffInputParts(before, after),
+            { changed: ['meta.title'], added: [], removed: [] })
+    })
+
+    it('separates added and removed from changed', () => {
+        const before = inputPartsOf({ id: '/a', meta: { title: 'A', old: 1 }, content: 'b' })
+        const after = inputPartsOf({ id: '/a', meta: { title: 'A', fresh: 2 }, content: 'c' })
+        assert.deepEqual(diffInputParts(before, after),
+            { changed: ['content'], added: ['meta.fresh'], removed: ['meta.old'] })
+    })
+
+    it('reports nothing for identical inputs', () => {
+        const entity = { id: '/a', meta: { title: 'A' }, content: 'b' }
+        assert.deepEqual(diffInputParts(inputPartsOf(entity), inputPartsOf({ ...entity })),
+            { changed: [], added: [], removed: [] })
+    })
+
+    it('agrees with inputHashOf about what counts as a change', () => {
+        // If a change moves the combined hash, the parts must attribute it;
+        // if it does not, they must stay silent. Drift between the two is
+        // worse than no attribution at all.
+        const base = { id: '/a', meta: { title: 'A' }, content: 'b', inputs: { shared: 'x' } }
+        const cases = [
+            { ...base, meta: { title: 'B' } },
+            { ...base, content: 'c' },
+            { ...base, inputs: { shared: 'y' } },
+            { ...base },
+        ]
+        for (const variant of cases) {
+            const hashMoved = inputHashOf(base) !== inputHashOf(variant)
+            const d = diffInputParts(inputPartsOf(base), inputPartsOf(variant))
+            const partsMoved = d.changed.length + d.added.length + d.removed.length > 0
+            assert.equal(partsMoved, hashMoved,
+                `disagreement for ${JSON.stringify(variant)}`)
+        }
     })
 })

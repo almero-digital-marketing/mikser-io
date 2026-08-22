@@ -8,7 +8,7 @@
 // needs knowledge a user of the tool should not need.
 //
 // Follows --verify's shape: report and exit, no build phases run.
-import { inputHashOf, lookupKeys, checksum as fileChecksum } from './utils.js'
+import { inputHashOf, inputPartsOf, diffInputParts, lookupKeys, checksum as fileChecksum } from './utils.js'
 import { findEntity } from './catalog.js'
 import runtime from './runtime.js'
 
@@ -28,6 +28,22 @@ async function resolve(reference) {
     return like ?? null
 }
 
+// The verdict line names what moved when it can. That line is the one
+// people read, so "the input hash differs" there is the answer stopping one
+// step short of useful.
+function renderVerdict(snapshots, currentHash, currentParts) {
+    const moved = new Set()
+    for (const snap of snapshots) {
+        if (snap.inputHash === currentHash || !snap.inputParts) continue
+        const d = diffInputParts(snap.inputParts, currentParts)
+        for (const key of [...d.changed, ...d.added, ...d.removed]) moved.add(key)
+    }
+    if (!moved.size) {
+        return 'would re-render — the entity\'s input hash differs from what it was last rendered at'
+    }
+    return `would re-render — ${[...moved].join(', ')} changed since it was last rendered`
+}
+
 export async function explain(reference) {
     const entity = await resolve(reference)
     if (!entity) {
@@ -43,6 +59,7 @@ export async function explain(reference) {
 
     const snapshots = runtime.manifest?.snapshotsFor(entity.id) ?? []
     const currentHash = inputHashOf(entity)
+    const currentParts = inputPartsOf(entity)
 
     // The catalog is as of the LAST BUILD. If the file has been edited since,
     // nothing here knows it yet — the hashes would all agree and the verdict
@@ -96,9 +113,11 @@ export async function explain(reference) {
         // current hash; each snapshot carries the hash it was rendered at, so
         // the two disagreeing IS the answer to "why did this change".
         inputHash: currentHash,
-        inputHashOf: entity.checksum && entity.meta == null && entity.content == null
-            ? 'checksum'
-            : 'meta+content+inputs',
+        // The components that actually went into the hash for THIS entity,
+        // read off the parts rather than restated — a hardcoded label drifts
+        // the moment the payload changes, and this one had.
+        inputHashOf: [...new Set(Object.keys(currentParts).map(k => k.split('.')[0]))].join('+')
+            || 'nothing',
         inputs: entity.inputs ?? null,
         checksum: entity.checksum ?? null,
         source,
@@ -109,6 +128,15 @@ export async function explain(reference) {
             // The single most useful field: does this entity's current hash
             // match what it was last rendered at?
             stale: snap.inputHash !== currentHash,
+            // WHICH input moved, not merely that one did. This is the whole
+            // question behind "why did this re-render" — answering it from
+            // the recorded parts costs nothing, and not answering it sends
+            // the reader to a database query for something already here.
+            moved: snap.inputHash === currentHash
+                ? null
+                : snap.inputParts
+                    ? diffInputParts(snap.inputParts, currentParts)
+                    : 'unknown',
             outputHash: snap.outputHash ?? null,
             parent: snap.parent ?? null,
             refClosure: (snap.refClosure ?? []).map(entry =>
@@ -136,7 +164,7 @@ export async function explain(reference) {
                 : snapshots.length === 0
             ? 'never rendered — no manifest snapshot. Either it has no layout, or its layout produced no destination.'
             : snapshots.some(s => s.inputHash !== currentHash)
-                ? 'would re-render — the entity\'s input hash differs from what it was last rendered at'
+                ? renderVerdict(snapshots, currentHash, currentParts)
                 : 'would be SKIPPED — input hash unchanged. A dependency in refClosure changing is the only other thing that would re-render it.',
         lookupKeys: lookupKeys(entity),
     }

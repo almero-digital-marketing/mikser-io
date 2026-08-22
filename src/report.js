@@ -28,9 +28,16 @@ export function reportGated(count = 1) {
     store().gated += count
 }
 
-export function reportRendered(entity, reason) {
+export function reportRendered(entity, reason, changed) {
     if (!runtime.options?.json) return
-    store().rendered.push({ id: entity?.id, destination: entity?.destination ?? null, reason })
+    store().rendered.push({
+        id: entity?.id,
+        destination: entity?.destination ?? null,
+        reason,
+        // Which input moved, when the reason is inputs-changed. Omitted
+        // rather than empty so a consumer can test for its presence.
+        ...(changed?.length ? { changed } : {}),
+    })
 }
 
 // A render that RAN and produced bytes identical to what was already on

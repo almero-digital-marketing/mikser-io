@@ -56,7 +56,7 @@ import { useLogger } from './engine.js'
 import { onLoaded, onFinalize } from './lifecycle.js'
 import { useJournal } from './journal.js'
 import { OPERATION } from './constants.js'
-import { extractRefs, inputHashOf } from './utils.js'
+import { extractRefs, inputHashOf, inputPartsOf, diffInputParts } from './utils.js'
 import { filterKey } from './track.js'
 import { findById } from './catalog.js'
 import { useDatabase, registerSchema } from './database/index.js'
@@ -74,6 +74,7 @@ export const SNAPSHOTS_SCHEMA = `
         id          TEXT NOT NULL,
         destination TEXT NOT NULL,
         inputHash   TEXT,
+        inputParts  TEXT,
         outputHash  TEXT,
         refClosure  TEXT,
         renderedAt  INTEGER,
@@ -97,6 +98,20 @@ function sha1(payload) {
 }
 
 // refClosure builder — same logic as before, no DB involvement.
+// Which input moved, as a flat list of part names ('content',
+// 'meta.title', 'checksum', 'inputs.shared'). Empty when the snapshot
+// predates part recording — the combined hash still says the entity
+// changed, and saying nothing is better than guessing which part.
+function describeInputChange(entity, snapshot) {
+    if (!snapshot?.inputParts) return []
+    const { changed, added, removed } = diffInputParts(snapshot.inputParts, inputPartsOf(entity))
+    return [
+        ...changed,
+        ...added.map(key => `${key} (added)`),
+        ...removed.map(key => `${key} (removed)`),
+    ]
+}
+
 function buildRefClosure(entity, deps) {
     const closure = []
     const seen = new Set()
@@ -155,6 +170,11 @@ function buildSnapshot(entity, deps, outputHash) {
         id: entity.id,
         destination: entity.destination,
         inputHash: inputHashOf(entity),
+        // Per-component hashes of the same payload the combined hash covers,
+        // so a later run can name WHICH input moved instead of only that one
+        // did. Without it `inputs-changed` sends the reader to a database
+        // query for something the tool already has in hand.
+        inputParts: inputPartsOf(entity),
         refClosure: buildRefClosure(entity, deps),
         renderedAt: Date.now(),
     }
@@ -171,6 +191,7 @@ function rowToSnap(row) {
         id:          row.id,
         destination: row.destination,
         inputHash:   row.inputHash ?? undefined,
+        inputParts:  row.inputParts ? JSON.parse(row.inputParts) : undefined,
         outputHash:  row.outputHash ?? undefined,
         refClosure:  row.refClosure ? JSON.parse(row.refClosure) : undefined,
         renderedAt:  row.renderedAt ?? undefined,
@@ -183,6 +204,7 @@ function snapToRow(snap) {
         id:          snap.id,
         destination: snap.destination,
         inputHash:   snap.inputHash   ?? null,
+        inputParts:  snap.inputParts  ? JSON.stringify(snap.inputParts) : null,
         outputHash:  snap.outputHash  ?? null,
         refClosure:  snap.refClosure  ? JSON.stringify(snap.refClosure) : null,
         renderedAt:  snap.renderedAt  ?? null,
@@ -230,18 +252,18 @@ export function createManifest(db) {
     if (!db) throw new Error('createManifest: db is required')
 
     const stmtLookupById = db.prepare(`
-        SELECT id, destination, inputHash, outputHash, refClosure, renderedAt, parent
+        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, renderedAt, parent
         FROM mikser_snapshots WHERE id = ? ORDER BY destination
     `)
     const stmtLookup = db.prepare(`
-        SELECT id, destination, inputHash, outputHash, refClosure, renderedAt, parent
+        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, renderedAt, parent
         FROM mikser_snapshots WHERE id = ? AND destination = ?
     `)
     const stmtUpsert = db.prepare(`
         INSERT OR REPLACE INTO mikser_snapshots
-            (id, destination, inputHash, outputHash, refClosure, renderedAt, parent)
+            (id, destination, inputHash, inputParts, outputHash, refClosure, renderedAt, parent)
         VALUES
-            (@id, @destination, @inputHash, @outputHash, @refClosure, @renderedAt, @parent)
+            (@id, @destination, @inputHash, @inputParts, @outputHash, @refClosure, @renderedAt, @parent)
     `)
     const stmtDeleteByPK = db.prepare(`
         DELETE FROM mikser_snapshots WHERE id = ? AND destination = ?
@@ -257,7 +279,7 @@ export function createManifest(db) {
         SELECT id, destination FROM mikser_snapshots WHERE parent = ?
     `)
     const stmtSelectAll = db.prepare(`
-        SELECT id, destination, inputHash, outputHash, refClosure, renderedAt, parent
+        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, renderedAt, parent
         FROM mikser_snapshots
     `)
     const stmtCount = db.prepare(`SELECT COUNT(*) AS c FROM mikser_snapshots`)
@@ -352,7 +374,16 @@ export function createManifest(db) {
             if (entity?.meta?.cache === false) return { skip: false, reason: 'cache-disabled' }
             const snapshot = this.lookup(entity)
             if (!snapshot?.inputHash) return { skip: false, reason: 'never-rendered' }
-            if (inputHashOf(entity) !== snapshot.inputHash) return { skip: false, reason: 'inputs-changed' }
+            if (inputHashOf(entity) !== snapshot.inputHash) {
+                // Name the component that moved. "inputs-changed" alone is
+                // the answer to a question nobody asked — the reader wants to
+                // know WHICH input, and the recorded parts have it.
+                return {
+                    skip: false,
+                    reason: 'inputs-changed',
+                    changed: describeInputChange(entity, snapshot),
+                }
+            }
             if (!snapshot.refClosure?.length) return { skip: true, reason: 'unchanged' }
             const sourceLang = entity?.meta?.lang ?? null
             for (const entry of snapshot.refClosure) {
