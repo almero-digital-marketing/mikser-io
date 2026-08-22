@@ -97,11 +97,11 @@ function buildRefClosure(entity, deps) {
     const closure = []
     const seen = new Set()
     // `targetId`/`targetIds` are the recorded BINDING — which entity the
-    // ref actually resolved to. They have to survive into the snapshot:
-    // this projection used to keep only {kind, target, hash}, so the
-    // binding was written to mikser_refs, dropped here, and skipDecision
-    // had nothing but the name to compare. The scheduler found the
-    // dependent and the manifest then skipped it.
+    // ref resolved to — and they have to survive into the snapshot. A
+    // projection that keeps only {kind, target, hash} leaves the binding
+    // in mikser_refs and out of the snapshot, so skipDecision has nothing
+    // but the name to compare: the scheduler finds the dependent and the
+    // manifest then skips it.
     function pushTarget(kind, target, hash, targetId, targetIds) {
         if (!target) return
         const key = `${kind}:${target}`
@@ -122,11 +122,11 @@ function buildRefClosure(entity, deps) {
     if (entity.meta) {
         for (const { ref } of extractRefs(entity.meta)) {
             // Resolve through the refs index, which mirrors refFilter's
-            // four forms. findById alone — as this used to do — is an
-            // exact primary-key read: a $-ref written as a meta.href or
-            // a served meta.url path (ADR-0011) resolved to nothing, so
-            // the edge was stored with no hash and no binding, and the
-            // manifest could not tell the target had changed.
+            // four forms. findById alone is an exact primary-key read, so
+            // a $-ref written as a meta.href or a served meta.url path
+            // (ADR-0011) resolves to nothing and the edge lands with no
+            // hash and no binding — leaving the manifest unable to see
+            // that the target changed.
             const ids = runtime.refs?.resolveRefIds?.(ref) ?? (findById(ref) ? [ref] : [])
             const bound = ids.length === 1 ? findById(ids[0]) : null
             pushTarget(
@@ -308,17 +308,17 @@ export function createManifest(db) {
         //   cache-disabled   meta.cache === false
         //   force            --force: skip nothing, ask nothing
         skipDecision(entity, mutatedRefs, currentHashes, mutatedEntities) {
-            // --force means "ignore what you think you know". THREE gates can
-            // stop a render — source.js's import checksum gate, layouts'
-            // dispatch filter, and this one — and force reached only the
-            // first two. Since this one runs last, a forced build re-imported
-            // everything (gated=0), re-dispatched everything, and then
-            // dropped all of it here with reason `unchanged`: rendered=0, and
-            // a summary that read like a successful build.
+            // --force means "ignore what you think you know". THREE gates
+            // can stop a render — source.js's import checksum gate,
+            // layouts' dispatch filter, and this one — and force has to
+            // reach all three. This one runs last, so if it alone ignores
+            // force, a forced build re-imports everything, re-dispatches
+            // everything, and drops all of it here as `unchanged`:
+            // rendered=0, and a summary that reads like a success.
             //
-            // That made --force useless in exactly the situation it exists
-            // for, which is when the invalidation graph is under suspicion —
-            // including the advice the preset no-match warning gives.
+            // That is the situation --force exists for — the invalidation
+            // graph being under suspicion — including where the preset
+            // no-match warning tells the operator to use it.
             if (runtime.options?.force) return { skip: false, reason: 'force' }
             if (entity?.meta?.cache === false) return { skip: false, reason: 'cache-disabled' }
             const snapshot = this.lookup(entity)
@@ -344,10 +344,10 @@ export function createManifest(db) {
                 // the target renaming itself.
                 //
                 // Both, not the first match, because the two can disagree:
-                // the bound entity may have been re-persisted unchanged in
-                // the same cycle that a DIFFERENT entity started answering
-                // to the same name. Stopping at the binding would compare
-                // an unchanged hash and skip, silently ignoring the new
+                // the bound entity may be re-persisted unchanged in the
+                // same cycle that a DIFFERENT entity starts answering to
+                // the same name. Stopping at the binding compares an
+                // unchanged hash and skips, silently ignoring the new
                 // claimant. The name key also carries unresolved/forward
                 // edges, which is how a link to a not-yet-existing page
                 // invalidates once that page appears.
@@ -499,20 +499,19 @@ export function createManifest(db) {
             }
             if (track?.lookups) {
                 for (const [target, ids] of track.lookups) {
-                    // The lookup helper resolved this already and handed
-                    // over the ids, so the hash comes from the BOUND
-                    // entity. Hashing findById(target) instead — as this
-                    // did — silently produced no hash at all whenever the
-                    // target was an href or url form, because findById is
-                    // an exact primary-key read: it resolves neither
-                    // meta.href nor meta.url nor a stripped extension.
-                    // Every such edge was hashless, so the manifest could
-                    // not tell "target moved" from "target changed".
+                    // The lookup helper has already resolved this and
+                    // handed over the ids, so the hash comes from the
+                    // BOUND entity. It must not come from
+                    // findById(target): that is an exact primary-key read
+                    // and resolves neither meta.href nor meta.url nor a
+                    // stripped extension, so any href- or url-form target
+                    // yields no hash and the manifest cannot tell "target
+                    // moved" from "target changed".
                     //
-                    // No hash still means "nothing resolved", and
-                    // skipDecision re-renders a hashless edge whose target
-                    // mutated — which is what should happen when a page
-                    // that was linked-to-but-missing finally appears.
+                    // No hash means "nothing resolved", and skipDecision
+                    // re-renders a hashless edge whose target mutated —
+                    // which is what should happen when a page that was
+                    // linked-to-but-missing finally appears.
                     const targetIds = [...ids]
                     const bound = targetIds.length === 1 ? findById(targetIds[0]) : null
                     edges.push({

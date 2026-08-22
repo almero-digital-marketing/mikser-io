@@ -26,11 +26,11 @@ const CATALOG_SCHEMA = `
     ) WITHOUT ROWID;
 `
 
-// REFS_SCHEMA is imported from src/refs.js rather than copied. The copy
-// that used to live here drifted the moment the table gained a column,
-// and the whole file failed with an opaque SQLITE_ERROR. src/refs.js is
-// already imported above for createIndex, so there is no extra
-// side-effect in taking the schema from the same place.
+// REFS_SCHEMA is imported from src/refs.js rather than copied. A copy
+// drifts the moment the table gains a column, and the whole file then
+// fails with an opaque SQLITE_ERROR. src/refs.js is already imported
+// above for createIndex, so taking the schema from the same place costs
+// no extra side-effect.
 
 // Open a fresh in-memory database with the two-table schema. Each
 // test gets its own DB so state doesn't bleed between tests.
@@ -48,13 +48,12 @@ function makeTestDb() {
     return db
 }
 
-// Seed the parent rows an edge's FK requires, and let indexEntity
-// resolve against them. The hand-copied schema this file used to carry
-// had quietly dropped the FOREIGN KEY clause, so tests could index an
-// entity that was never in mikser_entities — something production
-// cannot do, since catalog.applyJournalMutations upserts every row
-// before indexing any of them. Wrapping indexEntity keeps all the
-// existing call sites and makes them faithful.
+// Seed the parent rows an edge's FK requires, and let indexEntity resolve
+// against them. Without the FK enforced, a test can index an entity that
+// is not in mikser_entities — something production cannot do, since
+// catalog.applyJournalMutations upserts every row before indexing any of
+// them. Wrapping indexEntity keeps the existing call sites and makes them
+// faithful.
 function seedEntity(db, entity) {
     if (!entity?.id) return
     db.prepare(`

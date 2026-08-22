@@ -7,16 +7,16 @@
 //   2. the dispatch filter           (mikser-io-layouts assembly)
 //   3. the manifest skip             (manifest.skipDecision)
 //
-// Force reached 1 (for sources) and 2, and neither 3 nor files()'s own
-// copy of 1. Because 3 runs last, a forced build re-imported everything,
-// re-dispatched everything, and then dropped all of it with reason
-// `unchanged` — rendered=0, exit 0, and a summary that read like a
-// successful build. That made --force useless in the one situation it
-// exists for: when the invalidation graph is under suspicion.
+// Force has to be honoured by all four (3 and files()'s own copy of 1
+// are the easy ones to miss). Because 3 runs last, one gate ignoring
+// force is enough for a forced build to re-import everything,
+// re-dispatch everything, then drop all of it as `unchanged` —
+// rendered=0, exit 0, and a summary that reads like a success. That is
+// the one situation --force exists for: the invalidation graph under
+// suspicion.
 //
-// Each gate is individually correct; force simply has to be taught to
-// all of them, which is why this test asserts on the whole pipeline
-// rather than on any single one.
+// Each gate is individually correct, so this asserts on the whole
+// pipeline rather than any single one.
 
 import { describe, it, after } from 'node:test'
 import assert from 'node:assert/strict'

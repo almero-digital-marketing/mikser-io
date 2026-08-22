@@ -34,11 +34,11 @@ export function reportRendered(entity, reason) {
 }
 
 // A render that RAN and produced bytes identical to what was already on
-// disk. Distinct from both other outcomes and the interesting one of the
+// disk. Distinct from both other outcomes, and the interesting one of the
 // three: `rendered` means the output moved, `skipped` means the manifest
-// decided not to look, and this means invalidation was coarser than it
-// needed to be. Nothing downstream should have been disturbed, and the
-// count is the measure of how much conservative invalidation costs.
+// declined to look, and this means invalidation was coarser than it needed
+// to be. Nothing downstream is disturbed, and the count measures what
+// conservative invalidation costs.
 export function reportUnchanged(entity) {
     if (!runtime.options?.json) return
     store().unchanged.push({ id: entity?.id, destination: entity?.destination ?? null })

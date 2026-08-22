@@ -414,11 +414,9 @@ export function findById(id) {
 // (hit the LRU and validate remaining clauses inline). For other
 // filters, translate to SQL + JS fallback.
 export async function findEntity(query) {
-    // A function IS a valid filter — the plugin harness has always treated
-    // one as a predicate, and `typeof fn !== 'object'`, so this guard used
-    // to return undefined for every function filter without a word. Code
-    // written against the harness therefore worked in tests and silently
-    // found nothing in a real build.
+    // A function is a valid filter, so the guard has to admit one:
+    // `typeof fn !== 'object'`, and rejecting it here returns undefined
+    // for every function filter without a word.
     if (!query || (typeof query !== 'object' && typeof query !== 'function')) return
     recordQuery(query)
 
@@ -469,26 +467,20 @@ export async function findEntity(query) {
 // pushdown result set.
 // The residual predicate a SQL translation could not absorb.
 //
-// `translate()` reports `jsFilter: null` when there is nothing left to
-// check in JS — and it ALSO reports null for a filter it cannot read at
-// all, which is what a function is. Every caller below treated that null
-// as "nothing left to check", so a function predicate was silently
-// DISCARDED: `findEntities(fn)` returned the entire catalog and
-// `findEntity(fn)` returned whichever row came first under LIMIT 1.
+// `translate()` reports `jsFilter: null` for two different situations:
+// nothing is left to check in JS, and the filter could not be read at
+// all. A function filter is the second. Reading that null as the first
+// discards the predicate — `findEntities(fn)` then answers with the
+// entire catalog and `findEntity(fn)` with whichever row LIMIT 1
+// returns, both silently. So the function case is decided HERE, from
+// `query` itself, rather than inferred from what translate returned.
 //
-// Measured on a two-entity catalog before this existed:
+// The plugin harness applies function filters, so a plugin that relies
+// on this passes its own tests either way; only production diverges.
 //
-//   findEntities({ id: '/documents/nope.md' })      -> 0   correct
-//   findEntities(e => e.id === '/documents/nope.md') -> 2   everything
-//
-// The plugin harness applies function filters correctly, so a plugin
-// tested against it passed while the same code matched everything in
-// production. mikser-io-schemas' missing-reference check was built on
-// exactly this and had therefore never once fired.
-//
-// A function still cannot be indexed — it forces a full scan and a
-// JSON.parse per row — so callers should prefer an object filter, and
-// `refFilter()` exists for the common "resolve a ref string" case.
+// A function cannot be indexed — it forces a full scan and a JSON.parse
+// per row — so prefer an object filter, and `refFilter()` for the common
+// "resolve a ref string" case.
 function residualMatcher(query, jsFilter) {
     if (jsFilter) return sift(jsFilter)
     if (typeof query === 'function') {
@@ -499,8 +491,7 @@ function residualMatcher(query, jsFilter) {
 }
 
 // Once per process: a function filter is a performance cliff, not an
-// error, and a message per call on a hot path would be worse than the
-// cliff.
+// error, and a message per call on a hot path costs more than the cliff.
 let warnedFullScan = false
 function warnFullScan() {
     if (warnedFullScan) return

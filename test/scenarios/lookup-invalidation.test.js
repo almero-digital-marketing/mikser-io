@@ -1,23 +1,22 @@
 // Integration tests for lookup-based invalidation.
 //
-// The gap this closes: `runtime.href()` and `runtime.lookupUrl()` are
-// how a template asks "where does /contacts live?". The answer depends
-// on ANOTHER entity's destination, but the asking template's own source
-// never changes — so nothing scheduled it for re-render, and nothing
-// recorded that it had asked. Move or rename the target and the build
-// went green with a dead link in the output.
+// `runtime.href()` and `runtime.lookupUrl()` are how a template asks
+// "where does /contacts live?". The answer depends on ANOTHER entity's
+// destination while the asking template's own source never changes, so
+// without a recorded edge nothing schedules it for re-render: move or
+// rename the target and the build goes green with a dead link.
 //
-// The fix is one edge kind, written at render time:
+// One edge kind carries it, written at render time:
 //   render.js  — the href/lookupUrl wrappers call track.lookup(target)
 //   manifest   — collectEdges emits {kind:'lookup', target, hash}
 //   refs       — replaceDynamic owns kind != 'ref', so the edge lands
 //                in mikser_refs and inverseClosureOf walks back to the
 //                asking entity on the next cycle
 //
-// The kind matters: writing these as 'ref' put them under the STATIC
-// indexer's ownership, which clears kind='ref' per source. The edge got
-// inserted and then wiped — visible in the manifest, absent from the
-// refs index, and still never scheduling anything.
+// The kind matters: 'ref' belongs to the STATIC indexer, which clears
+// kind='ref' per source. A render-time edge written as 'ref' is inserted
+// and then wiped — visible in the manifest, absent from the refs index,
+// scheduling nothing.
 //
 // Two directions are both required, and they pull against each other:
 //   - the target MOVES  -> the asking entity MUST re-render (staleness)

@@ -117,10 +117,10 @@ export async function explain(reference) {
                     : {
                         kind: entry.kind,
                         target: entry.target,
-                        // What the name actually resolved to. A binding
-                        // that is absent means the edge is dangling —
-                        // the single most useful thing to know when a
-                        // page will not re-render and nobody can say why.
+                        // What the name resolved to. An absent binding
+                        // means a dangling edge — the most useful single
+                        // fact when a page will not re-render and nothing
+                        // says why.
                         bound: entry.targetIds?.length ? entry.targetIds
                             : entry.targetId ? [entry.targetId]
                             : [],

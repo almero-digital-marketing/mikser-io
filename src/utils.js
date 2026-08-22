@@ -21,21 +21,18 @@ export function inputHashOf(entity) {
         meta: entity.meta ?? null,
         content: entity.content ?? null,
         // The bytes' fingerprint, for entities whose content is not in
-        // hand. Files are the whole reason: `files()` sets meta.url on
-        // every file entity, so `meta` is never null, so the old
-        // "file-only entity" special case (meta == null && content ==
-        // null) never fired for a real file — and the fall-through
-        // hashed {meta, content} with content null. The result was an
-        // inputHash that did not move when an image, video or download
-        // changed on disk. The file itself is copied rather than
-        // rendered, so nothing looked wrong; what broke was every
-        // dependent, whose refClosure dep-hash for that file was frozen
-        // and whose skipDecision therefore always said "unchanged".
+        // hand. Files are the reason it cannot be conditioned on `meta`
+        // being absent: `files()` stamps meta.url on every file entity,
+        // so a file always has meta, and a hash over {meta, content}
+        // alone does not move when the bytes on disk change. The file is
+        // copied rather than rendered, so that shows up nowhere in the
+        // file itself — it freezes the refClosure dep-hash of every
+        // dependent, whose skipDecision then always answers "unchanged".
         //
         // Excluded when content IS present: content is then the
         // authoritative copy of the same bytes, and folding in a
         // checksum computed a different way would make the hash depend
-        // on how the checksum happens to be derived.
+        // on how that checksum happens to be derived.
         checksum: entity.content == null ? entity.checksum ?? null : null,
         // `inputs` is how a plugin declares bytes that are NOT part of the
         // entity's own content but that its output depends on. Whatever is
@@ -59,13 +56,12 @@ export function inputHashOf(entity) {
 // Pure: synchronous, no I/O.
 //
 // MUST stay in lockstep with `refFilter` below, which is the forward
-// direction of the same relation. `meta.url` used to be missing here
-// while refFilter had it: a `$hero: /hero.txt` ref to a served path
-// (ADR-0011) recorded an edge against `/hero.txt`, but the file entity
-// at `/files/hero.txt` produced keys `['/files/hero.txt',
-// '/files/hero']` — so nothing ever matched the edge and editing the
-// asset invalidated nothing. Every $-ref to an image, video or
-// download was silently non-invalidating.
+// direction of the same relation. A form present there and missing here
+// makes every ref written in that form silently non-invalidating: the
+// edge is recorded against the string the author wrote, and nothing the
+// target expands to ever matches it. `meta.url` is the one to watch —
+// a `$hero: /hero.txt` ref to a served path (ADR-0011) resolves through
+// it, while the file entity's id is `/files/hero.txt`.
 export function lookupKeys(entity) {
     const id = entity?.id
     if (!id) return []
@@ -935,22 +931,22 @@ export function useCollection(runtime, name) {
 // Write `bytes` to `file`, unless the file already holds exactly those
 // bytes. Returns true if it wrote, false if the file was already correct.
 //
-// Invalidation is deliberately conservative: an entity that merely READ
-// another entity re-renders when that one changes, because the engine
-// cannot know which field was read. That is the right default, and it
-// means renders regularly produce byte-identical output. Writing anyway
-// moves mtime, and three things downstream key off the file rather than
-// its contents:
+// Invalidation is deliberately conservative: an entity that merely READS
+// another re-renders when that one changes, because the engine cannot
+// know which field was read. That is the right default, and it means
+// renders regularly produce byte-identical output. Three things
+// downstream key off the file rather than its contents, so writing it
+// anyway is not free:
 //
-//   - live reload watches the output folder, so editing one photograph
-//     reloaded the browser on pages that had not changed
+//   - live reload watches the output folder, so one edited photograph
+//     reloads the browser on every page that merely mentions it
 //   - rsync, `aws s3 sync` and most CDN tools compare size plus mtime,
 //     so unchanged pages re-upload
 //   - `find out -newer` cannot answer "what did this build change?"
 //
-// Doing it here rather than narrowing the dependency edges fixes every
-// conservative-invalidation case at once, and stays correct as the graph
-// gets more precise instead of becoming redundant.
+// The check belongs here rather than in the dependency edges: it covers
+// every conservative-invalidation case at once, and stays correct as the
+// graph gets more precise instead of becoming redundant.
 //
 // Ordering matters: the size check comes first so the common
 // output-really-changed case never pays for a read, and lstat (not stat)

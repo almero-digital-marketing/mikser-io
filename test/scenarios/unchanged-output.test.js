@@ -6,16 +6,16 @@
 // referenced entity appearing or disappearing genuinely changes the
 // output — and it means renders regularly produce identical bytes.
 //
-// Writing them anyway moved mtime, and three things downstream key off
+// Writing them anyway moves mtime, and three things downstream key off
 // the file rather than its contents:
 //
-//   - mikser-io-live watches the output folder, so editing one image
-//     reloaded the browser on pages that had not changed
+//   - mikser-io-live watches the output folder, so one edited image
+//     reloads the browser on pages that did not change
 //   - rsync, `aws s3 sync` and most CDN tools compare size plus mtime,
-//     so unchanged pages re-uploaded
-//   - `find out -newer` could not answer "what did this build change?"
+//     so unchanged pages re-upload
+//   - `find out -newer` cannot answer "what did this build change?"
 //
-// The fix is at the write (utils.writeOutput), not at the edge: it
+// The check lives at the write (utils.writeOutput), not at the edge: it
 // covers every conservative-invalidation case at once and stays correct
 // as the dependency graph gets more precise, rather than becoming
 // redundant.

@@ -1,24 +1,22 @@
 // Tests for the files() plugin's sync path.
 //
-// files() had no test coverage at all, which is how two bugs sat in the
-// same three lines of its ACTION.UPDATE branch:
+// Two invariants of its ACTION.UPDATE branch, both invisible on a cold
+// import and observable only on the sync (watch) path — which is why a
+// full build can look correct while either is broken:
 //
-//   1. `name: relativePath` instead of `name`. The prelude computes
-//      `name` with the outputFolder prefix and CREATE uses it; UPDATE
-//      dropped it, while `meta.url` on the next line kept it. The assets
-//      plugin builds preset destinations from `name`, so a file replaced
-//      under watch had its derivatives written to a different path than
-//      the same file freshly imported — and meta.presets recorded the
-//      wrong one, producing 404s for pages using the asset.
+//   1. `name` must carry the outputFolder prefix, as CREATE's does and as
+//      `meta.url` on the next line does. Using `relativePath` instead
+//      drops it, and the assets plugin builds preset destinations from
+//      `name` — so a file replaced under watch gets its derivatives
+//      written somewhere else than a fresh import's, with meta.presets
+//      recording the wrong path and pages 404ing on the asset.
 //
-//   2. `current?.checksum != checksum` compared the stored checksum
-//      string against the checksum FUNCTION from the plugin context.
-//      Never equal, so the guard always passed, every sync re-emitted
-//      the entity, and the `synced = false` branch was unreachable.
+//   2. The guard must compare against `await checksum(source)`, not the
+//      `checksum` FUNCTION from the plugin context. A string is never
+//      equal to a function, so the guard always passes, every sync
+//      re-emits the entity, and `synced = false` is unreachable.
 //
-// Both only show on the sync (watch) path, never on a cold import, which
-// is why a full build looked correct. These drive onSync directly rather
-// than running a watcher.
+// These drive onSync directly rather than running a watcher.
 
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'

@@ -5,26 +5,23 @@
 // how content authors reference assets: `$hero: /hero.jpg`, not
 // `$hero: /files/hero.jpg`. It is the normal form, not an edge case.
 //
-// Two independent defects made every such reference non-invalidating,
-// so editing an image or a video left every page that used it holding
-// the previous checksum, dimensions and URL, on a green build:
+// Two independent things have to hold, or editing an image or a video
+// leaves every page using it holding the previous checksum, dimensions
+// and URL, on a green build:
 //
-//   1. `lookupKeys()` produced only three of the four forms — meta.url
-//      had been added to the forward resolver and never to the reverse
-//      map, despite refFilter's comment demanding they stay in lockstep.
-//      An edge recorded against '/hero.txt' was matched against the
-//      keys of '/files/hero.txt', which never include '/hero.txt'.
+//   1. `lookupKeys()` must produce all four forms refFilter resolves.
+//      Omit meta.url and an edge recorded against '/hero.txt' is matched
+//      against the keys of '/files/hero.txt', which never include it.
 //
-//   2. `inputHashOf()` folded in the file checksum only for entities
-//      with NO meta and NO content. `files()` sets meta.url on every
-//      file entity, so meta was never null and the checksum was always
-//      ignored — a file's inputHash did not move when its bytes did.
-//      Even with the edge matched, the dep-hash comparison said
-//      "unchanged".
+//   2. `inputHashOf()` must fold in the file checksum whenever content
+//      is absent, not only when meta is absent too. `files()` stamps
+//      meta.url on every file entity, so conditioning on meta being null
+//      means the checksum is always ignored and a file's inputHash does
+//      not move when its bytes do — the dep-hash comparison then answers
+//      "unchanged" even with the edge matched.
 //
-// Both had to be fixed for this to work, which is why the test asserts
-// the observable behaviour (did the dependent rebuild?) rather than
-// either mechanism.
+// Both are required, so the test asserts the observable behaviour — did
+// the dependent rebuild? — rather than either mechanism.
 
 import { describe, it, after } from 'node:test'
 import assert from 'node:assert/strict'

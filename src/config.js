@@ -35,16 +35,15 @@ onLoad(async () => {
     //
     // Node raises that same code for "the config file is missing" and for
     // "the config file exists and something IT imports is missing" — a
-    // mistyped package name, a renamed local module, a dependency that
-    // was never installed. Catching the code swallowed both, so a config
-    // with one bad import loaded as `{}` and the build reported "No
-    // plugins loaded" and exited 0: a green build with an empty output
-    // folder, one line away from having printed the config's path.
+    // mistyped package name, a renamed local module, a dependency that was
+    // never installed. Catching the code cannot tell them apart, and a
+    // config with one bad import then loads as `{}`: the build reports "No
+    // plugins loaded" and exits 0, a green build with an empty output
+    // folder, one line below having printed the config's path.
     //
-    // Every other config failure was already loud — a syntax error or a
-    // throw during evaluation both exit 1. Module resolution was the one
-    // silent case, so this brings it in line rather than inventing a new
-    // policy.
+    // Every other config failure is loud — a syntax error and a throw
+    // during evaluation both exit 1. Module resolution is the only one that
+    // needs this to stay in line with them.
     if (!existsSync(configFile)) {
         logger.debug('No config file at %s — using defaults', configFile)
     } else {

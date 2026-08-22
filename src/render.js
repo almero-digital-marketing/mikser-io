@@ -77,12 +77,11 @@ function lookupHrefViaDb(href) {
 function lookupUrlViaDb(ref, preset, origin, track) {
     if (typeof ref !== 'string') return ref
     const row = stmtIdLookup.get(ref)
-    // Record the dependency here, where the row is already read, rather
-    // than in the wrapper — a second lookup per call would be paid on
-    // every image and media reference in a template. stmtIdLookup is an
-    // exact-id read, so a hit means the bound entity IS `ref`; a miss
-    // records the name with no binding, which is a forward reference and
-    // still a real dependency.
+    // Record the dependency here, where the row is already read: doing it
+    // in the wrapper costs a second lookup on every image and media
+    // reference in a template. stmtIdLookup is an exact-id read, so a hit
+    // means the bound entity IS `ref`; a miss records the name with no
+    // binding, which is a forward reference and still a real dependency.
     track?.lookup?.(ref, row ? ref : null)
     if (!row) return ref
     const meta = JSON.parse(row.data).meta || {}

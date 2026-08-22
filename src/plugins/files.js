@@ -89,24 +89,24 @@ export function files(options = {}) {
                 case ACTION.UPDATE: {
                     const current = await findEntity({ id })
                     // `checksum` is the source-checksum FUNCTION from the
-                    // plugin context, not a value. Comparing the stored
-                    // string against it was never equal, so the guard
-                    // always passed and every sync re-wrote the entity —
-                    // `synced = false` was unreachable.
+                    // plugin context, not a value — it has to be called.
+                    // Comparing the stored string against the function
+                    // itself is never equal, which makes the guard always
+                    // pass and `synced = false` unreachable.
                     const currentChecksum = await checksum(source)
                     if (current?.checksum != currentChecksum) {
                         await updateEntity({
                             id,
                             uri,
-                            // `name` — the prefixed form, as CREATE uses.
-                            // This read `relativePath`, so an update
-                            // dropped the outputFolder prefix while
-                            // meta.url two lines down kept it. The assets
-                            // plugin builds preset destinations from
-                            // `name`, so a file replaced under watch had
-                            // its derivatives written somewhere else than
-                            // the same file freshly imported, and
-                            // meta.presets recorded the wrong path.
+                            // `name` — the prefixed form, the same one
+                            // CREATE uses. `relativePath` here drops the
+                            // outputFolder prefix that meta.url two lines
+                            // down keeps. The assets plugin builds preset
+                            // destinations from `name`, so the two
+                            // disagreeing sends a watched replacement's
+                            // derivatives somewhere else than a fresh
+                            // import's, and records the wrong path in
+                            // meta.presets.
                             name,
                             collection,
                             type,
@@ -159,12 +159,12 @@ export function files(options = {}) {
             // journal with phantom mutations and triggering downstream
             // re-dispatch of aggregate layouts whose recorded query deps
             // matched the collection.
-            // --force (and a wiped catalog) must defeat the gate, the same
-            // way source.js's gateChecksum lets them defeat its own. This
-            // plugin carries a second, independent gate, and it honoured
-            // neither — so no amount of forcing ever re-derived a file's
-            // name / meta.url / meta.presets, and a catalog holding bad
-            // `files` rows had no repair path short of deleting them.
+            // --force (and a wiped catalog) must defeat this gate, the
+            // same way source.js's gateChecksum lets them defeat its own.
+            // This is a second, independent gate: if it ignores them, no
+            // amount of forcing re-derives a file's name / meta.url /
+            // meta.presets, and a catalog holding bad `files` rows has no
+            // repair path short of deleting them.
             const forced = runtime.options.force || runtime.catalog?.cacheInvalidated
             const priorChecksums = checksumsByCollection(collection)
             await pMap(paths, async relativePath => {

@@ -89,9 +89,8 @@ onLoad(() => {
     if (!factoryEntries.length && !registeredRenderers && !registeredPostprocessors) {
         // "No plugins loaded" is a legitimate state for a project with no
         // config at all, and a near-certain mistake for one that HAS a
-        // config — the two printed the same line, so a config that
-        // produced no plugins looked like a deliberate choice. Say which
-        // case this is.
+        // config. One line for both makes a config that produced no
+        // plugins read as a deliberate choice, so say which case it is.
         if (runtime.options.configChecksum) {
             logger.warn(
                 'No plugins loaded, but a config was read from %s — ' +

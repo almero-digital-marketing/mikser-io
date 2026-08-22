@@ -45,20 +45,18 @@ export function createTrack({ partial = true, query = true, lookup = true } = {}
     if (lookup) {
         // Lookups a TEMPLATE made by name: runtime.href('/contacts'),
         // runtime.lookupUrl('/media/clip.mp4'). Both read the catalog
-        // directly, and until this existed neither told anyone — so nothing
-        // recorded that a page depends on the page it links to.
+        // directly, so without recording them nothing knows that a page
+        // depends on the page it links to — rename the target and only the
+        // target re-renders, leaving every link to it pointing at a file
+        // that no longer exists, on a green build.
         //
-        // Measured consequence: rename contacts.md to contact-us.md and only
-        // the renamed page re-renders. Every page linking to it keeps a href
-        // pointing at a file that no longer exists, on a green build.
-        //
-        // The edge kind is 'lookup', NOT 'ref': mikser_refs divides ownership
-        // by kind — indexEntity owns kind='ref' (static frontmatter $-refs)
-        // and clears it per source, while replaceDynamic owns everything
-        // else. Writing these as 'ref' got them inserted by replaceDynamic
-        // and then wiped by the next indexEntity, so the edge existed in
-        // the manifest and never in the refs index — recorded, and still
-        // never scheduling a re-render.
+        // The edge kind is 'lookup', NOT 'ref'. mikser_refs divides
+        // ownership by kind: indexEntity owns kind='ref' (static
+        // frontmatter $-refs) and clears it per source, replaceDynamic owns
+        // everything else. A render-time edge written as 'ref' is inserted
+        // by replaceDynamic and then wiped by the next indexEntity, so it
+        // lands in the manifest, never in the refs index, and schedules
+        // nothing.
         //
         // Records BOTH the string asked for and what it resolved to.
         // The string alone cannot survive the target renaming itself;

@@ -26,11 +26,11 @@
 //                 (language variants).
 //
 // Both are load-bearing. Answering "who depends on X?" from target_ref
-// alone means guessing which strings X could have answered to, which
-// fails the moment X changes its name — the recorded string is then
-// derivable from no live state. target_id alone cannot express a
-// forward or dangling reference, nor re-bind when an entity later
-// claims a name nobody could resolve before.
+// alone means guessing which strings X could have answered to, and that
+// guess fails the moment X changes its name: the recorded string is then
+// derivable from no live state. target_id alone cannot express a forward
+// or dangling reference, nor re-bind when an entity later claims a name
+// nobody could resolve before.
 //
 // Lookups are indexed SELECTs over (target_ref, kind), (target_id) and
 // (source_id):
@@ -67,10 +67,9 @@ import { registerSchema, useDatabase } from './database/index.js'
 // already covers forward (everything X references) without a
 // separate index.
 //
-// Exported so tests build their index over the REAL schema instead of a
-// hand-copied one. The copy in test/unit/refs.test.js silently drifted
-// out of date the moment target_id was added — 25 tests failed with a
-// bare SQLITE_ERROR pointing at nothing in particular.
+// Exported so tests build their index over the real schema rather than a
+// copy. A copy drifts the moment a column is added, and the failure is a
+// bare SQLITE_ERROR that names nothing.
 export const REFS_SCHEMA = `
     CREATE TABLE IF NOT EXISTS mikser_refs (
         source_id   TEXT NOT NULL,
@@ -270,11 +269,11 @@ export function createIndex(db) {
             // entity that has just started answering to a name nobody
             // could resolve before.
             //
-            // Union rather than replacement: strictly a superset of the
-            // pre-binding behaviour, so nothing that invalidated before
-            // can stop invalidating now. Over-approximating here is
-            // cheap — manifest.skipDecision still compares hashes and
-            // drops anything that did not actually change.
+            // Union rather than either alone: a superset of what each
+            // direction finds on its own, so no dependency is missed
+            // because it was recorded under the other one. Over-
+            // approximating here is cheap — manifest.skipDecision still
+            // compares hashes and drops anything that did not change.
             for (const key of lookupKeys(entity ?? { id })) {
                 for (const row of stmtInboundAny.all(key)) referrers.add(row.source_id)
             }
