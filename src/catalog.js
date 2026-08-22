@@ -414,7 +414,12 @@ export function findById(id) {
 // (hit the LRU and validate remaining clauses inline). For other
 // filters, translate to SQL + JS fallback.
 export async function findEntity(query) {
-    if (!query || typeof query !== 'object') return
+    // A function IS a valid filter — the plugin harness has always treated
+    // one as a predicate, and `typeof fn !== 'object'`, so this guard used
+    // to return undefined for every function filter without a word. Code
+    // written against the harness therefore worked in tests and silently
+    // found nothing in a real build.
+    if (!query || (typeof query !== 'object' && typeof query !== 'function')) return
     recordQuery(query)
 
     if (db?.isOpen) {
@@ -429,13 +434,12 @@ export async function findEntity(query) {
         }
 
         const t = siftToSql(query)
-        const sql = `SELECT data FROM mikser_entities ${t.sql} LIMIT ${t.jsFilter ? '' : '1'}`
-        // With a jsFilter we may need to scan multiple rows before
-        // finding a match; without one, LIMIT 1 short-circuits.
-        const stmt = db.prepare(t.jsFilter
+        // With a residual predicate we may need to scan multiple rows
+        // before finding a match; without one, LIMIT 1 short-circuits.
+        const matcher = residualMatcher(query, t.jsFilter)
+        const stmt = db.prepare(matcher
             ? `SELECT data FROM mikser_entities ${t.sql}`
             : `SELECT data FROM mikser_entities ${t.sql} LIMIT 1`)
-        const matcher = t.jsFilter ? sift(t.jsFilter) : null
         for (const row of stmt.iterate(...t.params)) {
             const entity = JSON.parse(row.data)
             if (!matcher || matcher(entity)) return entity
@@ -454,7 +458,7 @@ export async function findEntity(query) {
         if (Object.keys(rest).length === 0) return entity
         return sift(rest)(entity) ? entity : undefined
     }
-    const m = sift(query)
+    const m = typeof query === 'function' ? query : sift(query)
     for (const entity of shim.all()) {
         if (m(entity)) return entity
     }
@@ -463,6 +467,53 @@ export async function findEntity(query) {
 // All entities (no arg) or those matching `query`. Indexed clauses
 // push down to SQL; un-indexed clauses run as a sift filter over the
 // pushdown result set.
+// The residual predicate a SQL translation could not absorb.
+//
+// `translate()` reports `jsFilter: null` when there is nothing left to
+// check in JS — and it ALSO reports null for a filter it cannot read at
+// all, which is what a function is. Every caller below treated that null
+// as "nothing left to check", so a function predicate was silently
+// DISCARDED: `findEntities(fn)` returned the entire catalog and
+// `findEntity(fn)` returned whichever row came first under LIMIT 1.
+//
+// Measured on a two-entity catalog before this existed:
+//
+//   findEntities({ id: '/documents/nope.md' })      -> 0   correct
+//   findEntities(e => e.id === '/documents/nope.md') -> 2   everything
+//
+// The plugin harness applies function filters correctly, so a plugin
+// tested against it passed while the same code matched everything in
+// production. mikser-io-schemas' missing-reference check was built on
+// exactly this and had therefore never once fired.
+//
+// A function still cannot be indexed — it forces a full scan and a
+// JSON.parse per row — so callers should prefer an object filter, and
+// `refFilter()` exists for the common "resolve a ref string" case.
+function residualMatcher(query, jsFilter) {
+    if (jsFilter) return sift(jsFilter)
+    if (typeof query === 'function') {
+        warnFullScan()
+        return query
+    }
+    return null
+}
+
+// Once per process: a function filter is a performance cliff, not an
+// error, and a message per call on a hot path would be worse than the
+// cliff.
+let warnedFullScan = false
+function warnFullScan() {
+    if (warnedFullScan) return
+    warnedFullScan = true
+    try {
+        useLogger().debug(
+            'Catalog query used a function filter: this cannot be indexed and '
+            + 'scans the whole catalog. Prefer an object filter, or refFilter(ref) '
+            + 'to resolve a ref string.',
+        )
+    } catch { /* logger may not exist yet */ }
+}
+
 export async function findEntities(query) {
     recordQuery(query)
 
@@ -474,17 +525,14 @@ export async function findEntities(query) {
         const stmt = db.prepare(`SELECT data FROM mikser_entities ${t.sql}`)
         const rows = stmt.all(...t.params)
         const entities = rows.map(r => JSON.parse(r.data))
-        if (t.jsFilter) {
-            const matcher = sift(t.jsFilter)
-            return entities.filter(matcher)
-        }
-        return entities
+        const matcher = residualMatcher(query, t.jsFilter)
+        return matcher ? entities.filter(matcher) : entities
     }
 
     const shim = mapStub()
     if (!shim) return []
     if (!query) return shim.all()
-    const m = sift(query)
+    const m = typeof query === 'function' ? query : sift(query)
     return shim.all().filter(m)
 }
 
@@ -522,7 +570,7 @@ export async function* iterateEntities(query) {
         const stmt = db.prepare(
             `SELECT id, data FROM mikser_entities ${where} ORDER BY id LIMIT ?`,
         )
-        const matcher = t.jsFilter ? sift(t.jsFilter) : null
+        const matcher = residualMatcher(query, t.jsFilter)
 
         let lastId = ''
         while (true) {
@@ -540,7 +588,7 @@ export async function* iterateEntities(query) {
     // Stub path — for tests that don't bring up the database.
     const shim = mapStub()
     if (!shim) return
-    const m = query ? sift(query) : null
+    const m = query ? (typeof query === 'function' ? query : sift(query)) : null
     for (const entity of shim.all()) {
         if (!m || m(entity)) yield entity
     }

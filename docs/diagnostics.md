@@ -1,0 +1,289 @@
+# Diagnostics
+
+The other documents here are organised by subsystem — the lifecycle, the
+catalog, the render pipeline. That is the shape for learning how mikser
+works. This one is organised by the question you arrive with, which is
+almost always a form of *"why did it do that?"*
+
+Every surface below already exists. If answering a question means reading
+engine source, the entry point is missing and belongs on this page.
+
+## Start here
+
+| Your question | Reach for |
+| --- | --- |
+| Why didn't this page rebuild? | [`--explain`](#--explain-entity) |
+| What did this build actually change? | [`--json`](#--json) |
+| Does the output folder match what mikser thinks it wrote? | [`--verify`](#--verify) |
+| What happened during the last cycle, in order? | [`mikser_journal`](#mikser_journal) |
+| What depends on this entity? | [`runtime.refs`](#runtimerefs) |
+| Which layout claimed this document, and why that one? | [`layouts.inspect()`](#layoutsinspect) |
+| Why does this page's output look stale? | [`runtime.manifest`](#runtimemanifest) |
+| Did my schema validate anything at all? | [`schemas.names()`](#schemasnames--schemaslookup) |
+
+## Command line
+
+### `--explain <entity>`
+
+The single most direct answer to "why didn't this rebuild". Reports
+instead of building. Accepts an id, a `meta.href`, or an id without its
+extension — the same three forms a `$`-ref accepts, so you can paste
+whatever you have.
+
+```bash
+npx mikser --explain /documents/en/posts/hello.md
+```
+
+It prints the entity's layout and **why that layout matched**, its
+destination, its `inputHash`, whether the file on disk still agrees with
+the catalog, every recorded render with its `refClosure`, and a verdict
+in plain words — `would be SKIPPED — input hash unchanged`, or `would
+re-render`, or `source file is gone`.
+
+Each `refClosure` edge shows the name that was asked for and the entity
+it bound to, and flags the ones that bound to nothing:
+
+```
+refClosure  4 edges
+  ref        /hero.txt → /files/hero.txt  24dc5b87
+  ref        /does-not-exist  [UNRESOLVED — nothing answers to this name]
+  layout     /layouts/page.hbs  f274678c
+  lookup     /contacts  [UNRESOLVED — nothing answers to this name]
+```
+
+An `[UNRESOLVED]` edge is usually the answer on its own. Add `--json` for
+the same report as a machine-readable object. Exits `3` when the entity
+cannot be found.
+
+### `--json`
+
+A build report on stdout, as JSON. Logs and the banner move to stderr
+under this flag, so stdout parses whole.
+
+```bash
+npx mikser --json | jq '.summary'
+```
+
+Four buckets, and the distinction between them is the point:
+
+| Bucket | Meaning |
+| --- | --- |
+| `rendered` | the render ran, with a `reason` per entity |
+| `skipped` | the manifest decided not to render, with a `reason` |
+| `unchanged` | the render ran and produced bytes identical to what was already on disk |
+| `gated` | a count — the source was unchanged, so no render was ever scheduled |
+
+`reason` is a stable vocabulary you can assert on: `unchanged`,
+`never-rendered`, `inputs-changed`, `ref-changed`, `query-matched`,
+`cache-disabled`, `postprocessor`, `force`, `no-manifest`.
+
+`unchanged` is the interesting one. It means invalidation was coarser
+than it needed to be — the render was scheduled, ran, and produced
+nothing new. A high count is not a bug, but it tells you where the
+dependency graph is conservative.
+
+Warnings carry a stable `code` alongside their prose, so a test can
+assert "this build produced no preset-no-match" without grepping a
+sentence someone may later reword.
+
+### `--verify`
+
+Walks the output folder against the recorded snapshots and reports drift
+instead of building. Four categories, and the split matters:
+
+| Category | Meaning | Severity |
+| --- | --- | --- |
+| `Missing` | a snapshot records a destination that is not on disk | error |
+| `Mismatched` | the file's bytes differ from the recorded `outputHash` | error |
+| `No hash` | a snapshot with no recorded hash — nothing to compare | warning |
+| `Orphan` | a file on disk that no snapshot claims | warning |
+
+Exit codes make it usable as a CI gate directly: `2` if anything is
+missing or mismatched, `1` if only warnings, `0` when clean, and `2` when
+there is no manifest to check against.
+
+```bash
+npx mikser --verify || echo "output folder has drifted"
+```
+
+`Orphan` is the one to read carefully — it is normal for files that
+another plugin writes (assets, files, data), and a real signal for a page
+whose layout stopped producing it.
+
+### The rest, briefly
+
+| Flag | Use |
+| --- | --- |
+| `-f, --force` | ignore all three gates (import checksum, dispatch, manifest) and re-render everything |
+| `-R, --resume` | continue from a previous interrupted run's journal; skips the filesystem scan |
+| `-r, --clear` | clear state before running |
+| `-d, --debug` / `-t, --trace` | raise log level; `trace` includes per-entity catalog writes |
+
+`--force` composes with the unchanged-output check: it redoes the work
+without touching files whose bytes did not move, so it is cheap to reach
+for and its `unchanged` count tells you how much of the catalog was stale
+by suspicion rather than in fact.
+
+## The database
+
+Everything mikser knows lives in one SQLite file at
+`<workingFolder>/runtime/mikser.sqlite`. It is readable while a build
+runs (WAL mode) and it is often faster to ask it directly than to add
+logging.
+
+```bash
+sqlite3 runtime/mikser.sqlite
+```
+
+Five tables:
+
+| Table | Holds |
+| --- | --- |
+| `mikser_entities` | the catalog — one row per entity, `data` is the JSON body |
+| `mikser_journal` | the current cycle's operations, in order — cleared per cycle, which is what makes `--resume` possible |
+| `mikser_refs` | the dependency graph, both directions |
+| `mikser_snapshots` | what was rendered, where, and from which inputs |
+| `mikser_meta` | schema version and config checksum, for cache invalidation |
+
+### `mikser_journal`
+
+The ordered record of what the engine did this cycle — one row per
+operation, per consumer. When a build "did nothing" and you cannot see
+why, this is where the absence becomes visible: an entity that was never
+imported has no CREATE, and an entity gated at import has no RENDER.
+
+```sql
+SELECT operation, count(*) FROM mikser_journal GROUP BY operation;
+```
+
+### `mikser_refs`
+
+One row per dependency edge, carrying both the question and the answer:
+
+| Column | Meaning |
+| --- | --- |
+| `source_id` | the entity that depends |
+| `target_ref` | the string it asked for — an id, a `meta.href`, a `meta.url`, or an id minus its extension |
+| `target_id` | the entity that string resolved to, `''` if nothing did |
+| `kind` | `ref` (static `$`-ref), `layout`, `partial`, `query`, `lookup` |
+| `field` | for `ref`, the dotted path in `meta` |
+
+"What breaks if I rename this?" is one query:
+
+```sql
+SELECT source_id, kind, target_ref FROM mikser_refs
+ WHERE target_id = '/documents/en/authors/dick.yml';
+```
+
+A row with `target_id = ''` is a dangling reference — the dependent asked
+for a name nothing currently answers to.
+
+### `mikser_snapshots`
+
+One row per rendered destination: `inputHash` (what it was rendered
+from), `outputHash` (the bytes it produced), `refClosure` (the
+dependencies it recorded), `renderedAt`. An entity can have several — one
+per matched layout, one per paginated page.
+
+## From inside a plugin or a REPL
+
+### `runtime.refs`
+
+The dependency graph, queryable both ways.
+
+| Method | Answers |
+| --- | --- |
+| `inboundFor(ref)` | which entities `$`-ref this, and through which field |
+| `outboundFor(id)` | which refs this entity emits |
+| `dynamicInboundFor(target)` | which entities depend on this via layout / partial / query / lookup |
+| `dynamicOutboundFor(id)` | the render-time edges this entity recorded |
+| `inverseClosureOf(seeds)` | everything that transitively depends on these — the set a change dispatches |
+| `resolveRefIds(ref)` | which entity ids a ref string resolves to, by all four forms |
+| `allRefs()` / `size()` | every static ref target; edge and source counts |
+| `subscribeGraph(opts)` | react to changes within N hops of entities matching a filter |
+| `subscribeQuery(opts)` | react to changes matching a query |
+
+`inverseClosureOf` is the one to reach for when a change re-rendered more
+than you expected — it returns exactly the set the scheduler will act on.
+
+### `runtime.manifest`
+
+What was rendered and whether it needs redoing.
+
+| Method | Answers |
+| --- | --- |
+| `snapshotsFor(id)` | every snapshot for an entity, without knowing its destinations |
+| `lookup({id, destination})` | one snapshot |
+| `skipDecision(entity, …)` | `{ skip, reason }` — the same reason `--json` reports |
+| `recordedHashes()` | the dep-hashes dependents last saw |
+| `queryAffected(mutated)` | which query-dependent snapshots this mutation hits |
+| `verify({outputFolder})` | `{ missing, mismatched, unverifiable, orphaned }` — what `--verify` reports; pure, no mutations |
+| `size()` | snapshot count |
+
+`snapshotsFor(id)` exists because an entity can render to several
+destinations and a caller asking "what happened to this?" does not know
+them in advance — which is exactly the position you are in when a page
+did not change and you want to know why.
+
+### `layouts.inspect()`
+
+Exposed by `mikser-io-layouts` at `runtime.options.layouts.inspect(id)`.
+Answers "what does this layout actually do?" — its template source, the
+partials and references the renderer parses out of it, and the recorded
+`refClosure` of up to `samples` entities that used it, so you can see
+what it depended on in practice rather than in theory.
+
+```js
+const report = await runtime.options.layouts.inspect('/layouts/post.hbs', { samples: 3 })
+```
+
+Throws with `code: 'LAYOUT_NOT_FOUND'` for an id that is not a layout.
+
+### `schemas.names()` / `schemas.lookup()`
+
+Exposed by `mikser-io-schemas` at `runtime.options.schemas`. `names()`
+lists every loaded schema; `lookup(name)` returns the zod object.
+
+The failure worth knowing about: a schema that loaded but matched no
+entity is reported at finalize, because validation that silently never
+runs looks exactly like validation that passed. If you configured
+schemas and see no errors, check that warning before believing the
+content is clean.
+
+### `preview`
+
+`mikser-io`'s preview plugin exposes `runtime.options.preview = { store,
+get, stats, config }` — the on-demand render cache, useful for asking
+what has been rendered outside a build.
+
+## When mikser is silent
+
+Silence is this engine's characteristic failure mode: a declaration that
+selected nothing, or an input nothing tracked, and a green build. The
+surfaces that turn silence into a statement:
+
+- **A build that rendered nothing** — `--json` distinguishes `gated`
+  (source unchanged, never scheduled) from `skipped` (scheduled, manifest
+  declined). Those have different causes.
+- **A page pinned to stale bytes** — `--explain` on it, then read the
+  `refClosure` for an `[UNRESOLVED]` edge or a dependency you expected to
+  be listed and is not. An input nothing recorded is an input nothing
+  invalidates.
+- **A pattern or query that matched nothing** — several plugins warn on
+  this now (layout patterns, preset matching, null filters). The warnings
+  carry stable `code`s in `--json`.
+- **Output that does not match the config** — the config's bytes take
+  part in cache invalidation, so a config change forces a rebuild; but a
+  module the config *imports* does not. If you changed a helper the config
+  pulls in, use `--force`.
+- **A plugin that appears to do nothing** — `No plugins loaded` with a
+  config present is a warning naming the file. A config that fails to
+  load now exits non-zero rather than loading as empty.
+
+## See also
+
+- [Entities](./entities.md) — the entity model, operations, journal, catalog
+- [Lifecycle](./lifecycle.md) — which phase a hook can see what in
+- [API Reference](./api-reference.md) — full signatures
+- [Decisions](./decisions/) — why the graph is shaped this way, especially
+  ADR-0002 (files are the source of truth) and ADR-0009 (SQLite substrate)

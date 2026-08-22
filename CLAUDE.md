@@ -94,16 +94,39 @@ brevity.
   corpus-scale and the caller doesn't need an array), `queryEntities`,
   `readEntity`, `subscribe`, `assertExpand`. Expand internals
   (`expandLimits`, `expandAndProject`, `findRef`) are PRIVATE.
+  All three readers accept either a sift object or a **function**
+  predicate; a function cannot be pushed into SQL, so it forces a full
+  scan and a JSON.parse per row — prefer an object, and `refFilter(ref)`
+  for the "resolve a ref string" case. `refFilter` / `matchesRef` /
+  `lookupKeys` are one relation in three directions (query, predicate,
+  reverse) and must be changed together: `meta.url` once lived in only
+  the first, which made every `$`-ref to a served path silently
+  non-invalidating. `test/unit/utils.test.js` property-tests the
+  symmetry.
 - `subscriptions.js` — `subscribe()` primitive. Two modes: journal-
   walk dispatch (default) and graph dispatch via
   `runtime.refs.subscribeGraph` (when `expand` is set).
 - `refs.js` — inverse-reference graph (`$`-keyed refs per ADR-0007).
-  Persisted as `mikser_refs` rows with FK to `mikser_entities`
-  (`ON DELETE CASCADE`). Indexed on `target` and `source`. Exposed
-  at `runtime.refs.*`: `inboundFor`, `outboundFor`, `allRefs`,
-  `size`, `rename`, `subscribeGraph`, `inverseClosureOf`. Plus
-  `refExists` module-level. Prepared statements through the shared
-  sqlite handle.
+  Persisted as `mikser_refs` rows with FK on `source_id` to
+  `mikser_entities` (`ON DELETE CASCADE`); indexed on `target_ref`
+  and `target_id`. Each row carries BOTH the string asked for
+  (`target_ref` — an id, `meta.href`, `meta.url`, or id-minus-
+  extension) and the entity it resolved to (`target_id`, `''` when
+  nothing did). Both are load-bearing: a name alone cannot survive the
+  target renaming itself, and an id alone cannot express a forward or
+  dangling reference. `inverseClosureOf` takes the union of a name
+  query and an identity query, so it is a superset of name-only
+  matching. Kinds: `ref` (static `$`-ref, owned by `indexEntity`),
+  and `layout` / `partial` / `query` / `lookup` (render-time, owned by
+  `replaceDynamic`) — the clears divide on `kind = 'ref'` vs
+  `kind != 'ref'`, so a render-time edge must never use `ref`.
+  Exposed at `runtime.refs.*`: `inboundFor`, `outboundFor`,
+  `dynamicInboundFor`, `dynamicOutboundFor`, `allRefs`, `size`,
+  `rename`, `inverseClosureOf`, `resolveRefIds`, `replaceDynamic`,
+  `clearDynamic`, `subscribeGraph`, `subscribeQuery`. Plus `refExists`
+  module-level. `REFS_SCHEMA` is exported so tests build against the
+  real schema instead of a copy. Prepared statements through the
+  shared sqlite handle.
 - `engine.js` — `setup()`, lifecycle wiring, render + postprocess
   dispatchers, manifest tracking. Owns the Piscina worker pools
   (`renderWorkers`, `postprocessWorkers`); both are lazy
@@ -191,6 +214,12 @@ brevity.
 - `constants.js` — `OPERATION` (CREATE/UPDATE/DELETE/RENDER/
   POSTPROCESS), `ACTION` (sync action types), `TASKS` (`INLINE`/
   `SERIAL`/`WORKER` — dispatch modes).
+- `../testing/harness.js` — the in-memory plugin harness, OUTSIDE
+  `src/` because it ships in the package (`.npmignore` excludes
+  `test/`). Sibling plugins import it as
+  `mikser-io/testing/harness.js` rather than copying it; the copies
+  drifted before it moved here. `test/unit/plugin-harness.js` is a
+  re-export for this repo's own tests.
 
 ## Canonical sibling plugins
 
@@ -516,11 +545,15 @@ There is **no `--mcp` CLI flag**. Activation is plugin-presence only.
 
 ## Test suites
 
-- `npm run test:unit` — 363 unit tests across plugins + utilities
-- `npm run test:scenarios` — 18 subprocess-spawned end-to-end runs
-  (manifest skip, refs replay, watch-mode change/delete). Spawns
-  mikser fresh per scenario so module-level catalog/refs/manifest
-  state can't leak between tests.
+- `npm run test:unit` — 540 unit tests across plugins + utilities
+- `npm run test:scenarios` — 96 assertions over 20 subprocess-spawned
+  end-to-end runs (manifest skip, refs replay, watch-mode
+  change/delete, lookup + asset invalidation, unchanged output,
+  `--force`, `--explain`, `--json`). Spawns mikser fresh per scenario
+  so module-level catalog/refs/manifest state can't leak between
+  tests. Scenarios use `freshWorkdir()` in os.tmpdir — never
+  `test/fixture`, which is tracked and must stay byte-identical
+  (`git status --short test/fixture` after any run that builds).
 - `npm run test:smoke` — full lifecycle build of `test/fixture/`
   (with vector + decap + post-mjml + post-pdf if env supports).
   Exercises both INLINE postprocess (PDF) and WORKER postprocess
@@ -531,8 +564,8 @@ There is **no `--mcp` CLI flag**. Activation is plugin-presence only.
 
 ## Dev workspace
 
-The siblings live side-by-side under `/Users/dick/Projects/mikser/`
-and share an npm workspace declared at the parent's `package.json`:
+The siblings live side-by-side in one parent folder and share an npm
+workspace declared at that parent's `package.json`:
 
 ```json
 {
@@ -573,6 +606,10 @@ the consumer's own project tree — no duplication, no bug.
 
 ## Reference
 
+- `docs/diagnostics.md` — "why did it do that?" — `--explain`,
+  `--json`, `--verify`, the sqlite tables, and every introspection
+  surface, indexed by the question it answers. Start here when
+  debugging rather than reading engine source.
 - `docs/architecture.md` — module map (audit before relying
   on specifics; may have drift)
 - `docs/decisions/` — ADRs

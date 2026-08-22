@@ -286,6 +286,7 @@ Mikser itself has a previous chapter: the [legacy 7.x line](https://github.com/a
 | [Entities](./docs/entities.md)               | Users & Developers | Entity model, operations, journal, catalog         |
 | [Rendering](./docs/rendering.md)             | Users & Developers | Render pipeline, render plugins, render modes      |
 | [Watch Mode](./docs/watch-mode.md)           | Users              | File watching, scheduled tasks, incremental builds |
+| [Diagnostics](./docs/diagnostics.md)         | Users & Developers | **"Why did it do that?"** — `--explain`, `--json`, `--verify`, the sqlite tables, and every introspection surface, indexed by the question it answers |
 | [MCP](https://github.com/almero-digital-marketing/mikser-io-mcp#readme) | Users              | The `mikser-io-mcp` plugin — tool surface, `mikser://` resources, twelve worked AI-driven scenarios |
 | [Caching](./docs/caching.md)                 | Users (production) | The `cache: true` disk cache + working nginx config for reverse-proxy failover |
 | [Architecture](./docs/architecture.md)       | Developers         | Module-level reference — what's in each file       |
