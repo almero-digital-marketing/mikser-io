@@ -31,16 +31,16 @@ export function commands(options = {}) {
             if (_.endsWith(command, '&')) {
                 command = command.slice(0, -1)
                 if (!running[command]) {
-                    logger.info('Command: %s', command, runtime.options.wokrkingFolder)
-                    const subprocess = execaCommand(command, { cwd: runtime.options.wokrkingFolder, all: true })
+                    logger.info('Command: %s', command, runtime.options.workingFolder)
+                    const subprocess = execaCommand(command, { cwd: runtime.options.workingFolder, all: true })
                     eachLine(subprocess.all, line => logger.info(line))
                     running[command] = subprocess
                         .then(() => delete running[command])
                         .catch(err => logger.error(err, 'Command error'))
                 }
             } else {
-                logger.info('Command: %s', command, runtime.options.wokrkingFolder)
-                const subprocess = execaCommand(command, { cwd: runtime.options.wokrkingFolder, all: true })
+                logger.info('Command: %s', command, runtime.options.workingFolder)
+                const subprocess = execaCommand(command, { cwd: runtime.options.workingFolder, all: true })
                 await eachLine(subprocess.all, line => logger.debug(line))
                 await subprocess
             }

@@ -180,6 +180,10 @@ async function hashOutputFile(destination) {
 export function createManifest(db) {
     if (!db) throw new Error('createManifest: db is required')
 
+    const stmtLookupById = db.prepare(`
+        SELECT id, destination, inputHash, outputHash, refClosure, renderedAt, parent
+        FROM mikser_snapshots WHERE id = ? ORDER BY destination
+    `)
     const stmtLookup = db.prepare(`
         SELECT id, destination, inputHash, outputHash, refClosure, renderedAt, parent
         FROM mikser_snapshots WHERE id = ? AND destination = ?
@@ -249,6 +253,17 @@ export function createManifest(db) {
         lookup(query) {
             if (!query?.id || !query?.destination) return null
             return rowToSnap(stmtLookup.get(query.id, query.destination))
+        },
+
+        // EVERY snapshot for an entity, not just the one at a known
+        // destination. An entity can have several — one per matched layout,
+        // one per paginated page — and a caller asking "what happened to
+        // this?" does not know the destinations in advance. That is exactly
+        // the position an operator (or an agent) is in when a page did not
+        // change and they want to know why.
+        snapshotsFor(id) {
+            if (!id) return []
+            return stmtLookupById.all(id).map(rowToSnap)
         },
 
         // Should this render be skipped? See the original docstring in

@@ -122,7 +122,13 @@ function createTerminalStream() {
     return new Writable({
         write(chunk, enc, cb) {
             if (gauge) gauge.disable()
-            process.stdout.write(chunk, enc)
+            // --json puts a machine-readable document on stdout, so every
+            // log line has to go somewhere else or the document cannot be
+            // parsed. stderr rather than silence: the operator still sees
+            // the build, and `mikser --explain x --json | jq` still works —
+            // which is the entire point of the flag.
+            const out = runtime.options?.json ? process.stderr : process.stdout
+            out.write(chunk, enc)
             if (gauge) gauge.enable()
             cb()
         },

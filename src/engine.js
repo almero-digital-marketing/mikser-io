@@ -115,6 +115,8 @@ export async function setup(options) {
             .option('-f --force', 'rebuild everything; disable incremental dispatch', false)
             .option('-R --resume', 'continue from journal entries left by a previous interrupted run; skip the initial filesystem scan', false)
             .option('--verify', 'verify output folder against manifest; report drift instead of building', false)
+            .option('--explain <entity>', 'explain one entity — layout, destination, hashes, refClosure, and whether a build would re-render it. Accepts an id, a meta.href, or an id without its extension. Reports instead of building.')
+            .option('--json', 'machine-readable output (with --explain, and for a build\'s render/skip/warning report)', false)
             .option('-d --debug', 'display debug statements')
             .option('-t --trace', 'display trace statements')
             .option('-e --runtime-folder <folder>', 'set mikser runtime folder relative to working folder', 'runtime')
@@ -226,6 +228,25 @@ export async function setup(options) {
         //                 corruption, but state is messy)
         //   2 — errors   (missing or mismatched files — output is
         //                 actually wrong on disk)
+        // --explain: report on one entity and exit, like --verify. Placed
+        // before it because a caller reaching for both means the explain.
+        //
+        // Exit codes:
+        //   0 — the entity was found and described
+        //   3 — not in the catalog (distinct from --verify's 1/2, which are
+        //       about output drift; "no such entity" is neither clean nor
+        //       corrupt, it is a question that could not be answered)
+        if (runtime.options.explain) {
+            const { explain, formatExplain } = await import('./explain.js')
+            const report = await explain(runtime.options.explain)
+            if (runtime.options.json) {
+                process.stdout.write(JSON.stringify(report, null, 2) + '\n')
+            } else {
+                process.stdout.write(formatExplain(report) + '\n')
+            }
+            process.exit(report.found ? 0 : 3)
+        }
+
         if (runtime.options.verify) {
             if (!runtime.manifest) {
                 logger.error('Verify: no manifest available — nothing to check against')
@@ -723,7 +744,18 @@ export async function setup(options) {
         logger.notice('Mikser restarted')
     })
 
-    console.info('\x1b[1mmikser\x1b[22;5;38;2;255;63;0m.\x1b[0m %s\n', packageInfo.version)
+    // Banner to stderr under --json, for the same reason the logger goes
+    // there: stdout must contain only the document.
+    //
+    // argv directly, not runtime.options: commander parses in a lifecycle
+    // hook, which runs after setup() returns, so options.json is still
+    // undefined here. The logger has no such problem — it writes during the
+    // run, by which time options exist.
+    if (runtime.options?.json || process.argv.includes('--json')) {
+        process.stderr.write(`mikser. ${packageInfo.version}\n`)
+    } else {
+        console.info('\x1b[1mmikser\x1b[22;5;38;2;255;63;0m.\x1b[0m %s\n', packageInfo.version)
+    }
     return runtime
 }
 
