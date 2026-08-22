@@ -607,8 +607,9 @@ export function api(options = {}) {
             // credential declaring `api:delete` still cannot delete on an
             // endpoint whose `operations` omits it, and a bare token (which
             // declares nothing, capabilities === null) is bounded by the
-            // endpoint alone — which is exactly how every endpoint behaved
-            // before this existed.
+            // endpoint alone, which is what makes a plain token still a
+            // complete answer: it grants the endpoint's own ceiling and
+            // nothing more.
             const allow = (op) => (req, res, next) => {
                 if (!allowedOps.has(op)) {
                     return res.status(403).json({

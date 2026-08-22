@@ -50,11 +50,11 @@ export { renderHbs }    from './src/plugins/render/hbs.js'
 export { renderPreset } from './src/plugins/render/preset.js'
 
 // Template helpers — these only install functions on `runtime` for templates
-// to call. They render nothing, which is what the old render* names hid: two
-// of the six factories in this folder are renderers and four are not, and
-// naming all six after the object they concern rather than the job they do
-// led someone to add renderPreset() expecting a helper and watch every page
-// render throw. Renamed in 10.0.0; there are no aliases.
+// to call. They render nothing, and the names say so: two of the six
+// factories in this folder are renderers and four are not, so each is named
+// after the job it does rather than the object it concerns. Naming them all
+// `render*` invites adding renderPreset() expecting a helper and watching
+// every page render throw. There are no aliases for the older names.
 export { assetUrlHelper }    from './src/plugins/render/asset.js'
 export { hrefUrlHelpers }    from './src/plugins/render/href.js'
 export { resourceUrlHelper } from './src/plugins/render/resource.js'

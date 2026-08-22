@@ -360,8 +360,10 @@ onFinalize(async () => {
     }
 })
 
-// Snapshot the catalog as `{ version, entities: [...] }`. Same shape
-// the NDJSON test harness used to read off disk. O(N) — debug only.
+// Snapshot the catalog as `{ version, entities: [...] }` — the schema
+// version plus every entity body. O(N) in both time and memory, so it is
+// for debugging and inspection, never a hot path; `iterateEntities`
+// streams when the result set might be corpus-scale.
 function exportCatalog() {
     if (!db?.isOpen) return { version: null, entities: [] }
     const rows = stmtAllData.all()

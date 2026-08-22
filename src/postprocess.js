@@ -253,10 +253,10 @@ export default async ({ entity, options, config, context, state, logger, port })
     }
 
     // Cleanup the renderer's origin (first stage's input) when it's
-    // a different path from the chain's final destination. The
-    // single-stage onComplete in layouts.js used to do this; under
-    // the chain contract the dispatcher owns it so onComplete can
-    // stay disk-write-agnostic for postprocess outputs.
+    // a different path from the chain's final destination. The chain
+    // contract puts this on the dispatcher rather than on layouts'
+    // onComplete, which is what lets onComplete stay agnostic about
+    // whether a postprocess output was written to disk at all.
     if (entity.origin && entity.origin !== entity.destination) {
         try { await unlink(path.join(options.outputFolder, entity.origin)) } catch {}
     }
@@ -264,7 +264,7 @@ export default async ({ entity, options, config, context, state, logger, port })
     // Return undefined so the engine's onPostprocess loop doesn't
     // try to thread `result` back through layouts' onComplete (which
     // would attempt a writeFile against a non-bytes value). The
-    // postprocess plugins wrote directly to disk; there's nothing
-    // for the engine to flush.
+    // postprocess plugins have written directly to disk by this point;
+    // there is nothing for the engine to flush.
     return undefined
 }

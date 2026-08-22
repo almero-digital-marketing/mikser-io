@@ -225,10 +225,11 @@ function snapToRow(snap) {
 // is the dominant shape. A page destination treated as a filesystem path
 // would otherwise be looked for at the root of the disk.
 //
-// Shared, because the two callers needing it drifted into two separate
-// bugs: verify() reported every asset missing while printing its real
-// path, and hashOutputFile silently recorded no outputHash for one, which
-// left 78% of a real project's snapshots presence-checked only.
+// One definition for both callers. verify() and hashOutputFile ask the same
+// question, and a private copy of the join in each is how one mistake
+// becomes two symptoms — one loud (every asset reported missing, at its
+// real and present path) and one silent (no outputHash recorded, leaving
+// most snapshots presence-checked only).
 export function resolveOutputPath(destination, outputFolder = runtime.options?.outputFolder) {
     if (!destination) return undefined
     const joined = path.join(outputFolder ?? '', destination)

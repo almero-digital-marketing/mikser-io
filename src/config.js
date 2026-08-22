@@ -56,11 +56,9 @@ onLoad(async () => {
         }
     }
 
-    // v8 used to walk `runtime.config.plugins` looking for matching
-    // `config/<plugin>.config.js` files to merge into `runtime.config`,
-    // because plugin entries were strings (names). v9 entries are factory
-    // call results (closures or descriptors), and plugin options arrive
-    // as factory args — see ADR-0010 — so per-plugin auxiliary config
-    // files have nothing to bind to. The loader was removed when the
-    // plugins list stopped carrying names.
+    // Nothing else is loaded. There is deliberately no `config/<plugin>
+    // .config.js` channel: plugin options arrive as factory arguments
+    // (ADR-0010), and an entry in `plugins` is a factory call result — a
+    // closure or a descriptor — carrying no name to bind an auxiliary file
+    // to. A plugin wanting file-based config reads it itself.
 })

@@ -15,8 +15,8 @@ import path from 'node:path'
 //   assets()        runs presets and produces derivatives   (the work)
 //   renderPreset()  renders a preset-authored layout        (this file)
 //
-// The helpers were renamed for their role in 10.0.0 for exactly this reason;
-// renderPreset keeps its name because it really is a renderer.
+// The URL helpers carry `Helper` in their names for exactly this reason;
+// renderPreset keeps its bare name because it really is a renderer.
 export async function load({ entity, runtime }) {
     if (!entity?.preset?.uri) return
     const preset = await import(`${entity.preset.uri}?stamp=${Date.now()}`)
