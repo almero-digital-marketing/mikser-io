@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="123.751 38.751 148.498 148.498" role="img" aria-label="mikser">
+  <title>mikser</title>
+  <!-- The mark with its blend flattened, so it survives a transparent
+       backdrop. mikser-mark.svg draws three circles under
+       mix-blend-mode: multiply, which needs something to multiply against:
+       rasterised onto transparency the orange circle knocks a hole through
+       itself instead of compositing. The colours below are sampled from the
+       canonical render, so this is the same image with nothing to blend. -->
+  <circle cx="198"     cy="92"  r="46" fill="#0A0907"/>
+  <circle cx="222.249" cy="134" r="46" fill="#2F2E2C"/>
+  <circle cx="173.751" cy="134" r="46" fill="#FF3F00"/>
+</svg>
