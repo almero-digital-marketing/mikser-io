@@ -1700,11 +1700,16 @@ describe('api plugin: diagnostics endpoints', () => {
     })
 
     it('/verify reports the manifest verdict', async () => {
+        // The verdict comes from the manifest now, so the route cannot
+        // disagree with the CLI about what counts as a failure — the stub
+        // returns what a real verify returns.
         const manifest = {
             size: () => 3,
             verify: async () => ({
+                verdict: 'FAIL',
                 missing: [{ id: '/a.md', destination: '/a.html' }],
                 mismatched: [], unverifiable: [], orphaned: [{ path: 'stray.html' }],
+                collisions: [],
             }),
         }
         await withServer({ endpoints: { ops: { token: 't', operations: ['diagnostics'] } }, manifest },

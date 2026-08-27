@@ -982,18 +982,14 @@ export function api(options = {}) {
                     if (!runtime.manifest?.verify) {
                         return res.status(503).json({ error: 'No manifest available — nothing to verify against' })
                     }
-                    const diff = await runtime.manifest.verify()
-                    const errors = diff.missing.length + diff.mismatched.length
-                    const warnings = diff.orphaned.length + diff.unverifiable.length
                     // 200 either way — the check ran and this is its answer. A
                     // CI gate reads `verdict`, which mirrors the CLI's exit
                     // vocabulary, rather than inferring from a status code that
-                    // would conflate "drift found" with "request failed".
-                    return res.json({
-                        verdict: errors > 0 ? 'FAIL' : warnings > 0 ? 'WARN' : 'OK',
-                        snapshots: runtime.manifest.size?.() ?? null,
-                        ...diff,
-                    })
+                    // would conflate "drift found" with "request failed". The
+                    // verdict comes from the manifest so this route cannot
+                    // disagree with the CLI about what counts as a failure.
+                    const diff = await runtime.manifest.verify()
+                    return res.json({ snapshots: runtime.manifest.size?.() ?? null, ...diff })
                 } catch (err) {
                     logger.error('Api verify error: %s', err.message)
                     return res.status(500).json({ error: err.message })

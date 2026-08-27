@@ -123,8 +123,8 @@ describe('createIndex', () => {
 
         const inboundAuthor = idx.inboundFor('/authors/dick')
         const inboundHero   = idx.inboundFor('/images/launch-hero')
-        assert.deepEqual(inboundAuthor, [{ id: '/blog/launch.md', field: '$author' }])
-        assert.deepEqual(inboundHero,   [{ id: '/blog/launch.md', field: '$hero' }])
+        assert.deepEqual(inboundAuthor, [{ id: '/blog/launch.md', field: '$author', kind: 'ref' }])
+        assert.deepEqual(inboundHero,   [{ id: '/blog/launch.md', field: '$hero', kind: 'ref' }])
 
         const outbound = idx.outboundFor('/blog/launch.md')
         assert.equal(outbound.length, 2)
@@ -139,8 +139,8 @@ describe('createIndex', () => {
             meta: { $related: ['/blog/a', '/blog/b'] },
         })
 
-        assert.deepEqual(idx.inboundFor('/blog/a'), [{ id: '/blog/post.md', field: '$related.0' }])
-        assert.deepEqual(idx.inboundFor('/blog/b'), [{ id: '/blog/post.md', field: '$related.1' }])
+        assert.deepEqual(idx.inboundFor('/blog/a'), [{ id: '/blog/post.md', field: '$related.0', kind: 'ref' }])
+        assert.deepEqual(idx.inboundFor('/blog/b'), [{ id: '/blog/post.md', field: '$related.1', kind: 'ref' }])
 
         const outbound = idx.outboundFor('/blog/post.md')
         assert.equal(outbound.length, 2)
@@ -161,11 +161,11 @@ describe('createIndex', () => {
         })
 
         assert.deepEqual(idx.inboundFor('/images/og'),
-            [{ id: '/landing.md', field: 'seo.$ogImage' }])
+            [{ id: '/landing.md', field: 'seo.$ogImage', kind: 'ref' }])
         assert.deepEqual(idx.inboundFor('/images/hero'),
-            [{ id: '/landing.md', field: 'sections.0.$image' }])
+            [{ id: '/landing.md', field: 'sections.0.$image', kind: 'ref' }])
         assert.deepEqual(idx.inboundFor('/images/feat'),
-            [{ id: '/landing.md', field: 'sections.1.$image' }])
+            [{ id: '/landing.md', field: 'sections.1.$image', kind: 'ref' }])
     })
 
     it('aggregates multiple sources pointing at the same ref', () => {

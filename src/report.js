@@ -37,6 +37,46 @@ function reportWanted() {
     return !!(runtime.options?.json || runtime.options?.reportRequested)
 }
 
+// How many finished cycles to keep. Small on purpose: this is "what did my
+// last few edits do", not an audit log, and each entry holds one record per
+// entity rendered in that cycle.
+const HISTORY_LIMIT = 10
+
+function history() {
+    runtime.state ??= {}
+    runtime.state.reportHistory ??= []
+    return runtime.state.reportHistory
+}
+
+// The id the NEXT cycle will carry.
+//
+// A caller that writes a file needs to name the cycle its write will be
+// picked up by BEFORE that cycle exists — otherwise "did my edit land" is
+// unanswerable except by watching the clock. Writes go through the
+// watcher's debounce, so the cycle after the current one is the answer.
+export function nextCycleId() {
+    return (runtime.state?.cycle?.id ?? 0) + 1
+}
+
+export function currentCycle() {
+    return runtime.state?.cycle ?? null
+}
+
+// Finished cycles, newest first. `n` of them.
+export function cycleHistory(n = 1) {
+    return history().slice(-Math.max(1, n)).reverse()
+}
+
+// Resolves when a cycle with at least this id has finished. Used by a
+// caller that wants its write and the resulting report in one round trip
+// instead of polling.
+export function whenCycleCompletes(id) {
+    const done = history().find(c => c.id >= id)
+    if (done) return Promise.resolve(done)
+    runtime.state.cycleWaiters ??= []
+    return new Promise(resolve => runtime.state.cycleWaiters.push({ id, resolve }))
+}
+
 // Cleared at the start of every cycle, so the report always describes the
 // LAST one rather than everything since the process started.
 //
@@ -49,14 +89,42 @@ function reportWanted() {
 // across cycles by design — it is the retry marker's in-memory twin, and
 // the exit code depends on this cycle's count, which resetRenderErrors
 // handles at the same point.
+//
+// Reset and IDENTITY are the same event — a report that describes "the last
+// cycle" is only meaningful if something names which cycle that was, and a
+// caller waiting on its own write needs to compare against something.
 export function resetReport() {
     if (!runtime.state) return
+    const previous = runtime.state.cycle
+    if (previous && !previous.finishedAt) finishCycle()
+    runtime.state.cycle = { id: nextCycleId(), startedAt: Date.now(), finishedAt: null }
     runtime.state.report = { rendered: [], skipped: [], unchanged: [], errors: [], warnings: [], gated: 0 }
     runtime.state.renderErrors = []
 }
 
+// End of a cycle: stamp it, file it, and wake anyone waiting on it.
+export function finishCycle() {
+    if (!runtime.state?.cycle || runtime.state.cycle.finishedAt) return
+    runtime.state.cycle.finishedAt = Date.now()
+    const record = { ...runtime.state.cycle, ...buildReport() }
+    const kept = history()
+    kept.push(record)
+    while (kept.length > HISTORY_LIMIT) kept.shift()
+
+    const waiters = runtime.state.cycleWaiters ?? []
+    runtime.state.cycleWaiters = waiters.filter(w => {
+        if (record.id < w.id) return true
+        w.resolve(record)
+        return false
+    })
+}
+
 function store() {
+    // The first cycle never passes through resetReport — that fires on the
+    // watcher's trigger, and a cold build has no earlier cycle to reset from.
+    // Without this the build everyone looks at first reports cycleId: null.
     runtime.state ??= {}
+    runtime.state.cycle ??= { id: 1, startedAt: Date.now(), finishedAt: null }
     runtime.state.report ??= { rendered: [], skipped: [], unchanged: [], errors: [], warnings: [], gated: 0 }
     return runtime.state.report
 }
@@ -157,7 +225,13 @@ export function renderErrorCount() {
 
 export function buildReport() {
     const report = store()
+    const cycle = runtime.state?.cycle
     return {
+        // Which cycle this describes. Without it, two reports read the same
+        // and "is this my edit's cycle or the one before it" has no answer.
+        cycleId: cycle?.id ?? null,
+        startedAt: cycle?.startedAt ?? null,
+        finishedAt: cycle?.finishedAt ?? null,
         rendered: report.rendered,
         skipped: report.skipped,
         unchanged: report.unchanged,

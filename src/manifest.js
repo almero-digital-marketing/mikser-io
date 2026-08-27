@@ -284,6 +284,21 @@ async function hashOutputFile(destination) {
 export function createManifest(db) {
     if (!db) throw new Error('createManifest: db is required')
 
+    const stmtCollisions = db.prepare(`
+        SELECT destination, count(*) AS n, group_concat(id) AS ids
+        FROM mikser_snapshots
+        GROUP BY destination HAVING n > 1
+    `)
+    const stmtClaimants = db.prepare(`
+        SELECT id, outputHash FROM mikser_snapshots WHERE destination = ?
+    `)
+    const stmtSelectByDestination = db.prepare(`
+        SELECT id FROM mikser_snapshots WHERE destination = ?
+    `)
+    const stmtDeleteByDestination = db.prepare(`
+        DELETE FROM mikser_snapshots WHERE destination = ?
+    `)
+
     const stmtRecordFailure = db.prepare(`
         INSERT INTO mikser_failures
             (id, destination, error, context, firstFailedAt, lastFailedAt, attempts)
@@ -610,6 +625,37 @@ export function createManifest(db) {
             stmtClearFailure.run(entity.id, entity.destination)
         },
 
+        // Destinations claimed by more than one entity.
+        //
+        // Two entities rendering to one path is always a bug — one silently
+        // overwrites the other — and it is invisible to every other check.
+        // Not to `verify`'s hash comparison in particular: each render
+        // records the hash of the file AFTER it wrote, so with concurrent
+        // renders the loser reads the winner's bytes and both snapshots
+        // agree with disk. Measured on the case this exists for: an empty
+        // stub and a real homepage both claiming /bg/index.html recorded the
+        // SAME outputHash, and verify reported OK.
+        //
+        // So it is detected structurally rather than by content: the
+        // manifest already knows both claimants because a snapshot is keyed
+        // (id, destination).
+        collisions() {
+            return stmtCollisions.all().map(row => ({
+                destination: row.destination,
+                entities: String(row.ids).split(',').filter(Boolean).sort(),
+            }))
+        },
+
+        // Which entity's recorded bytes are the ones on disk right now.
+        // Answers "who wrote this?" for a destination several entities
+        // claim, which is the question a mismatch leaves open.
+        writerOf(destination, outputHash) {
+            if (!destination || !outputHash) return null
+            const rows = stmtClaimants.all(destination)
+            const match = rows.find(r => r.outputHash === outputHash)
+            return match?.id ?? null
+        },
+
         // Every recorded failure for an entity, across destinations.
         failuresFor(id) {
             return id ? stmtFailuresFor.all(id) : []
@@ -821,8 +867,18 @@ export function createManifest(db) {
                 }
                 try {
                     const buf = await readFile(filePath)
-                    if (sha1(buf) !== snap.outputHash) {
-                        mismatched.push({ id: snap.id, destination: snap.destination })
+                    const actual = sha1(buf)
+                    if (actual !== snap.outputHash) {
+                        // Name who DID write the bytes that are there, when a
+                        // sibling snapshot for the same destination matches
+                        // them. "Mismatched" alone leaves the reader to work
+                        // out whether the file was edited by hand or lost a
+                        // race with another entity claiming the same path.
+                        mismatched.push({
+                            id: snap.id,
+                            destination: snap.destination,
+                            writtenBy: this.writerOf(snap.destination, actual),
+                        })
                     }
                 } catch {
                     missing.push({ id: snap.id, destination: snap.destination })
@@ -839,7 +895,29 @@ export function createManifest(db) {
                 if (claimed.has(rel)) continue
                 orphaned.push({ path: rel })
             }
-            return { missing, mismatched, unverifiable, orphaned }
+            // Reported alongside, not as a mismatch: two entities claiming one
+            // destination usually produces NO mismatch at all, because each
+            // render hashes the file after writing it and the loser reads the
+            // winner's bytes. Without this the whole situation is silent.
+            const collisions = this.collisions()
+            // One verdict, computed here, because three callers report it —
+            // the CLI's exit code, the api route and the MCP tool — and three
+            // copies of the rule would drift.
+            //
+            // A collision is a WARNING, not a failure: nothing is missing or
+            // corrupt, the bytes on disk are some entity's real render. What
+            // is wrong is that another entity's output was discarded, which
+            // the reader has to be told about but which does not mean the
+            // deploy is broken in the way a missing or altered file does.
+            // It is also pre-existing on any site that already has one, so
+            // failing the gate outright would break pipelines on upgrade for
+            // a condition that was always there.
+            const errors = missing.length + mismatched.length
+            const warnings = orphaned.length + unverifiable.length + collisions.length
+            return {
+                verdict: errors > 0 ? 'FAIL' : warnings > 0 ? 'WARN' : 'OK',
+                missing, mismatched, unverifiable, orphaned, collisions,
+            }
         },
 
         size() {
@@ -852,6 +930,8 @@ export function createManifest(db) {
         _stmtSelectByIdOrParent: stmtSelectByIdOrParent,
         _stmtDeleteByIdOrParent: stmtDeleteByIdOrParent,
         _stmtSelectByParent:     stmtSelectByParent,
+        _stmtSelectByDestination: stmtSelectByDestination,
+        _stmtDeleteByDestination: stmtDeleteByDestination,
         _stmtDeleteByPK:         stmtDeleteByPK,
         _stmtUpsert:             stmtUpsert,
     }
@@ -961,8 +1041,54 @@ onFinalize(async () => {
         }
     }
 
+    // Everything whose snapshot this pass removes: deleted entities, their
+    // paginated children, and children dropped by a pagination shrink.
+    const goingAway = new Set(deleted)
+    for (const { id } of childrenToDelete) goingAway.add(id)
+    for (const parentId of deleted) {
+        for (const row of m._stmtSelectByParent.all(parentId)) goingAway.add(row.id)
+    }
+
     // 2d. Unlink stale output files (async, parallel-friendly).
+    //
+    // Never unlink a destination another entity still claims. Two entities
+    // can render to one path — an empty `index.md` beside the real
+    // `index.yml` — and deleting one of them was taking the shared output
+    // with it: the file vanished while the survivor's snapshot still said it
+    // was there, the survivor's own source had not changed so nothing
+    // re-rendered it, and --verify reported it missing.
+    //
+    // That made "resolve the collision by deleting the stub" delete the
+    // homepage, which is the opposite of what the operator asked for and the
+    // exact operation the new collision reporting invites.
     for (const { destination, reason } of filesToUnlink) {
+        // "Still claimed" means by something that SURVIVES this pass. The
+        // ids going away here are not just the deleted entities: pagination
+        // children staged above are removed too, and counting a child's own
+        // snapshot as a claimant would keep every shrunk page on disk
+        // forever.
+        const stillClaimed = m._stmtSelectByDestination.all(destination)
+            .filter(row => row.id !== undefined && !goingAway.has(row.id))
+        if (stillClaimed.length) {
+            // Keep the file — deleting a live page's output is worse than any
+            // staleness — but do NOT let the state go quiet. The bytes on
+            // disk were written by the entity that just went away, and the
+            // survivor's snapshot recorded that same hash (each render hashes
+            // the file after writing, so the loser recorded the winner's
+            // bytes). Left alone, verify would compare the survivor's
+            // snapshot against the deleted entity's output and report OK.
+            //
+            // Dropping the survivor's snapshot for this destination makes it
+            // an orphan — a file no snapshot claims, which is exactly what it
+            // is — so verify warns instead of blessing it, and the next time
+            // the survivor renders it is `never-rendered` rather than skipped.
+            m._stmtDeleteByDestination.run(destination)
+            logger.warn(
+                '%s: %s is also written by %s — keeping the file, but its bytes came from the '
+                + 'deleted entity. Re-render or --force to refresh it.',
+                reason, destination, stillClaimed.map(r => r.id).join(', '))
+            continue
+        }
         const filePath = path.join(runtime.options.outputFolder, destination)
         try {
             await unlink(filePath)

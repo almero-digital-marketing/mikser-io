@@ -85,6 +85,17 @@ function queryCount(counts, filter) {
     return { matched: hit.count, ...(hit.count === 1 && hit.sample ? { sample: hit.sample } : {}) }
 }
 
+// A destination two entities claim outranks anything the hashes say. The
+// hash reasoning would be true AND useless: "would be SKIPPED, input hash
+// unchanged" is correct about this entity and silent about the fact that
+// its output is being overwritten by someone else's.
+function contestedVerdict(competing) {
+    if (!competing.length) return null
+    const parts = competing.map(c => `${c.destination} is also claimed by ${c.entities.join(', ')}`)
+    return `CONTESTED — ${parts.join('; ')}. Whichever renders last wins and the other output is discarded; `
+        + 'the input-hash reasoning below describes this entity only.'
+}
+
 // The verdict line names what moved when it can. That line is the one
 // people read, so "the input hash differs" there is the answer stopping one
 // step short of useful.
@@ -252,7 +263,8 @@ export async function explain(reference) {
                     }),
         })),
         // What a plain build would do next, stated plainly.
-        verdict: source?.error === 'file is gone'
+        verdict: contestedVerdict(competingFor(snapshots, entity.id))
+            ?? (source?.error === 'file is gone'
             ? 'source file is gone — a build would DELETE this entity and unlink its output'
             : source?.differs
                 ? 'source differs from the catalog — a build would re-import it first, then re-render. '
@@ -264,9 +276,30 @@ export async function explain(reference) {
                   + `(${failedSnapshots[0].error})`
             : snapshots.some(s => s.inputHash !== currentHash)
                 ? renderVerdict(snapshots, currentHash, currentParts)
-                : 'would be SKIPPED — input hash unchanged. A dependency in refClosure changing is the only other thing that would re-render it.',
+                : 'would be SKIPPED — input hash unchanged. A dependency in refClosure changing is the only other thing that would re-render it.'),
         lookupKeys: lookupKeys(entity),
+        // Other entities rendering to the same path as this one.
+        //
+        // The failure this makes visible: an empty stub and a real page both
+        // claiming /bg/index.html. Whichever renders last wins, the other's
+        // output is discarded, and nothing else says so — not the build
+        // (green), not verify (each render hashes the file after writing, so
+        // the loser records the winner's bytes and both snapshots agree with
+        // disk), and not this report, which showed the destination and a
+        // clean "would be SKIPPED".
+        competingDestinations: competingFor(snapshots, entity.id),
     }
+}
+
+// Entities other than `id` whose snapshots claim the same destinations.
+function competingFor(snapshots, id) {
+    const mine = new Set(snapshots.map(s => s.destination).filter(Boolean))
+    if (!mine.size) return []
+    const all = runtime.manifest?.collisions?.() ?? []
+    return all
+        .filter(c => mine.has(c.destination))
+        .map(c => ({ destination: c.destination, entities: c.entities.filter(e => e !== id) }))
+        .filter(c => c.entities.length)
 }
 
 // Human-readable rendering. Deliberately aligned columns rather than prose:

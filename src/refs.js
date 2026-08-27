@@ -85,6 +85,16 @@ export const REFS_SCHEMA = `
 `
 registerSchema('mikser_refs', REFS_SCHEMA)
 
+// json_tree's `fullkey` → the field path the ref index uses.
+// `$.meta.items[0].href` → `items[0].href`, and a quoted segment
+// (`$.meta."$author"`, which is how json_tree spells a key starting with
+// `$`) loses its quotes so both spellings compare equal.
+function normalizeMetaPath(fullkey) {
+    return String(fullkey)
+        .replace(/^\$\.meta\.?/, '')
+        .replace(/"([^"]*)"/g, '$1')
+}
+
 // Build the index handle over the provided sqlite database. Prepares
 // the SQL statements once at construction; subsequent reads/writes
 // reuse them.
@@ -100,6 +110,16 @@ export function createIndex(db) {
         SELECT source_id, field FROM mikser_refs
         WHERE target_ref = ? AND kind = 'ref'
     `)
+    // Any string value anywhere under an entity's meta that equals the
+    // target — including inside arrays, which is where nav and footer link
+    // lists live. json_tree walks the stored JSON, so no schema and no
+    // write-time indexing is involved.
+    const stmtInboundMetaValue = db.prepare(`
+        SELECT DISTINCT e.id AS id, j.fullkey AS field
+        FROM mikser_entities e, json_tree(e.data, '$.meta') j
+        WHERE j.type = 'text' AND j.value = ?
+    `)
+
     const stmtOutboundStatic = db.prepare(`
         SELECT field, target_ref FROM mikser_refs
         WHERE source_id = ? AND kind = 'ref'
@@ -196,9 +216,44 @@ export function createIndex(db) {
 
     // -- Read API ------------------------------------------------------
 
+    // Everything that points at `ref`, by BOTH mechanisms.
+    //
+    // The index holds `$`-keyed refs only, because those are the ones the
+    // engine resolves and invalidates on. But a site links to a page far
+    // more often with a plain string — `items: [{ label, href: '/about' }]`
+    // in a nav or footer document — and asking "what breaks if I delete
+    // this" got `count: 0` while two live pages linked to it. A silent miss
+    // is worse than no answer for that question.
+    //
+    // Plain values are found at READ time with json_tree over each entity's
+    // meta rather than indexed at write time: indexing every string in every
+    // meta would put the whole catalog in the edge table to serve a
+    // diagnostic, and the engine does not invalidate on plain strings
+    // anyway — which is itself worth knowing, and is why the two kinds stay
+    // labelled rather than merged.
     function inboundFor(ref) {
-        return stmtInboundStatic.all(ref)
-            .map(r => ({ id: r.source_id, field: r.field }))
+        const refs = stmtInboundStatic.all(ref)
+            .map(r => ({ id: r.source_id, field: r.field, kind: 'ref' }))
+        const seen = new Set(refs.map(r => `${r.id}|${r.field}`))
+        const hrefs = []
+        for (const row of stmtInboundMetaValue.all(ref)) {
+            const field = normalizeMetaPath(row.field)
+            // A `$`-keyed path is the ref index's territory by definition, and
+            // json_tree finds those values too — reporting them again as
+            // `href` would double-count every ref and mislabel it. Note that
+            // json_tree QUOTES a key beginning with `$` (`$.meta."$author"`),
+            // so this has to run after unquoting or the two spellings never
+            // meet and the dedup below misses.
+            if (field.split('.').some(seg => seg.startsWith('$'))) continue
+            // `meta.href` / `meta.url` at the top level are the entity's own
+            // ADDRESS, not a link to something else. Without this, asking
+            // what points at /about lists /documents/bg/about.md — the page
+            // itself — among the things that would break if it were deleted.
+            if (field === 'href' || field === 'url') continue
+            if (seen.has(`${row.id}|${field}`)) continue
+            hrefs.push({ id: row.id, field, kind: 'href' })
+        }
+        return [...refs, ...hrefs]
     }
 
     function outboundFor(sourceId) {
@@ -628,9 +683,17 @@ export function createRefs(db, prebuiltIndex = null) {
             }
             if (from === to) return { from, to, updated: [], failures: [] }
 
-            const entries = index.inboundFor(from)
+            // `$`-keyed refs only, deliberately. inboundFor also reports
+            // plain string matches now — a nav item's `href` — but writeEntity
+            // patches `$`-keyed values, and rewriting arbitrary meta strings
+            // through it is a file-mutating change nobody asked for. A plain
+            // href pointing at the old name is REPORTED as unrewritten below
+            // rather than silently rewritten or silently skipped.
+            const all = index.inboundFor(from)
+            const entries = all.filter(e => e.kind !== 'href')
+            const unrewritten = all.filter(e => e.kind === 'href')
             if (entries.length === 0) {
-                return { from, to, updated: [], failures: [] }
+                return { from, to, updated: [], failures: [], unrewritten }
             }
 
             const byEntity = new Map()
@@ -658,7 +721,7 @@ export function createRefs(db, prebuiltIndex = null) {
                 }
             }
 
-            return { from, to, updated, failures }
+            return { from, to, updated, failures, unrewritten }
         },
     }
 }

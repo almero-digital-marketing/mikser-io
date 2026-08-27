@@ -10,7 +10,7 @@ import { useJournal, updateEntry } from './journal.js'
 import { globby } from 'globby'
 import { OPERATION, TASKS } from './constants.js'
 import { changeExtension, formatErrorContext, projectMeta, lookupKeys } from './utils.js'
-import { reportRendered, reportSkipped, reportError, renderErrorCount, emitReport } from './report.js'
+import { reportRendered, reportSkipped, reportError, reportWarning, renderErrorCount, emitReport, finishCycle } from './report.js'
 import render from './render.js'
 import postprocess, { loadPlugin as loadPostPlugin } from './postprocess.js'
 import map from 'p-map'
@@ -253,35 +253,40 @@ export async function setup(options) {
                 logger.error('Verify: no manifest available — nothing to check against')
                 process.exit(2)
             }
-            const diff = await runtime.manifest.verify()
-            const { missing, mismatched, unverifiable, orphaned } = diff
-
+            const { verdict, missing, mismatched, unverifiable, orphaned, collisions } =
+                await runtime.manifest.verify()
             const total = runtime.manifest.size()
-            const errors = missing.length + mismatched.length
-            const warnings = orphaned.length + unverifiable.length
 
-            for (const e of missing)     logger.error('Missing:    %s (entity %s)', e.destination, e.id)
-            for (const e of mismatched)  logger.error('Mismatched: %s (entity %s)', e.destination, e.id)
+            for (const e of missing)      logger.error('Missing:    %s (entity %s)', e.destination, e.id)
+            for (const e of mismatched)   logger.error('Mismatched: %s (entity %s)%s', e.destination, e.id,
+                e.writtenBy ? ` — the bytes on disk are ${e.writtenBy}'s` : '')
             for (const e of unverifiable) logger.warn('No hash:    %s (entity %s)', e.destination, e.id)
-            for (const e of orphaned)    logger.warn('Orphan:     %s', e.path)
+            for (const e of orphaned)     logger.warn('Orphan:     %s', e.path)
+            // Named per destination: "two entities write here" is only
+            // actionable if you know which two.
+            for (const c of collisions)   logger.warn('Collision:  %s ← %s', c.destination, c.entities.join(', '))
 
             // Level picked from the verdict, because the level IS the marker
             // in pino-pretty's messageFormat: notice renders 🟢, warn 🟡,
             // error 🔴. A fixed `notice` prints a green tick next to the word
             // FAIL, which reads as success at a glance even though the exit
             // code is right.
-            const verdict = errors > 0 ? 'FAIL' : (warnings > 0 ? 'WARN' : 'OK')
-            const report = errors > 0 ? logger.error : (warnings > 0 ? logger.warn : logger.notice)
+            const report = verdict === 'FAIL' ? logger.error : verdict === 'WARN' ? logger.warn : logger.notice
             report.call(logger,
-                'Verify %s: %d snapshots, %d missing, %d mismatched, %d unverifiable, %d orphaned',
-                verdict, total, missing.length, mismatched.length, unverifiable.length, orphaned.length)
-            process.exit(errors > 0 ? 2 : (warnings > 0 ? 1 : 0))
+                'Verify %s: %d snapshots, %d missing, %d mismatched, %d unverifiable, %d orphaned, %d collisions',
+                verdict, total, missing.length, mismatched.length, unverifiable.length, orphaned.length, collisions.length)
+            process.exit(verdict === 'FAIL' ? 2 : verdict === 'WARN' ? 1 : 0)
         }
     })
 
     onRender(async (signal) => {
         const logger = useLogger()
         const renderJobs = new Set()
+        // destination → the entity ids that actually rendered to it this
+        // cycle. Recorded past the skip gate rather than alongside renderJobs
+        // so it holds renders that ran, which is what makes "one overwrote
+        // the other" a true statement rather than a guess about two claims.
+        const renderedTo = new Map()
 
         // Collect this cycle's mutated entity ids/hrefs/entities so the
         // manifest skip check can re-render anything whose dependencies
@@ -373,6 +378,10 @@ export async function setup(options) {
                     reportSkipped(entity, decision.reason)
                     logger.debug('Manifest skip: %s → %s', entity.name || entity.id, entity.destination)
                     return
+                }
+                if (entity.destination) {
+                    if (!renderedTo.has(entity.destination)) renderedTo.set(entity.destination, new Set())
+                    renderedTo.get(entity.destination).add(entity.id)
                 }
                 // Reported on the way OUT, not here: `rendered` means the
                 // output moved, and a render that throws writes nothing. The
@@ -575,6 +584,27 @@ export async function setup(options) {
         renderJobs.size && logger.info('Rendered: %d', renderJobs.size - skipped - failed)
         skipped && logger.info('Manifest skipped: %d', skipped)
         failed && logger.error('Render errors: %d', failed)
+
+        // Two entities writing one destination in the same cycle: one
+        // silently overwrote the other, and every other signal reads clean.
+        // Reported per cycle rather than only by --verify because this is
+        // the moment it happened, and because a build that discards half its
+        // output must not report warnings: 0.
+        //
+        // Derived from the destinations THIS cycle rendered, so an
+        // established collision the operator already knows about does not
+        // re-warn on every unrelated build; --verify is where the standing
+        // state lives.
+        for (const [destination, ids] of renderedTo) {
+            if (ids.size < 2) continue
+            const entities = [...ids].sort()
+            reportWarning('destination-collision', { destination, entities })
+            logger.warn(
+                'Destination collision: %s written by %d entities in this cycle (%s). '
+                + 'One overwrote the other — whichever rendered last wins.',
+                destination, entities.length, entities.join(', '),
+            )
+        }
     })
 
     onBeforePostprocess(async (signal) => {
@@ -801,6 +831,11 @@ export async function setup(options) {
                 }
             }
         }
+        // Close the cycle: stamp it and file it in the history, so a caller
+        // that asked "tell me about cycle N" gets an answer after N ends
+        // rather than only while it is the current one.
+        finishCycle()
+
         // A cycle with failed renders is not a completed build, and the word
         // people read is this one.
         const failed = renderErrorCount()

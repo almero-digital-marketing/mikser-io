@@ -19,6 +19,7 @@ engine source, the entry point is missing and belongs on this page.
 | What depends on this entity? | [`runtime.refs`](#runtimerefs) |
 | Which layout claimed this document, and why that one? | [`layouts.inspect()`](#layoutsinspect) |
 | Why does this page's output look stale? | [`runtime.manifest`](#runtimemanifest) |
+| Two files seem to fight over one output | [`--explain`](#--explain-entity), [`--verify`](#--verify) |
 | Did my schema validate anything at all? | [`schemas.names()`](#schemasnames--schemaslookup) |
 
 ## Command line
@@ -55,6 +56,20 @@ rendered    2026-08-22 21:07:52   → /page-a.html   [STALE: input hash moved si
 
 A snapshot written before per-input recording says so rather than
 guessing.
+
+When another entity renders to the same destination, that leads the
+verdict and the hash reasoning follows it:
+
+```
+CONTESTED — /bg/index.html is also claimed by /documents/bg/index.md.
+Whichever renders last wins and the other output is discarded; the
+input-hash reasoning below describes this entity only.
+```
+
+The full list is under `competingDestinations` in `--json` form. The
+hash reasoning on its own is true and useless here: "would be SKIPPED,
+input hash unchanged" is correct about the entity you asked about and
+silent about its output being overwritten by someone else's.
 
 A destination whose **last render attempt threw** reads as such, rather
 than as current:
@@ -127,6 +142,11 @@ Five buckets, and the distinction between them is the point:
 | `unchanged` | the render ran and produced bytes identical to what was already on disk |
 | `errors` | the render ran and **threw** — with `id`, `destination`, `error`, `layout` |
 | `gated` | a count — the source was unchanged, so no render was ever scheduled |
+
+Each report also carries `cycleId`, `startedAt` and `finishedAt`. Under
+`--watch` two consecutive reports are otherwise indistinguishable, so
+"is this my edit's cycle or the one before it" has no answer without the
+id. A cold build is cycle 1.
 
 A failed render appears in `errors` and **not** in `rendered`: that bucket
 means the output moved, and a throw writes nothing. The previous good bytes
@@ -227,6 +247,14 @@ instead of building. Four categories, and the split matters:
 | `Mismatched` | the file's bytes differ from the recorded `outputHash` | error |
 | `No hash` | a snapshot with no recorded hash — nothing to compare | warning |
 | `Orphan` | a file on disk that no snapshot claims | warning |
+| `Collision` | two or more entities record snapshots for the same destination | warning |
+
+`Collision` is the one that does not show up as drift. Every render
+hashes the file *after* writing it, so when two entities write the same
+path the loser records the winner's bytes and both snapshots agree with
+disk — missing, mismatched and orphaned are all empty and the output is
+still wrong. It is reported by shape rather than by comparison, which is
+why it is here and not in the three categories above.
 
 Exit codes make it usable as a CI gate directly: `2` if anything is
 missing or mismatched, `1` if only warnings, `0` when clean, and `2` when
@@ -269,7 +297,11 @@ an SDK, or an agent speaking MCP actually has.
 
 **MCP** — `mikser_explain`, `mikser_build_report`, `mikser_verify`,
 alongside the existing `mikser_refs_*`, `mikser_layouts_inspect` and the
-`mikser://logs/recent` resource.
+`mikser://logs/recent` resource. Two more answer the questions a shell
+would otherwise be needed for: `mikser_search` finds a string across
+entity meta and source files in one call, and `mikser_read_output` reads
+the bytes currently on disk for a destination — which is a different
+question from what the catalog or the manifest says should be there.
 
 **REST** — on the `api` plugin, gated on their own `diagnostics`
 operation:
@@ -398,7 +430,9 @@ What was rendered and whether it needs redoing.
 | `skipDecision(entity, …)` | `{ skip, reason }` — the same reason `--json` reports |
 | `recordedHashes()` | the dep-hashes dependents last saw |
 | `queryAffected(mutated)` | which query-dependent snapshots this mutation hits |
-| `verify({outputFolder})` | `{ missing, mismatched, unverifiable, orphaned }` — what `--verify` reports; pure, no mutations |
+| `verify({outputFolder})` | `{ verdict, missing, mismatched, unverifiable, orphaned, collisions }` — what `--verify` reports; pure, no mutations |
+| `collisions()` | destinations claimed by more than one entity, with the ids claiming each |
+| `writerOf(destination, outputHash)` | which of several claimants wrote the bytes now on disk, when the hashes can tell them apart |
 | `size()` | snapshot count |
 
 `snapshotsFor(id)` exists because an entity can render to several
