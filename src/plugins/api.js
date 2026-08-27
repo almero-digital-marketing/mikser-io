@@ -1062,10 +1062,20 @@ export function api(options = {}) {
             // (allowRemote), so we keep the REMOTE OPEN warning in the
             // log. streaming:true — the `subscribe` op holds an open SSE
             // stream, so a facade must not buffer this route.
-            const reachability = ep.token ? 'token' : (ep.allowRemote ? 'public' : 'loopback')
-            const authLabel = ep.token
-                ? 'token'
-                : (ep.allowRemote ? 'public, REMOTE OPEN' : 'loopback-only')
+            //
+            // reachabilityOf rather than a local ternary: `auth` and `token`
+            // both mean gated, and one helper decides for every plugin that
+            // registers a route (ADR-0012) — webdav and mcp call it too. The
+            // value is not just the log bracket: it lands on runtime.routes,
+            // where 'loopback' tells a facade not to proxy, so reading it off
+            // `token` alone hides an auth-gated endpoint from a generated
+            // vhost while the boot log agrees that it is unreachable.
+            const reachability = reachabilityOf(ep)
+            const authLabel = ep.auth
+                ? (verifier?.name ?? 'auth')
+                : ep.token
+                    ? 'token'
+                    : (ep.allowRemote ? 'public, REMOTE OPEN' : 'loopback-only')
             registerRoute({
                 path:         `${base}/${name}`,
                 plugin:       'api',

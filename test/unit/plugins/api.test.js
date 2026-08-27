@@ -1761,3 +1761,77 @@ describe('api plugin: diagnostics endpoints', () => {
             })
     })
 })
+
+// Reachability is not decoration: registerRoute puts it on runtime.routes,
+// where 'loopback' means "a facade must not proxy this route".
+//
+// The value must come from reachabilityOf(ep), which treats `auth` and
+// `token` alike. Deriving it from `token` alone registers an auth-gated
+// endpoint as 'loopback' and logs it [loopback-only] while the verifier is
+// enforced perfectly — so a generated vhost drops the authenticated API and
+// the boot log agrees that it is unreachable. Two sources of truth giving
+// the same wrong answer is what makes that one expensive to disbelieve.
+//
+// reachabilityOf() is unit-tested in auth.test.js and called by webdav and
+// mcp; these assert that api calls it too, which is the half that drifts.
+describe('api plugin: registered reachability', () => {
+    const verifier = {
+        name: 'basic',
+        verify: async () => ({ ok: true, principal: { capabilities: ['api:list'] } }),
+    }
+
+    async function mountOne(ep) {
+        const { default: express } = await import('express')
+        const app = express()
+        const h = createHarness({
+            options: {
+                app,
+                workingFolder: '/tmp/mikser-reach',
+                outputFolder: '/tmp/mikser-reach/out',
+            },
+        })
+        realRuntime.routes = []
+        const lines = []
+        realRuntime.engine = { logger: { info: (...a) => lines.push(a.join(' ')) } }
+        api({ endpoints: { one: ep } })(h.core)
+        await h.runHook('loaded')
+        return {
+            route:  realRuntime.routes.find(r => r.path === '/api/one'),
+            logged: lines.join('\n'),
+        }
+    }
+
+    it('an auth-gated endpoint registers as token, not loopback', async () => {
+        const { route, logged } = await mountOne({ auth: verifier, operations: ['list'] })
+        assert.equal(route.reachability, 'token')
+        assert.ok(!logged.includes('loopback-only'), `logged: ${logged}`)
+    })
+
+    it('names the verifier in the bracket, as webdav and mcp do', async () => {
+        const { logged } = await mountOne({ auth: verifier, operations: ['list'] })
+        assert.ok(logged.includes('basic'), `logged: ${logged}`)
+    })
+
+    it('a static token still registers as token', async () => {
+        const { route } = await mountOne({ token: 'sekrit', operations: ['list'] })
+        assert.equal(route.reachability, 'token')
+    })
+
+    it('neither auth nor token is loopback', async () => {
+        const { route, logged } = await mountOne({ operations: ['list'] })
+        assert.equal(route.reachability, 'loopback')
+        assert.ok(logged.includes('loopback-only'), `logged: ${logged}`)
+    })
+
+    // allowRemote alongside a verifier is NOT an unauthenticated exposure —
+    // the verifier gates every request, with no loopback bypass. The old
+    // ternary reached the allowRemote branch whenever `token` was unset and
+    // shouted REMOTE OPEN about an endpoint nobody could reach unauthenticated.
+    it('auth plus allowRemote is token, and does not shout REMOTE OPEN', async () => {
+        const { route, logged } = await mountOne({
+            auth: verifier, allowRemote: true, operations: ['list'],
+        })
+        assert.equal(route.reachability, 'token')
+        assert.ok(!logged.includes('REMOTE OPEN'), `logged: ${logged}`)
+    })
+})
