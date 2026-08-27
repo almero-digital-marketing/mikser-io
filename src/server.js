@@ -20,6 +20,9 @@
 // block — same Express app, all the substrate-level concerns in one
 // place.
 
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
 import runtime from './runtime.js'
 import { useLogger } from './engine.js'
 import { onInitialized, onLoad, onLoaded } from './lifecycle.js'
@@ -173,6 +176,30 @@ export function setupServer() {
             }
 
             runtime.options.app.use(express.static(runtime.options.outputFolder))
+
+            // A favicon, so the server has a mark instead of a browser's
+            // blank default. AFTER the static mount, which is the whole
+            // design: a project that puts favicon.ico in its output folder
+            // is served its own and never reaches this line. This is the
+            // fallback for everything else.
+            //
+            // Worth having because --server is not only a preview of the
+            // site. It is the surface WebDAV, the API and MCP mount on, and
+            // those pages sit above whatever the output folder contains —
+            // on a multi-language build the output root holds no page at
+            // all, so /favicon.ico there is a 404 by construction and every
+            // project would have to solve it the same way.
+            //
+            // Flattened artwork: the mark's mix-blend-mode has nothing to
+            // multiply against on a transparent backdrop and rasterises with
+            // a hole through it, so favicon.ico is the pre-composited copy.
+            const faviconFile = path.join(
+                path.dirname(fileURLToPath(import.meta.url)), '..', 'favicon.ico')
+            runtime.options.app.get('/favicon.ico', (req, res) => {
+                res.type('image/x-icon')
+                   .set('Cache-Control', 'public, max-age=3600')
+                   .sendFile(faviconFile)
+            })
 
             await new Promise(resolve => {
                 const httpServer = runtime.options.app.listen(runtime.options.port, () => {
