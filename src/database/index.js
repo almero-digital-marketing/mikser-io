@@ -103,7 +103,26 @@ let db = null
 // duplicate detection. Same name twice = the later registration wins
 // (with a warning). Convention: `<owner>` matching the table prefix
 // (`catalog`, `manifest`, `vector`, etc.).
-export function registerSchema(name, sqlScript) {
+// Table names a schema script creates. Used to decide what a cache wipe
+// must leave alone — the registry knows schema NAMES, and the wipe works in
+// tables.
+// A registered schema is either { sql, durable } or, from an external
+// caller of createSqliteDatabase, the bare SQL string that shape replaced.
+// Both are supported: the argument is public API and a plugin or test
+// passing a Map of strings predates the durability flag.
+function schemaEntry(value) {
+    return typeof value === 'string' ? { sql: value, durable: false } : value
+}
+
+function tableNamesFrom(sqlScript) {
+    const names = []
+    const re = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`"'\[]?([A-Za-z_][\w$]*)/gi
+    let m
+    while ((m = re.exec(sqlScript))) names.push(m[1])
+    return names
+}
+
+export function registerSchema(name, sqlScript, { durable = false } = {}) {
     if (typeof name !== 'string' || !name.length) {
         throw new Error('registerSchema: name must be a non-empty string')
     }
@@ -117,7 +136,7 @@ export function registerSchema(name, sqlScript) {
             useLogger().warn('registerSchema: "%s" already registered, overwriting', name)
         } catch { /* logger may not exist yet at module-import time */ }
     }
-    schemas.set(name, sqlScript)
+    schemas.set(name, { sql: sqlScript, durable })
 
     // Lazy-apply: if the database is already open, run the script
     // against the live handle. Idempotent CREATE statements make this
@@ -295,15 +314,50 @@ export function createSqliteDatabase({
                     recorded, version,
                 )
             }
-            handle.close()
-            handle = null
+            // What must survive. A wipe exists because the cache is
+            // DERIVED — ADR-0002, the files are the source of truth, so
+            // throwing it away costs a rebuild and nothing else. That
+            // reasoning does not reach a table holding data no file can
+            // reproduce: an OAuth client registration, a refresh token, a
+            // form submission. Deleting the database file takes those with
+            // it, and the operator's first sign that it happened is being
+            // asked to authorize again.
+            //
+            // So a schema registered `durable` is kept and everything else
+            // goes. mikser_meta stays too — its stamps are rewritten a few
+            // lines down, and dropping it would only mean recreating it.
+            const durableTables = new Set(['mikser_meta'])
+            for (const value of schemas.values()) {
+                const { sql, durable } = schemaEntry(value)
+                if (durable) for (const t of tableNamesFrom(sql)) durableTables.add(t)
+            }
 
-            if (dbPath !== ':memory:') {
-                // sqlite WAL leaves -wal and -shm sidecar files. Remove
-                // them along with the main file so the next open starts
-                // from a guaranteed-clean slate.
-                for (const suffix of ['', '-wal', '-shm']) {
-                    try { unlinkSync(dbPath + suffix) } catch { /* file may not exist */ }
+            if (durableTables.size > 1 && dbPath !== ':memory:') {
+                // Drop table by table rather than unlinking, so the durable
+                // ones keep their rows. Foreign keys off for the duration:
+                // a cache table may reference another and drop order here is
+                // whatever sqlite_master returns.
+                const tables = handle
+                    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+                    .all()
+                handle.exec('PRAGMA foreign_keys = OFF')
+                for (const { name: table } of tables) {
+                    if (durableTables.has(table)) continue
+                    handle.exec(`DROP TABLE IF EXISTS "${table}"`)
+                }
+                handle.exec('PRAGMA foreign_keys = ON')
+                logger?.debug('Cache wiped, %d durable table(s) preserved', durableTables.size - 1)
+            } else {
+                handle.close()
+                handle = null
+
+                if (dbPath !== ':memory:') {
+                    // sqlite WAL leaves -wal and -shm sidecar files. Remove
+                    // them along with the main file so the next open starts
+                    // from a guaranteed-clean slate.
+                    for (const suffix of ['', '-wal', '-shm']) {
+                        try { unlinkSync(dbPath + suffix) } catch { /* file may not exist */ }
+                    }
                 }
             }
 
@@ -311,8 +365,10 @@ export function createSqliteDatabase({
             // which is the right shape for a config change too: what the
             // provisioners see is an empty-state database either way.
             upgradedFromVersion = recorded ?? 'config'
-            handle = new Database(dbPath)
-            setupConnection()
+            if (!handle) {
+                handle = new Database(dbPath)
+                setupConnection()
+            }
         }
         const stmtStamp = handle.prepare('INSERT OR REPLACE INTO mikser_meta (key, value) VALUES (?, ?)')
         stmtStamp.run('schema_version', version)
@@ -354,7 +410,8 @@ export function createSqliteDatabase({
 
         // Apply each subsystem's registered schema script. Idempotent
         // CREATE statements mean replay-safe across opens.
-        for (const [name, sqlScript] of schemas) {
+        for (const [name, value] of schemas) {
+            const { sql: sqlScript } = schemaEntry(value)
             try {
                 handle.exec(sqlScript)
                 logger?.debug('Database schema applied: %s', name)

@@ -495,12 +495,27 @@ The engine substrate is a single sqlite file at
 that need their own persistence reach it through these two helpers —
 never by opening a second file.
 
-### `registerSchema(name, sqlScript)`
+### `registerSchema(name, sqlScript, { durable } = {})`
 
 Register a CREATE-TABLE-IF-NOT-EXISTS SQL block. All registered schemas
 are applied during `onLoaded`, after the engine's own tables
 (`mikser_entities`, `mikser_refs`, `mikser_snapshots`, `mikser_journal`,
 `mikser_meta`) and before any plugin's `onLoaded` runs.
+
+**`durable`** (default `false`) — keep these tables when the cache is
+wiped. The engine wipes on a schema-version change (any upgrade) and on a
+config-checksum change (any deploy that edits `mikser.config.js`), because
+per ADR-0002 the files are the source of truth and the database is derived.
+That holds for anything rebuildable and fails for anything that is not: an
+OAuth client registration, a refresh token, a received form submission
+cannot be recreated from the working folder, and losing them is silent —
+the first sign is a user being asked to sign in again after an unrelated
+deploy.
+
+Mark those `durable: true` and the wipe drops every other table instead of
+deleting the database file. Leave it off for anything you can rebuild:
+stale derived rows surviving an upgrade is the failure the wipe exists to
+prevent.
 
 ```js
 registerSchema('my_plugin_data', `
