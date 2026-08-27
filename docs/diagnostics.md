@@ -261,6 +261,50 @@ without touching files whose bytes did not move, so it is cheap to reach
 for and its `unchanged` count tells you how much of the catalog was stale
 by suspicion rather than in fact.
 
+## Over a transport
+
+Everything above assumes a shell on the machine. Three of these questions
+are also answerable from a running server, which is what CI, a dashboard,
+an SDK, or an agent speaking MCP actually has.
+
+**MCP** — `mikser_explain`, `mikser_build_report`, `mikser_verify`,
+alongside the existing `mikser_refs_*`, `mikser_layouts_inspect` and the
+`mikser://logs/recent` resource.
+
+**REST** — on the `api` plugin, gated on their own `diagnostics`
+operation:
+
+```
+GET <endpoint>/explain?reference=/documents/en/page.md
+GET <endpoint>/report
+GET <endpoint>/verify
+```
+
+```js
+api({ endpoints: {
+    ops: { token: process.env.OPS_TOKEN, operations: ['diagnostics'] },
+} })
+```
+
+`diagnostics` is in **no** default operation set, and that is deliberate
+rather than tidy: these responses carry absolute filesystem paths, layout
+ids and raw error text. Folding them into `list` would leak engine
+internals through every endpoint that only meant to publish content, and
+adding them to the token default would do it silently on upgrade.
+
+`/verify` answers `200` whether the verdict is `OK`, `WARN` or `FAIL` —
+the check ran, and that is its answer. A status code would conflate "drift
+found" with "request failed", so a CI gate reads `verdict`, which mirrors
+the CLI's exit vocabulary.
+
+The build report is recorded only when something can read it: `--json`, or
+a transport that asked for it. It describes the LAST cycle — a watch
+server clears it as each new cycle starts, so "what did that rebuild do"
+does not become "everything since boot".
+
+There is no transport for `--force`. A forced rebuild of a large site is a
+denial-of-service knob rather than a diagnostic, and it stays on the CLI.
+
 ## The database
 
 Everything mikser knows lives in one SQLite file at

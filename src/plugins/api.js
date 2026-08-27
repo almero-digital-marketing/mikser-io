@@ -4,6 +4,8 @@ import { createHash } from 'node:crypto'
 import _ from 'lodash'
 import sift from 'sift'
 import { resolveAuth, requireAuth, hasCapability, reachabilityOf } from '../auth.js'
+import { explain } from '../explain.js'
+import { buildReport, requestReport } from '../report.js'
 import { useRenderer } from '../render.js'
 import { mimeForEntity, isLoopback, ExpandError, useCollection } from '../utils.js'
 import { registerRoute } from '../routes.js'
@@ -393,6 +395,11 @@ export function api(options = {}) {
         //
         //   api.endpoints.public  { query: e => e.meta?.published, operations: ['list'] }
         //   api.endpoints.admin   { token: '...', operations: ['list','update','delete','render'] }
+        //   api.endpoints.ops     { token: '...', operations: ['diagnostics'] }
+        //
+        // `diagnostics` is in no default set: /explain, /report and /verify
+        // carry absolute paths and raw error text, so exposing them is a
+        // decision rather than a side effect of having a token.
         for (const [name, ep] of Object.entries(endpoints)) {
             const router = express.Router()
 
@@ -438,6 +445,10 @@ export function api(options = {}) {
                 ? ['list', 'update', 'delete', 'render', 'subscribe']
                 : ['list']
             const allowedOps = new Set(ep.operations ?? defaultOps)
+            // Recording the build report costs one entry per entity per
+            // cycle, so it is off unless something can read it. An endpoint
+            // exposing /report is that something.
+            if (allowedOps.has('diagnostics')) requestReport()
 
             // The endpoint's scope. A sift filter is the form to prefer —
             // queryEntities merges it into the WHERE clause, so the endpoint
@@ -919,6 +930,73 @@ export function api(options = {}) {
                 } catch (err) {
                     logger.error('Api[%s] delete error: %s', name, err.message)
                     res.status(/Unknown collection/.test(err.message) ? 400 : 500).json({ error: err.message })
+                }
+            })
+
+            // ── Diagnostics ────────────────────────────────────────
+            //
+            // The three questions --explain, --json and --verify answer, for
+            // a RUNNING server: CI asking "did that deploy actually rebuild
+            // anything", a dashboard, an SDK, anything not speaking MCP.
+            // `mikser && mikser --verify` becomes a request against the
+            // instance that is actually serving.
+            //
+            // Gated on their own `diagnostics` operation, which is in NEITHER
+            // default op set. That is deliberate rather than tidy: these
+            // responses carry absolute filesystem paths, layout ids and raw
+            // error messages, so folding them into `list` would leak engine
+            // internals through every endpoint that only meant to expose
+            // published content. An operator opts in per endpoint.
+            // `?reference=` rather than a path segment: an entity id contains
+            // slashes (/documents/en/page.md), which as a path would need a
+            // wildcard — and Express 5's path-to-regexp rejects the v4
+            // `:reference(*)` form outright.
+            router.get('/explain', auth, allow('diagnostics'), async (req, res) => {
+                try {
+                    const reference = req.query.reference
+                    if (!reference) {
+                        return res.status(400).json({ error: 'Missing ?reference= (entity id, meta.href, or id without its extension)' })
+                    }
+                    const report = await explain(String(reference))
+                    // 404 for an entity that is not there: `found: false` is a
+                    // real answer with a hint attached, but a REST caller
+                    // reasonably reads status before body.
+                    return res.status(report.found === false ? 404 : 200).json(report)
+                } catch (err) {
+                    logger.error('Api explain error: %s', err.message)
+                    return res.status(500).json({ error: err.message })
+                }
+            })
+
+            router.get('/report', auth, allow('diagnostics'), async (req, res) => {
+                try {
+                    return res.json(buildReport())
+                } catch (err) {
+                    logger.error('Api report error: %s', err.message)
+                    return res.status(500).json({ error: err.message })
+                }
+            })
+
+            router.get('/verify', auth, allow('diagnostics'), async (req, res) => {
+                try {
+                    if (!runtime.manifest?.verify) {
+                        return res.status(503).json({ error: 'No manifest available — nothing to verify against' })
+                    }
+                    const diff = await runtime.manifest.verify()
+                    const errors = diff.missing.length + diff.mismatched.length
+                    const warnings = diff.orphaned.length + diff.unverifiable.length
+                    // 200 either way — the check ran and this is its answer. A
+                    // CI gate reads `verdict`, which mirrors the CLI's exit
+                    // vocabulary, rather than inferring from a status code that
+                    // would conflate "drift found" with "request failed".
+                    return res.json({
+                        verdict: errors > 0 ? 'FAIL' : warnings > 0 ? 'WARN' : 'OK',
+                        snapshots: runtime.manifest.size?.() ?? null,
+                        ...diff,
+                    })
+                } catch (err) {
+                    logger.error('Api verify error: %s', err.message)
+                    return res.status(500).json({ error: err.message })
                 }
             })
 

@@ -2,11 +2,31 @@ import runtime from './runtime.js'
 import chokidar from 'chokidar'
 import cron from 'node-cron'
 import { onProcess, onFinalized } from './lifecycle.js'
+import { resetReport } from './report.js'
 import { useLogger } from './engine.js'
 import { ACTION } from './constants.js'
 import { junkFilter } from './utils.js'
 
 const tasks = []
+
+// The watch-cycle trigger, in one place rather than four copies.
+//
+// Debounced by a second so a burst of file events becomes one cycle. The
+// report is cleared as the cycle STARTS, not when it is scheduled, so it
+// always describes the cycle that just ran: without this it accumulates for
+// the life of a watch process, and "what did the last rebuild do" becomes
+// "here is everything since boot, find the end yourself".
+//
+// Not done inside runtime.process(): the first cycle's `gated` count is
+// recorded during import, which runs BEFORE process(), so resetting there
+// would wipe it out of a one-shot build's report.
+function scheduleProcess() {
+    clearTimeout(runtime.engine.processTimeout)
+    runtime.engine.processTimeout = setTimeout(() => {
+        resetReport()
+        runtime.process()
+    }, 1000)
+}
 
 export async function createdHook(name, context) {
     if (!runtime.started) return
@@ -18,8 +38,7 @@ export async function createdHook(name, context) {
     })
 
     if (synced) {
-        clearTimeout(runtime.engine.processTimeout)
-        runtime.engine.processTimeout = setTimeout(() => runtime.process(), 1000)
+        scheduleProcess()
     }
 }
 
@@ -33,8 +52,7 @@ export async function updatedHook(name, context) {
     })
 
     if (synced) {
-        clearTimeout(runtime.engine.processTimeout)
-        runtime.engine.processTimeout = setTimeout(() => runtime.process(), 1000)
+        scheduleProcess()
     }
 }
 
@@ -48,8 +66,7 @@ export async function triggeredHook(name, context) {
     })
 
     if (synced) {
-        clearTimeout(runtime.engine.processTimeout)
-        runtime.engine.processTimeout = setTimeout(() => runtime.process(), 1000)
+        scheduleProcess()
     }
 }
 
@@ -63,8 +80,7 @@ export async function deletedHook(name, context) {
     })
 
     if (synced) {
-        clearTimeout(runtime.engine.processTimeout)
-        runtime.engine.processTimeout = setTimeout(() => runtime.process(), 1000)
+        scheduleProcess()
     }
 }
 

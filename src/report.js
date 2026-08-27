@@ -11,6 +11,50 @@
 // when someone improves the wording.
 import runtime from './runtime.js'
 
+// A transport that can serve the build report declares itself here, at
+// factory time, before any cycle runs.
+//
+// Recording was gated on --json alone, which is why the report existed only
+// for a one-shot build someone piped to jq. An in-process reader is exactly
+// as much of a consumer, and a watch server is where "what did the last
+// cycle do, and why" is most worth asking.
+//
+// An opt-in call rather than report.js testing for known plugins: the list
+// of things that can read a report is not report.js's to keep, and a third
+// transport should not need an edit here to work.
+export function requestReport() {
+    runtime.options ??= {}
+    runtime.options.reportRequested = true
+}
+
+// Is anything able to read the report?
+//
+// Not recorded unconditionally: the rendered/skipped/unchanged arrays are
+// one entry per entity per cycle, which `gated` is already a bare count to
+// avoid. Recording when there IS a reader keeps the default lean without
+// making the data conditional on how you happen to have started mikser.
+function reportWanted() {
+    return !!(runtime.options?.json || runtime.options?.reportRequested)
+}
+
+// Cleared at the start of every cycle, so the report always describes the
+// LAST one rather than everything since the process started.
+//
+// It did not need this while --json meant a single build that then exited.
+// Under watch, without it, rendered/skipped grow without bound and the
+// answer to "what did the last rebuild do" becomes "here is everything,
+// find the end yourself".
+//
+// The failure store is deliberately NOT cleared here: a failure persists
+// across cycles by design — it is the retry marker's in-memory twin, and
+// the exit code depends on this cycle's count, which resetRenderErrors
+// handles at the same point.
+export function resetReport() {
+    if (!runtime.state) return
+    runtime.state.report = { rendered: [], skipped: [], unchanged: [], errors: [], warnings: [], gated: 0 }
+    runtime.state.renderErrors = []
+}
+
 function store() {
     runtime.state ??= {}
     runtime.state.report ??= { rendered: [], skipped: [], unchanged: [], errors: [], warnings: [], gated: 0 }
@@ -24,7 +68,7 @@ function store() {
 // almost the whole catalog on almost every build, which is noise in a
 // document meant to answer "did my change land".
 export function reportGated(count = 1) {
-    if (!runtime.options?.json) return
+    if (!reportWanted()) return
     store().gated += count
 }
 
@@ -38,7 +82,7 @@ export function reportGated(count = 1) {
 // `matched`, `dependency` each mean something specific, and a single
 // polymorphic key would push the type switch onto every consumer.
 export function reportRendered(entity, reason, decision = {}) {
-    if (!runtime.options?.json) return
+    if (!reportWanted()) return
     store().rendered.push({
         id: entity?.id,
         destination: entity?.destination ?? null,
@@ -57,12 +101,12 @@ export function reportRendered(entity, reason, decision = {}) {
 // to be. Nothing downstream is disturbed, and the count measures what
 // conservative invalidation costs.
 export function reportUnchanged(entity) {
-    if (!runtime.options?.json) return
+    if (!reportWanted()) return
     store().unchanged.push({ id: entity?.id, destination: entity?.destination ?? null })
 }
 
 export function reportSkipped(entity, reason) {
-    if (!runtime.options?.json) return
+    if (!reportWanted()) return
     store().skipped.push({ id: entity?.id, destination: entity?.destination ?? null, reason })
 }
 
@@ -73,7 +117,7 @@ export function reportSkipped(entity, reason) {
 // `code` is the contract. Add fields freely; renaming a code is a breaking
 // change to anyone asserting on it.
 export function reportWarning(code, fields = {}) {
-    if (!runtime.options?.json) return
+    if (!reportWanted()) return
     store().warnings.push({ code, ...fields })
 }
 
@@ -141,6 +185,9 @@ export function buildReport() {
 // Emitted once, after the cycle, on stdout — which the logger has vacated
 // under --json precisely so this can be the only thing there.
 export function emitReport() {
+    // --json only, deliberately. Recording and PRINTING are different
+    // questions: a server with the mcp plugin records so a tool can read it,
+    // and must not write a document to stdout.
     if (!runtime.options?.json) return
     process.stdout.write(JSON.stringify(buildReport(), null, 2) + '\n')
 }

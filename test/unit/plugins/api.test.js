@@ -7,6 +7,7 @@ import path from 'node:path'
 import { api, sendRenderOutput } from '../../../src/plugins/api.js'
 import { bearer } from '../../../src/auth.js'
 import { createHarness } from '../plugin-harness.js'
+import realRuntime from '../../../src/runtime.js'
 
 // Lightweight fake of the Express `res` object — captures enough state for
 // assertions without spinning up a server.
@@ -1609,5 +1610,154 @@ describe('api plugin: principal-bound scope (ADR-0012)', () => {
             await new Promise((r) => server.close(r))
             await rm(dir, { recursive: true, force: true })
         }
+    })
+})
+
+describe('api plugin: diagnostics endpoints', () => {
+    // /explain, /report and /verify — the three questions --explain, --json
+    // and --verify answer, for a RUNNING server. Everything built to make the
+    // engine legible landed on the CLI first, which meant it needed a shell
+    // on the box: CI, a dashboard, or an agent speaking only HTTP could
+    // author content and read entities but could not ask why the engine did
+    // what it did.
+    //
+    // Gated on their own `diagnostics` operation, in NEITHER default op set,
+    // because these responses carry absolute filesystem paths, layout ids and
+    // raw error text. Folding them into `list` would leak engine internals
+    // through every endpoint that only meant to publish content.
+    async function mount({ endpoints, entities = [], manifest } = {}) {
+        const { default: express } = await import('express')
+        const app = express()
+        const h = createHarness({
+            options: { app, workingFolder: '/tmp/mikser-diag', outputFolder: '/tmp/mikser-diag/out' },
+            entities,
+        })
+        // The not-ready gate reads the module SINGLETON, not the harness's
+        // runtime object, so setting only the latter leaves every request
+        // answering 503 — and a test expecting 503 would pass for the wrong
+        // reason, since the singleton is not-ready by default.
+        h.runtime.ready = true
+        realRuntime.ready = true
+        if (manifest) {
+            h.runtime.manifest = manifest
+            realRuntime.manifest = manifest
+        } else {
+            delete realRuntime.manifest
+        }
+        api({ endpoints })(h.core)
+        await h.runHook('loaded')
+        const server = await new Promise((resolve) => {
+            const s = app.listen(0, () => resolve(s))
+        })
+        return { server, port: server.address().port, harness: h }
+    }
+
+    const withServer = async (opts, fn) => {
+        const { server, port, harness } = await mount(opts)
+        try { return await fn(port, harness) } finally { await new Promise(r => server.close(r)) }
+    }
+
+    it('is not reachable from an endpoint that did not ask for it', async () => {
+        // The whole point of a separate operation. A token alone must not
+        // hand out engine internals.
+        await withServer({ endpoints: { admin: { token: 't', operations: ['list', 'update'] } } },
+            async (port) => {
+                for (const path of ['/explain?reference=/a.md', '/report', '/verify']) {
+                    const res = await fetch(`http://127.0.0.1:${port}/api/admin${path}`, {
+                        headers: { Authorization: 'Bearer t' },
+                    })
+                    assert.equal(res.status, 403, `${path} should be forbidden without the op`)
+                }
+            })
+    })
+
+    it('is not in the default operation set for a token endpoint', async () => {
+        // Defaults are list/update/delete/render/subscribe. Adding diagnostics
+        // to that list would turn every existing token endpoint into one that
+        // serves absolute paths, silently, on upgrade.
+        await withServer({ endpoints: { admin: { token: 't' } } }, async (port) => {
+            const res = await fetch(`http://127.0.0.1:${port}/api/admin/verify`, {
+                headers: { Authorization: 'Bearer t' },
+            })
+            assert.equal(res.status, 403)
+        })
+    })
+
+    it('rejects a wrong credential like every other operation', async () => {
+        // ADR-0012: presented-and-wrong is 401 and never falls back. An
+        // ABSENT credential from loopback is a different case — a plain
+        // `token:` endpoint still trusts the local host, which is why this
+        // asserts on a bad token rather than on no token at all.
+        await withServer({ endpoints: { ops: { token: 'secret', operations: ['diagnostics'] } } },
+            async (port) => {
+                for (const path of ['/verify', '/report', '/explain?reference=/a.md']) {
+                    const res = await fetch(`http://127.0.0.1:${port}/api/ops${path}`, {
+                        headers: { Authorization: 'Bearer wrong' },
+                    })
+                    assert.equal(res.status, 401, `${path} accepted a wrong token`)
+                }
+            })
+    })
+
+    it('/verify reports the manifest verdict', async () => {
+        const manifest = {
+            size: () => 3,
+            verify: async () => ({
+                missing: [{ id: '/a.md', destination: '/a.html' }],
+                mismatched: [], unverifiable: [], orphaned: [{ path: 'stray.html' }],
+            }),
+        }
+        await withServer({ endpoints: { ops: { token: 't', operations: ['diagnostics'] } }, manifest },
+            async (port) => {
+                const res = await fetch(`http://127.0.0.1:${port}/api/ops/verify`, {
+                    headers: { Authorization: 'Bearer t' },
+                })
+                // 200 even for FAIL: the check ran, and this is its answer. A
+                // status code would conflate "drift found" with "request
+                // failed", and a CI gate reads `verdict`.
+                assert.equal(res.status, 200)
+                const body = await res.json()
+                assert.equal(body.verdict, 'FAIL')
+                assert.equal(body.snapshots, 3)
+                assert.equal(body.missing.length, 1)
+                assert.equal(body.orphaned.length, 1)
+            })
+    })
+
+    it('/verify says so when there is no manifest to check against', async () => {
+        await withServer({ endpoints: { ops: { token: 't', operations: ['diagnostics'] } } },
+            async (port) => {
+                const res = await fetch(`http://127.0.0.1:${port}/api/ops/verify`, {
+                    headers: { Authorization: 'Bearer t' },
+                })
+                assert.equal(res.status, 503, 'no manifest is a service state, not a bad request')
+            })
+    })
+
+    it('/explain requires a reference and 404s an unknown one', async () => {
+        await withServer({ endpoints: { ops: { token: 't', operations: ['diagnostics'] } } },
+            async (port) => {
+                const auth = { headers: { Authorization: 'Bearer t' } }
+                const missing = await fetch(`http://127.0.0.1:${port}/api/ops/explain`, auth)
+                assert.equal(missing.status, 400)
+                assert.match((await missing.json()).error, /reference/)
+
+                const unknown = await fetch(`http://127.0.0.1:${port}/api/ops/explain?reference=/nope`, auth)
+                assert.equal(unknown.status, 404, 'found:false is an answer, but a REST caller reads status first')
+            })
+    })
+
+    it('/report serves the build report', async () => {
+        await withServer({ endpoints: { ops: { token: 't', operations: ['diagnostics'] } } },
+            async (port) => {
+                const res = await fetch(`http://127.0.0.1:${port}/api/ops/report`, {
+                    headers: { Authorization: 'Bearer t' },
+                })
+                assert.equal(res.status, 200)
+                const body = await res.json()
+                for (const key of ['rendered', 'skipped', 'unchanged', 'errors', 'warnings', 'summary']) {
+                    assert.ok(key in body, `report is missing ${key}`)
+                }
+            })
     })
 })
