@@ -135,11 +135,33 @@ describe('requireAuth middleware', () => {
         assert.equal(out.headers['WWW-Authenticate'], 'Bearer')
     })
 
-    it('does not challenge on a 403 — the credential was never the problem', async () => {
+    it('sends no challenge when there is no verifier to be challenged with', async () => {
+        // A reachability 403 is not about the credential — there is no
+        // configured verifier, so there is nothing to tell the caller to
+        // satisfy.
         const out = res()
         await requireAuth(null)(req(null), out, () => assert.fail('next() must not run'))
         assert.equal(out.statusCode, 403)
         assert.equal(out.headers['WWW-Authenticate'], undefined)
+    })
+
+    it('challenges on a verifier 403 too, where insufficient_scope lives', async () => {
+        // RFC 6750 §3.1 puts insufficient_scope on a 403. A client that only
+        // reads the header on a 401 is the one that cannot tell "refresh" from
+        // "you are not allowed", so the header has to be there.
+        const out = res()
+        const strict = {
+            name: 'strict',
+            verify: async () => false,
+            rejectionFor: () => ({ status: 403, code: 'insufficient_scope', scope: 'api:delete' }),
+            challenge: (req_, res_, outcome) =>
+                res_.set('WWW-Authenticate', `Bearer, error="${outcome.code}"`),
+        }
+        await requireAuth(strict)(req('Bearer good-but-unauthorized'), out, () => {
+            assert.fail('next() must not run')
+        })
+        assert.equal(out.statusCode, 403)
+        assert.equal(out.headers['WWW-Authenticate'], 'Bearer, error="insufficient_scope"')
     })
 
     it('500s rather than failing open when a verifier throws', async () => {
@@ -147,6 +169,62 @@ describe('requireAuth middleware', () => {
         const exploding = { name: 'boom', verify: async () => { throw new Error('jwks unreachable') } }
         await requireAuth(exploding)(req('Bearer x'), out, () => assert.fail('next() must not run'))
         assert.equal(out.statusCode, 500)
+    })
+})
+
+describe('authorize — a verifier may refine why it said no', () => {
+    // The three-valued contract stays exactly as it was; this only narrows a
+    // denial that already happened. There is no value rejectionFor can return
+    // that turns a rejection into an acceptance — which is the property that
+    // makes it safe to add to a seam whose failure mode is "wide open".
+    // Returns null when nothing was presented, the way a real verifier does —
+    // that branch never reaches rejectionFor at all.
+    const rejecting = (rejection) => ({
+        name: 'refining',
+        verify: async (r) => (r.headers?.authorization ? false : null),
+        rejectionFor: () => rejection,
+    })
+
+    it('defaults to 401 invalid_token, which is what lets a client refresh', async () => {
+        const out = await authorize(req('Bearer stale'), { name: 'plain', verify: async () => false })
+        assert.equal(out.status, 401)
+        assert.equal(out.code, 'invalid_token')
+    })
+
+    it('takes the verifier\'s status and code when one is offered', async () => {
+        const out = await authorize(req('Bearer good'), rejecting({
+            status: 403, code: 'insufficient_scope', description: 'needs api:delete',
+        }))
+        assert.equal(out.status, 403)
+        assert.equal(out.code, 'insufficient_scope')
+        assert.equal(out.error, 'needs api:delete')
+    })
+
+    it('never lets a refinement upgrade a rejection into an acceptance', async () => {
+        for (const rejection of [{ status: 200 }, { ok: true }, { status: 401, principal: { subject: 'mallory' } }]) {
+            const out = await authorize(req('Bearer x'), rejecting(rejection))
+            assert.equal(out.ok, false, `refinement ${JSON.stringify(rejection)} must stay a denial`)
+            assert.equal(out.principal, undefined)
+        }
+    })
+
+    it('leaves the no-credential case without a code, because the absence is the signal', async () => {
+        const out = await authorize(req(null), rejecting({ status: 403, code: 'insufficient_scope' }))
+        assert.equal(out.reason, 'missing')
+        assert.equal(out.code, undefined)
+    })
+
+    it('a composite forwards the refinement of whichever member judged', async () => {
+        // Without this, composing a static token with an OAuth verifier
+        // downgrades every expiry to a bare 401 — losing the refresh signal
+        // exactly on the surfaces that have one.
+        const composed = anyOf(
+            { name: 'token', verify: async () => null },
+            rejecting({ status: 401, code: 'invalid_token', description: 'The access token expired' }),
+        )
+        const out = await authorize(req('Bearer expired'), composed)
+        assert.equal(out.code, 'invalid_token')
+        assert.equal(out.error, 'The access token expired')
     })
 })
 

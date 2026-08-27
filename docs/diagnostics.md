@@ -20,6 +20,8 @@ engine source, the entry point is missing and belongs on this page.
 | Which layout claimed this document, and why that one? | [`layouts.inspect()`](#layoutsinspect) |
 | Why does this page's output look stale? | [`runtime.manifest`](#runtimemanifest) |
 | Two files seem to fight over one output | [`--explain`](#--explain-entity), [`--verify`](#--verify) |
+| Which source file produced this built output? | [`runtime.manifest`](#runtimemanifest), `mikser_which` |
+| What would break if I changed this file? | [`runtime.manifest`](#runtimemanifest) `affectedBy` |
 | Did my schema validate anything at all? | [`schemas.names()`](#schemasnames--schemaslookup) |
 
 ## Command line
@@ -297,11 +299,16 @@ an SDK, or an agent speaking MCP actually has.
 
 **MCP** — `mikser_explain`, `mikser_build_report`, `mikser_verify`,
 alongside the existing `mikser_refs_*`, `mikser_layouts_inspect` and the
-`mikser://logs/recent` resource. Two more answer the questions a shell
+`mikser://logs/recent` resource. Four more answer the questions a shell
 would otherwise be needed for: `mikser_search` finds a string across
-entity meta and source files in one call, and `mikser_read_output` reads
-the bytes currently on disk for a destination — which is a different
-question from what the catalog or the manifest says should be there.
+entity meta, source files and — with `in: ["output"]` — the built files,
+reporting occurrences per destination; `mikser_read_output` reads the
+bytes currently on disk for a destination, which is a different question
+from what the catalog or the manifest says should be there;
+`mikser_which` goes the other way, from a built destination back to the
+source that produced it and the line that defines a given selector; and
+`mikser_update_entity({ dryRun: true })` reports the blast radius of an
+edit before making it.
 
 **REST** — on the `api` plugin, gated on their own `diagnostics`
 operation:
@@ -430,6 +437,8 @@ What was rendered and whether it needs redoing.
 | `skipDecision(entity, …)` | `{ skip, reason }` — the same reason `--json` reports |
 | `recordedHashes()` | the dep-hashes dependents last saw |
 | `queryAffected(mutated)` | which query-dependent snapshots this mutation hits |
+| `snapshotsAt(destination)` | every snapshot claiming a destination — the reverse of `snapshotsFor`, and the way back from a built file to what produced it |
+| `affectedBy(entity)` | which destinations would re-render if this entity changed, each with the same `reason` the build report uses |
 | `verify({outputFolder})` | `{ verdict, missing, mismatched, unverifiable, orphaned, collisions }` — what `--verify` reports; pure, no mutations |
 | `collisions()` | destinations claimed by more than one entity, with the ids claiming each |
 | `writerOf(destination, outputHash)` | which of several claimants wrote the bytes now on disk, when the hashes can tell them apart |
@@ -439,6 +448,14 @@ What was rendered and whether it needs redoing.
 destinations and a caller asking "what happened to this?" does not know
 them in advance — which is exactly the position you are in when a page
 did not change and you want to know why.
+
+`affectedBy(entity)` answers the same question one step earlier: *before*
+editing a shared file, which outputs does this reach? It runs the real
+`skipDecision` against each candidate rather than reimplementing the
+rule, so the preview and the cycle it previews cannot disagree. What it
+cannot model is how the entity's own frontmatter would change — that is
+parsed during import, so an edit that moves `meta.layout` moves the
+destination too, and this does not see it.
 
 ### `layouts.inspect()`
 

@@ -56,7 +56,7 @@ import { useLogger } from './engine.js'
 import { onLoaded, onFinalize } from './lifecycle.js'
 import { useJournal } from './journal.js'
 import { OPERATION } from './constants.js'
-import { extractRefs, inputHashOf, inputPartsOf, diffInputParts } from './utils.js'
+import { extractRefs, inputHashOf, inputPartsOf, diffInputParts, lookupKeys } from './utils.js'
 import { filterKey } from './track.js'
 import { findById } from './catalog.js'
 import { useDatabase, registerSchema } from './database/index.js'
@@ -295,6 +295,10 @@ export function createManifest(db) {
     const stmtSelectByDestination = db.prepare(`
         SELECT id FROM mikser_snapshots WHERE destination = ?
     `)
+    const stmtLookupByDestination = db.prepare(`
+        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, renderedAt, parent
+        FROM mikser_snapshots WHERE destination = ?
+    `)
     const stmtDeleteByDestination = db.prepare(`
         DELETE FROM mikser_snapshots WHERE destination = ?
     `)
@@ -392,6 +396,28 @@ export function createManifest(db) {
         WHERE refClosure LIKE '%"kind":"query"%'
     `)
 
+    // Snapshots holding a non-query edge that names any of the given keys,
+    // by the name asked for OR by the entity it bound to. Both, for the same
+    // reason skipDecision reads both — a name survives a rename only through
+    // the binding, and a forward edge to a page that does not exist yet has
+    // only the name.
+    //
+    // A prefilter, not the answer: it narrows a corpus-wide walk to the
+    // handful of snapshots that could possibly care, and the real
+    // skipDecision then judges each one.
+    const edgeCandidates = (keys) => {
+        if (!keys.length) return []
+        const holes = keys.map(() => '?').join(',')
+        return db.prepare(`
+            SELECT DISTINCT s.id AS id, s.destination AS destination
+            FROM mikser_snapshots s, json_each(s.refClosure) j
+            WHERE s.refClosure IS NOT NULL
+              AND json_extract(j.value, '$.kind') != 'query'
+              AND (json_extract(j.value, '$.target')   IN (${holes})
+                OR json_extract(j.value, '$.targetId') IN (${holes}))
+        `).all(...keys, ...keys)
+    }
+
     const manifest = {
         // Look up a previously-recorded entry by entity (or by an
         // object with `{id, destination}`). Returns the snapshot, or
@@ -412,6 +438,78 @@ export function createManifest(db) {
         snapshotsFor(id) {
             if (!id) return []
             return stmtLookupById.all(id).map(rowToSnap)
+        },
+
+        // Every snapshot that claims a destination — the reverse of
+        // snapshotsFor, and the entry point for "what produced this file?".
+        // More than one means a collision; see collisions().
+        snapshotsAt(destination) {
+            if (!destination) return []
+            return stmtLookupByDestination.all(destination).map(rowToSnap)
+        },
+
+        // Which destinations would re-render if this entity changed.
+        //
+        // Answered by running the REAL skipDecision against each candidate,
+        // with the mutation maps the render loop would build for exactly this
+        // one entity. A second implementation of the invalidation rule would
+        // be a preview that disagrees with the cycle it is previewing, which
+        // is worse than no preview: it would be trusted.
+        //
+        // What it cannot model, and says so at its caller: how the entity's
+        // OWN meta would change. Frontmatter is parsed during import, not
+        // here, so a change that alters meta.layout (and therefore the
+        // destination itself) is outside what this can see. Its own snapshots
+        // are reported as affected regardless, which is the safe direction.
+        affectedBy(entity) {
+            if (!entity?.id) return []
+            const lang = entity?.meta?.lang ?? null
+            const hash = inputHashOf(entity)
+            const keys = lookupKeys(entity)
+            const mutatedRefs = new Map(keys.map(key => [key, new Set([lang])]))
+            const currentHashes = new Map(keys.map(key => [key, hash]))
+            const mutatedEntities = new Map([[entity.id, entity]])
+
+            // Three ways a snapshot can care, unioned before judging so a
+            // snapshot reachable by two of them is judged once.
+            const candidates = new Map()
+            const consider = (id, destination) => {
+                if (!id || !destination) return
+                candidates.set(`${id}\u0000${destination}`, { id, destination })
+            }
+            for (const snap of this.snapshotsFor(entity.id)) consider(snap.id, snap.destination)
+            for (const row of edgeCandidates(keys)) consider(row.id, row.destination)
+            for (const id of this.queryAffected(mutatedEntities)) {
+                for (const snap of this.snapshotsFor(id)) consider(snap.id, snap.destination)
+            }
+
+            const affected = []
+            for (const { id, destination } of candidates.values()) {
+                // Its own renders: the premise of the question is that this
+                // entity changed, so asking skipDecision — which compares the
+                // hash of the entity as it stands NOW — would answer
+                // "unchanged" and hide the one destination the caller is
+                // certainly touching.
+                if (id === entity.id) {
+                    affected.push({ id, destination, reason: 'inputs-changed', why: 'this entity\'s own render' })
+                    continue
+                }
+                const dependent = findById(id)
+                if (!dependent) continue
+                const decision = this.skipDecision(
+                    { ...dependent, destination }, mutatedRefs, currentHashes, mutatedEntities)
+                if (decision.skip) continue
+                // The same provenance the build report carries. A bare list of
+                // destinations answers "how many" and not "why this one",
+                // which is the half that makes it checkable.
+                affected.push({
+                    id, destination, reason: decision.reason,
+                    ...(decision.changed?.length ? { changed: decision.changed } : {}),
+                    ...(decision.matched ? { matched: decision.matched } : {}),
+                    ...(decision.dependency ? { dependency: decision.dependency } : {}),
+                })
+            }
+            return affected
         },
 
         // Should this render be skipped? See the original docstring in

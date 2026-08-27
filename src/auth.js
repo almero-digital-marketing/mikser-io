@@ -112,6 +112,11 @@ export function reachabilityOf({ auth, token, allowRemote } = {}) {
 //     loopback, or allowRemote      → allow
 //     otherwise                     → 403
 //
+// A verifier may refine the "presented, invalid" case through an optional
+// `rejectionFor(req)` returning `{ status, code, description }` — see the
+// call site. It can only narrow a denial that already happened; there is no
+// return value from it that turns a rejection into an acceptance.
+//
 // `trustLoopback: true` restores the older mikser behaviour where a
 // token-gated endpoint stayed open to localhost. It exists so the api and
 // mcp plugins can keep their documented semantics for a plain `token:`
@@ -123,10 +128,30 @@ export async function authorize(req, verifier, { allowRemote = false, trustLoopb
         const result = await verifier.verify(req)
         if (result) return { ok: true, principal: result }
         if (result === false) {
-            return { ok: false, status: 401, reason: 'invalid',
-                     error: 'Invalid credential' }
+            // A rejected credential is not one thing. An EXPIRED token means
+            // "exchange your refresh token and retry" — a client does that
+            // silently. A token whose subject lacks the capability means
+            // "refreshing will not help", and a client that refreshes on it
+            // loops. Told apart only by the verifier, which is the only thing
+            // that looked at the credential, so it gets to refine the answer.
+            //
+            // Absent (every verifier before this existed), the answer is
+            // today's: 401 invalid_token, which is right for the common case
+            // and is what a client needs in order to refresh at all.
+            const refined = verifier.rejectionFor?.(req)
+            return {
+                ok: false,
+                status: refined?.status ?? 401,
+                reason: 'invalid',
+                code: refined?.code ?? 'invalid_token',
+                description: refined?.description,
+                error: refined?.description ?? 'Invalid credential',
+            }
         }
-        // Nothing presented.
+        // Nothing presented. No `code`: RFC 6750 §3.1 says a challenge to a
+        // request that carried no credential omits `error` entirely, and the
+        // omission is the signal — it is how a client tells "you have never
+        // authenticated here" from "the token you hold went stale".
         if (trustLoopback && local) return { ok: true, principal: { subject: 'loopback' } }
         return { ok: false, status: 401, reason: 'missing',
                  error: 'Authentication required' }
@@ -153,7 +178,12 @@ export function requireAuth(verifier, options = {}) {
             req.principal = outcome.principal
             return next()
         }
-        if (outcome.status === 401) verifier?.challenge?.(req, res)
+        // 403 carries a challenge too: RFC 6750 §3.1 puts insufficient_scope
+        // there, and a client that only reads the header on a 401 is exactly
+        // the client that cannot tell the two apart.
+        if (outcome.status === 401 || outcome.status === 403) {
+            verifier?.challenge?.(req, res, outcome)
+        }
         res.status(outcome.status).json({ error: outcome.error })
     }
 }
@@ -202,12 +232,24 @@ export function anyOf(...verifiers) {
             return rejected ? false : null
         },
 
+        // Whichever member actually judged the credential gets to say why it
+        // failed. Without forwarding this, composing a static token with an
+        // OAuth verifier silently downgrades every expiry to a bare 401 and
+        // the refresh signal is lost precisely on the surfaces that have one.
+        rejectionFor(req) {
+            for (const verifier of list) {
+                const refined = verifier.rejectionFor?.(req)
+                if (refined) return refined
+            }
+            return undefined
+        },
+
         // Challenge with the verifier that can actually be satisfied
         // interactively — pointing a browser at "Bearer" when the real
         // option is OAuth discovery helps nobody.
-        challenge(req, res) {
+        challenge(req, res, outcome) {
             const chooser = discovering ?? list.find(v => v.challenge)
-            chooser?.challenge?.(req, res)
+            chooser?.challenge?.(req, res, outcome)
         },
     }
 }
