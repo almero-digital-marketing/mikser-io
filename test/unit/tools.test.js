@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import runtime from '../../src/runtime.js'
 import {
     registerTool, toolNames, toolSchema, toolSchemas,
-    invokeTool, toolResultText, toolResultFailed,
+    invokeTool, toolResultText, toolResultFailed, isReportOnlyRun,
 } from '../../src/tools.js'
 
 // The registry exists because there are two agent workflows, not one: an agent
@@ -110,5 +110,24 @@ describe('toolResultText — printing what a tool returned', () => {
         assert.equal(toolResultFailed({ isError: true, content: [{ text: 'boom' }] }), true)
         assert.equal(toolResultFailed({ content: [{ text: 'fine' }] }), false)
         assert.equal(toolResultFailed(null), false)
+    })
+})
+
+describe('isReportOnlyRun', () => {
+    const withOptions = (options, fn) => {
+        const saved = runtime.options
+        runtime.options = { ...saved, explain: undefined, verify: undefined, tool: undefined, tools: undefined, ...options }
+        try { fn() } finally { runtime.options = saved }
+    }
+
+    it('recognises every report-and-exit flag', () => {
+        for (const options of [{ explain: '/x.md' }, { verify: true }, { tool: 'mikser_ping' }, { tools: true }]) {
+            withOptions(options, () => assert.equal(isReportOnlyRun(), true, JSON.stringify(options)))
+        }
+    })
+
+    it('is false for a build, which is the run that rebuilds the cache', () => {
+        withOptions({}, () => assert.equal(isReportOnlyRun(), false))
+        withOptions({ watch: true, force: true }, () => assert.equal(isReportOnlyRun(), false))
     })
 })

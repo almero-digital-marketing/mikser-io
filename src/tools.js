@@ -98,3 +98,17 @@ export function toolResultText(result) {
 export function toolResultFailed(result) {
     return Boolean(result?.isError)
 }
+
+// Is this a report-and-exit invocation — one that answers a question and never
+// runs a build?
+//
+// Two things depend on knowing: the cache must not be wiped for one (it would
+// destroy the state being described, with nothing to repopulate it), and
+// anything that waits for a cycle must refuse rather than wait forever. Both
+// were real: a `--tool` write with `await: true` exited 0 in one second having
+// printed nothing at all, because the promise it was awaiting could never
+// settle and Node drained the loop and left.
+export function isReportOnlyRun() {
+    const options = runtime.options ?? {}
+    return Boolean(options.explain || options.verify || options.tool || options.tools)
+}

@@ -28,6 +28,7 @@ import path from 'node:path'
 import { mkdirSync, unlinkSync, existsSync } from 'node:fs'
 import Database from 'better-sqlite3'
 import runtime from '../runtime.js'
+import { isReportOnlyRun } from '../tools.js'
 import { onLoaded } from '../lifecycle.js'
 import packageInfo from '../../package.json' with { type: 'json' }
 
@@ -296,9 +297,7 @@ export function createSqliteDatabase({
         //
         // The staleness is real and still worth saying out loud; what is wrong
         // is doing something irreversible about it on a read.
-        const reportOnly = Boolean(
-            runtime.options?.explain || runtime.options?.verify
-            || runtime.options?.tool || runtime.options?.tools)
+        const reportOnly = isReportOnlyRun()
 
         let upgradedFromVersion = null
         if (reportOnly && ((recorded && recorded !== version) || configChanged)) {

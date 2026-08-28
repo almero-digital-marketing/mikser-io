@@ -10,6 +10,7 @@
 // reworded — which is exactly the kind of assertion that should not break
 // when someone improves the wording.
 import runtime from './runtime.js'
+import { isReportOnlyRun } from './tools.js'
 
 // A transport that can serve the build report declares itself here, at
 // factory time, before any cycle runs.
@@ -73,6 +74,16 @@ export function cycleHistory(n = 1) {
 export function whenCycleCompletes(id) {
     const done = history().find(c => c.id >= id)
     if (done) return Promise.resolve(done)
+    // Nothing will ever complete in a report-and-exit run, and an unsettleable
+    // promise here does not hang — it is worse. Node drains the event loop and
+    // exits 0 having printed nothing, so a caller sees success and no result
+    // and cannot tell whether the work happened.
+    if (isReportOnlyRun()) {
+        return Promise.reject(new Error(
+            'No build runs in a --tool/--explain/--verify invocation, so there is no cycle to wait '
+            + 'for. The write itself has landed. Run `mikser` to build it, or use --server with the '
+            + 'MCP endpoint, where a watch cycle exists to await.'))
+    }
     runtime.state.cycleWaiters ??= []
     return new Promise(resolve => runtime.state.cycleWaiters.push({ id, resolve }))
 }
