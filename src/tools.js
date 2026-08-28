@@ -80,7 +80,18 @@ export function toolSchemas() {
 // session caller are looking at the same answer rather than two renderings of
 // it.
 export async function invokeTool(name, args = {}) {
+    // Names in this registry are BARE. The `mikser_` prefix belongs to MCP,
+    // where tool names share one flat namespace across every connected server
+    // and an unprefixed `verify` would collide with anyone else's — a
+    // constraint of that protocol, not of the engine. `mikser --tool
+    // mikser_explain` says mikser twice.
+    //
+    // A prefixed name is still accepted, because it is what an agent reads in
+    // MCP documentation and it should not have to know which surface stripped
+    // what.
     const tool = store().get(name)
+        ?? store().get(String(name).replace(/^mikser_/, ''))
+        ?? store().get(`mikser_${name}`)
     if (!tool) {
         const known = toolNames()
         throw new Error(`Unknown tool: ${name}${known.length ? `. Available: ${known.join(', ')}` : '. None are registered — is the mcp plugin in your config?'}`)

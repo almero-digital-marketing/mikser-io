@@ -379,7 +379,15 @@ Test coverage: `test/unit/source-sweep.test.js`.
   camelCase: `import { vector } from 'mikser-io-vector'`,
   `import { renderHbs } from 'mikser-io'`. Consumer uses
   `plugins: [vector({...})]` — never the bare string.
-- **MCP tools**: `mikser_<verb>` or `mikser_<subsystem>_<verb>`:
+- **Tool names**: the registry (`src/tools.js`) holds BARE names —
+  `explain`, `verify`, `sources`, `search`. The `mikser_` prefix is MCP's
+  namespacing, because its tool names are flat across every connected
+  server; `mikser-io-mcp` strips it when mirroring a registration into the
+  engine and re-adds it when binding into a session. `invokeTool` accepts
+  either form. On the CLI the prefix is stutter: `mikser --tool
+  mikser_explain` says mikser twice.
+- **MCP tools** (as a client sees them): `mikser_<verb>` or
+  `mikser_<subsystem>_<verb>`:
   `mikser_query_entities`, `mikser_read_entity`, `mikser_update_entity`,
   `mikser_delete_entity`, `mikser_render`, `mikser_refs_inbound`,
   `mikser_refs_outbound`, `mikser_refs_broken`, `mikser_refs_rename`,

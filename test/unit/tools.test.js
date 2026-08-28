@@ -131,3 +131,31 @@ describe('isReportOnlyRun', () => {
         withOptions({ watch: true, force: true }, () => assert.equal(isReportOnlyRun(), false))
     })
 })
+
+describe('the mikser_ prefix is MCP\'s, not the registry\'s', () => {
+    // MCP tool names share one flat namespace across every server a client has
+    // connected to, so an unprefixed `verify` would collide with anyone else's.
+    // The engine has no such problem, and on the CLI the prefix is stutter:
+    // `mikser --tool mikser_explain` says mikser twice. So the registry holds
+    // the bare name and mikser-io-mcp adds the prefix at the session boundary.
+    it('resolves a prefixed name to the bare registration', async () => {
+        registerTool('explain', { description: 'e' }, async () => 'explained')
+        assert.equal(await invokeTool('mikser_explain'), 'explained')
+        assert.equal(await invokeTool('explain'), 'explained')
+    })
+
+    it('resolves a bare name to a prefixed registration', async () => {
+        // The plugin mirrors under the bare name, but a tool registered
+        // directly with a prefix should still answer to the short form rather
+        // than being unreachable from the CLI.
+        registerTool('mikser_legacy', { description: 'l' }, async () => 'ok')
+        assert.equal(await invokeTool('legacy'), 'ok')
+    })
+
+    it('prefers an exact match over either rewrite', async () => {
+        registerTool('search', { description: 'bare' }, async () => 'bare')
+        registerTool('mikser_search', { description: 'prefixed' }, async () => 'prefixed')
+        assert.equal(await invokeTool('search'), 'bare')
+        assert.equal(await invokeTool('mikser_search'), 'prefixed')
+    })
+})

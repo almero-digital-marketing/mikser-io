@@ -10,6 +10,14 @@
 // CLI flags become renderings of them rather than parallel implementations,
 // and the mcp plugin exposes them over a session without owning them.
 //
+// Names are BARE — `explain`, not `mikser_explain`. The prefix exists because
+// MCP tool names share one flat namespace across every server a client has
+// connected to, so an unprefixed `verify` would collide with any other server
+// offering one. That is the protocol's constraint, not the engine's: on the CLI
+// `mikser --tool mikser_explain` says mikser twice. So the registry holds the
+// bare name and `mikser-io-mcp` adds the prefix when it binds a tool into a
+// session — the boundary where it is actually needed.
+//
 // Schemas are declared in a neutral vocabulary rather than zod, because the
 // engine does not depend on zod and should not: the registry is transport
 // agnostic. `mikser-io-mcp` converts these to zod at bind time. The vocabulary
@@ -31,7 +39,7 @@ const fail = (message) => ({ isError: true, content: [{ type: 'text', text: mess
 
 export function registerBuiltinTools() {
     registerTool(
-        'mikser_explain',
+        'explain',
         {
             description:
                 'Explain ONE entity: which layout claimed it and why, its destination, which inputs moved since it '
@@ -62,7 +70,7 @@ export function registerBuiltinTools() {
     )
 
     registerTool(
-        'mikser_verify',
+        'verify',
         {
             description:
                 'Check the output folder against what the manifest recorded: files missing, files whose bytes no '
@@ -89,7 +97,55 @@ export function registerBuiltinTools() {
     )
 
     registerTool(
-        'mikser_build_report',
+        'sources',
+        {
+            description:
+                'Reverse lookup: what SOURCE entities produced this built destination, and how each one got there. '
+                + 'Read from the engine\'s refClosure — its own record of what a render consumed — so a bundle '
+                + 'assembled from a catalog query resolves to the actual parts that went in, each tagged with the '
+                + 'route that reached it (layout, partial, ref, or the recorded query it matched).\n\n'
+                + 'More than one claimant means a destination collision; the sources of all of them are unioned, and '
+                + '`explain` names the competitors. To locate a STRING or a CSS selector inside these sources, '
+                + 'use `which` (mikser-io-mcp), which answers this question and then searches the answer.',
+            inputSchema: {
+                destination: { type: 'string', required: true,
+                    description: 'Output-relative destination, e.g. "/bg/styles/site.css".' },
+            },
+        },
+        async ({ destination }) => {
+            try {
+                if (!destination) return fail('destination is required')
+                if (!runtime.manifest?.snapshotsAt) {
+                    return fail('No manifest available — nothing has been rendered yet.')
+                }
+                const { sourcesOf } = await import('./manifest.js')
+                const claimants = runtime.manifest.snapshotsAt(destination).map(snap => snap.id)
+                const sources = await sourcesOf(destination)
+                return ok({
+                    destination,
+                    claimants,
+                    sources,
+                    count: sources.length,
+                    // An empty list reads as "nothing produced this", when the
+                    // usual cause is a file COPIED there by the files/shares/
+                    // data plugins, which write without a render snapshot.
+                    ...(claimants.length ? {} : {
+                        hint: 'No render claims this destination. It may be a file copied there without a render '
+                            + 'snapshot, or the path may be wrong.',
+                    }),
+                    ...(claimants.length > 1 ? {
+                        contested: 'More than one entity renders here — see the `explain` tool. The sources below are '
+                            + 'the union of what all of them consumed.',
+                    } : {}),
+                })
+            } catch (err) {
+                return fail(err.message)
+            }
+        },
+    )
+
+    registerTool(
+        'build_report',
         {
             description:
                 'What a build cycle did, and why: entities rendered (each with a reason — inputs-changed, '

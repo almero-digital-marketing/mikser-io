@@ -307,8 +307,17 @@ npx mikser --tools
 ```
 
 ```bash
-npx mikser --tool mikser_which --tool-args '{"destination":"/bg/index.html","text":"Контакти"}'
+npx mikser --tool which --tool-args '{"destination":"/bg/index.html","text":"Контакти"}'
 ```
+
+Tool names are **bare** here — `explain`, `verify`, `sources`, `which`. The
+`mikser_` prefix belongs to MCP, where tool names share one flat namespace
+across every server a client has connected to and an unprefixed `verify`
+would collide with anyone else's. The engine has no such problem, and
+`mikser --tool mikser_explain` says mikser twice. The prefix is added at
+the session boundary, so an MCP client sees exactly the names it always
+did. Either form is accepted on the CLI, because an agent reading MCP
+documentation should not have to know which surface stripped what.
 
 A report-and-exit run — `--explain`, `--verify`, `--tools`, `--tool` —
 never wipes the cache, even when the config or the schema version has
@@ -353,9 +362,13 @@ language, which the engine has no business owning. A tool needing real
 validation registers through `runtime.options.mcp` with zod, which is
 what every tool in that plugin does.
 
-**`mikser_explain`, `mikser_verify` and `mikser_build_report` are the
-engine's own**, registered in `src/builtin-tools.js` rather than by a
-plugin. That is what makes `--tool mikser_verify` work on a bare engine,
+**`explain`, `verify`, `sources` and `build_report` are the engine's own**,
+registered in `src/builtin-tools.js` rather than by a plugin. `sources`
+is the reverse lookup — what produced this destination, each source
+tagged with how it got there — reading the `refClosure` through
+`manifest.sourcesOf`. Locating a string or CSS selector *inside* those
+sources stays in `mikser-io-mcp`'s `which`, because selector
+classification is not engine knowledge. That is what makes `--tool mikser_verify` work on a bare engine,
 the same as `--verify` — before, the engine's diagnostics needed an agent
 surface configured to be reachable as tools, which is backwards.
 
