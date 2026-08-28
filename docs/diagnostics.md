@@ -366,9 +366,11 @@ what every tool in that plugin does.
 registered in `src/builtin-tools.js` rather than by a plugin. `sources`
 is the reverse lookup — what produced this destination, each source
 tagged with how it got there — reading the `refClosure` through
-`manifest.sourcesOf`. Locating a string or CSS selector *inside* those
-sources stays in `mikser-io-mcp`'s `which`, because selector
-classification is not engine knowledge. That is what makes `--tool mikser_verify` work on a bare engine,
+`manifest.sourcesOf`. Locating a string *inside* those sources stays in
+`mikser-io-mcp`'s `which`, which reports each occurrence's line and
+whether the string begins it: a declaration usually does and a use
+usually does not, which separates the two in any text format without a
+per-language grammar. That is what makes `--tool mikser_verify` work on a bare engine,
 the same as `--verify` — before, the engine's diagnostics needed an agent
 surface configured to be reachable as tools, which is backwards.
 
