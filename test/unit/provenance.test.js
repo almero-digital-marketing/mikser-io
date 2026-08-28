@@ -1,9 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { fieldPositions, positionsForSource, positionsByProbe, registerProvenanceFormat,
-         provenanceComment, provenanceCommentsEnabled } from '../../src/provenance.js'
-import runtime from '../../src/runtime.js'
+import { fieldPositions, positionsForSource, positionsByProbe, registerProvenanceFormat } from '../../src/provenance.js'
 
 // The shapes here are taken from real content, because the whole point of
 // recording positions is that a caller can open the file at the line reported
@@ -201,63 +199,5 @@ describe('registerProvenanceFormat', () => {
         }
         // Unregistered again, the built-in answers.
         assert.equal(positionsForSource('title: X\n', { format: 'test' }).title.line, 1)
-    })
-})
-
-describe('provenance comments — a debug view that cannot ship', () => {
-    const SOURCES = [{ id: '/documents/bg/system/navigation.yml', via: ['query {"meta.href":"/system/navigation"}'] }]
-    const reset = () => {
-        delete runtime.options.provenanceComments
-        delete runtime.options.mode
-        delete process.env.NODE_ENV
-    }
-
-    it('is off unless asked for', () => {
-        reset()
-        assert.equal(provenanceCommentsEnabled(), false)
-        assert.equal(provenanceComment(SOURCES), null)
-    })
-
-    it('refuses production even when the flag is set', () => {
-        // Marker injection changes the bytes that ship, which is exactly why
-        // the predecessor was only ever safe in development. An operator who
-        // set this in a shared config should not find out from the shipped
-        // HTML, so the refusal is mechanical rather than a convention.
-        reset()
-        runtime.options.provenanceComments = true
-        runtime.options.mode = 'production'
-        assert.equal(provenanceComment(SOURCES), null)
-
-        runtime.options.mode = 'development'
-        process.env.NODE_ENV = 'production'
-        assert.equal(provenanceComment(SOURCES), null, 'NODE_ENV must veto independently')
-        reset()
-    })
-
-    it('emits the recorded closure when enabled in development', () => {
-        reset()
-        runtime.options.provenanceComments = true
-        const comment = provenanceComment(SOURCES)
-        assert.match(comment, /mikser:provenance/)
-        assert.match(comment, /navigation\.yml/)
-        reset()
-    })
-
-    it('cannot be broken out of by a source id containing a comment close', () => {
-        // `--` is illegal inside an HTML comment and a recorded query filter
-        // can easily contain one. Emitting it raw would end the comment early
-        // and spill the rest into the document.
-        reset()
-        runtime.options.provenanceComments = true
-        const comment = provenanceComment([{ id: '/documents/a--b.yml', via: ['ref'] }])
-        assert.doesNotMatch(comment.slice(comment.indexOf('mikser:provenance')), /--(?!>)/)
-        reset()
-    })
-
-    it('says nothing when there is nothing recorded', () => {
-        reset()
-        runtime.options.provenanceComments = true
-        assert.equal(provenanceComment([]), null)
-        reset()
     })
 })

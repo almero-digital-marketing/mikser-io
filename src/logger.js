@@ -127,7 +127,10 @@ function createTerminalStream() {
             // parsed. stderr rather than silence: the operator still sees
             // the build, and `mikser --explain x --json | jq` still works —
             // which is the entire point of the flag.
-            const out = runtime.options?.json ? process.stderr : process.stdout
+            // --tool is the same contract: stdout carries the tool's result and
+            // nothing else, because an agent reading CLI output pipes it.
+            const out = (runtime.options?.json || runtime.options?.tool || runtime.options?.tools)
+                ? process.stderr : process.stdout
             out.write(chunk, enc)
             if (gauge) gauge.enable()
             cb()

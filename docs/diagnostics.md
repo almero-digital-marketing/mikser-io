@@ -23,6 +23,7 @@ engine source, the entry point is missing and belongs on this page.
 | Which source file produced this built output? | [`runtime.manifest`](#runtimemanifest), `mikser_which` |
 | Where was this VALUE written — file, field, line? | [`runtime.provenance`](#runtimeprovenance) |
 | What would break if I changed this file? | [`runtime.manifest`](#runtimemanifest) `affectedBy` |
+| I am an agent reading CLI output, not speaking MCP | [`--tools` / `--tool`](#the-two-agent-workflows) |
 | Did my schema validate anything at all? | [`schemas.names()`](#schemasnames--schemaslookup) |
 
 ## Command line
@@ -286,11 +287,45 @@ stopped producing it.
 | `-R, --resume` | continue from a previous interrupted run's journal; skips the filesystem scan |
 | `-r, --clear` | clear state before running |
 | `-d, --debug` / `-t, --trace` | raise log level; `trace` includes per-entity catalog writes |
+| `--tools` | list the registered tools, then exit; `--json` for full schemas |
+| `--tool <name>` | run one tool and print its result, then exit. `--tool-args '<json>'` supplies arguments |
 
 `--force` composes with the unchanged-output check: it redoes the work
 without touching files whose bytes did not move, so it is cheap to reach
 for and its `unchanged` count tells you how much of the catalog was stale
 by suspicion rather than in fact.
+
+## The two agent workflows
+
+There are two ways an agent drives mikser and they are equally real: one
+speaks MCP over HTTP, the other runs the CLI and reads its output. Both
+read the same tool registry, so neither sees a smaller engine than the
+other.
+
+```bash
+npx mikser --tools
+```
+
+```bash
+npx mikser --tool mikser_which --tool-args '{"destination":"/bg/index.html","text":"Контакти"}'
+```
+
+`--tools` lists what is registered, with `--json` for the full schemas.
+`--tool` runs one and prints its result; stdout carries only that result
+— the banner and every log line move to stderr, as under `--json` — so
+piping into `jq` works. Exit status is `0` on success, `1` when the tool
+itself reported an error, and `3` when the tool does not exist or its
+arguments are not valid JSON, because an agent reading CLI output has
+only the status to branch on.
+
+The registry lives in the engine (`registerTool` / `toolNames` /
+`invokeTool`), and the transports are consumers of it. That is what makes
+the parity hold rather than decay: a tool registered by any plugin — mcp,
+layouts, vector, one written next week — is reachable from both surfaces
+the moment it exists, with no per-tool CLI code and no second list to
+keep in step. The mcp plugin still owns the tools themselves, the
+transport, sessions, resources and prompts; the engine knows only a name,
+a description, an input schema and a function.
 
 ## Over a transport
 
@@ -504,12 +539,13 @@ read from where tokens landed rather than from assuming a substitution matched
 the intended field, so a repeated value cannot produce a confidently wrong
 answer. There is no regex over the value, so its size is irrelevant.
 
-Enabling `provenanceComments` appends the recorded closure to a rendered page
-as an HTML comment. It is off by default and refuses to run when `--mode
-production` or `NODE_ENV=production` — injecting markers changes the bytes that
-ship, which is why the predecessor was only ever safe in development.
-`mikser_which` answers the same question against the same records without
-touching the output, and is the one to reach for.
+Nothing is injected into the output. The predecessor printed provenance into
+HTML comments for a browser script to turn into tooltips, which is why it was
+only ever safe in development — it changed the bytes that ship. The consumer
+here is an editing agent, which never looks at rendered bytes, so the answer is
+returned as data instead: `mikser_which` for "what produced this output", and
+`mikser_read_entity({ include: ["positions"] })` for "where is this value
+written".
 
 ### `layouts.inspect()`
 

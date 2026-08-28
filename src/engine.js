@@ -5,12 +5,13 @@ import { existsSync } from 'fs'
 import _ from 'lodash'
 import Piscina from 'piscina'
 import runtime from './runtime.js'
-import { onInitialize, onInitialized, onLoad, onRender, onCancel, onCancelled, onFinalized, onLoaded, onBeforePostprocess, onPostprocess, postprocessEntities } from './lifecycle.js'
+import { onInitialize, onInitialized, onLoad, onImport, onRender, onCancel, onCancelled, onFinalized, onLoaded, onBeforePostprocess, onPostprocess, postprocessEntities } from './lifecycle.js'
 import { useJournal, updateEntry } from './journal.js'
 import { globby } from 'globby'
 import { OPERATION, TASKS } from './constants.js'
 import { changeExtension, formatErrorContext, projectMeta, lookupKeys } from './utils.js'
 import { reportRendered, reportSkipped, reportError, reportWarning, renderErrorCount, emitReport, finishCycle } from './report.js'
+import { toolSchemas, invokeTool, toolResultText, toolResultFailed } from './tools.js'
 import render from './render.js'
 import postprocess, { loadPlugin as loadPostPlugin } from './postprocess.js'
 import map from 'p-map'
@@ -117,7 +118,10 @@ export async function setup(options) {
             .option('-R --resume', 'continue from journal entries left by a previous interrupted run; skip the initial filesystem scan', false)
             .option('--verify', 'verify output folder against manifest; report drift instead of building', false)
             .option('--explain <entity>', 'explain one entity — layout, destination, hashes, refClosure, and whether a build would re-render it. Accepts an id, a meta.href, or an id without its extension. Reports instead of building.')
-            .option('--json', 'machine-readable output (with --explain, and for a build\'s render/skip/warning report)', false)
+            .option('--json', 'machine-readable output (with --explain, --tool, and for a build\'s render/skip/warning report)', false)
+            .option('--tools', 'list the tools this build exposes, then exit', false)
+            .option('--tool <name>', 'run one tool and print its result, then exit. The same tools an MCP client sees, so an agent reading CLI output and an agent speaking MCP ask the engine the same questions.')
+            .option('--tool-args <json>', 'JSON arguments for --tool (e.g. \'{"destination":"/bg/index.html"}\')')
             .option('-d --debug', 'display debug statements')
             .option('-t --trace', 'display trace statements')
             .option('-e --runtime-folder <folder>', 'set mikser runtime folder relative to working folder', 'runtime')
@@ -214,6 +218,63 @@ export async function setup(options) {
             runtime.options.url.startsWith('https://') ? ' (webhook-capable)' : ' (http; plugins will not enable push webhooks)')
     })
 
+    onImport(async () => {
+        const logger = useLogger()
+        // --tools / --tool: the CLI half of the tool surface.
+        //
+        // There are two agent workflows against mikser — one speaking MCP over
+        // HTTP, one running the CLI and reading its output — and every tool
+        // built for the first was invisible to the second. Rather than growing
+        // a flag per tool, which drifts the moment a tool is added, this
+        // dispatches through the same registry a session uses. A tool
+        // registered by any plugin is reachable from both surfaces the moment
+        // it exists.
+        //
+        // Dispatched at `import` rather than `loaded`, and the difference is
+        // load-bearing: the engine's own onLoaded is registered during setup(),
+        // ahead of every plugin's — including the ones that register the tools.
+        // Listing from there returned exactly one, the tool the mcp substrate
+        // creates for itself. By `import` every onLoaded has run and the
+        // registry is complete. Nothing is imported, because this exits first,
+        // the same way --explain and --verify do.
+        if (runtime.options.tools || runtime.options.tool) {
+            if (runtime.options.tools) {
+                const schemas = toolSchemas()
+                if (runtime.options.json) {
+                    process.stdout.write(JSON.stringify(schemas, null, 2) + '\n')
+                } else if (!schemas.length) {
+                    logger.warn('No tools registered. The mcp plugin registers the standard set; '
+                        + 'this flag only lists and invokes what is registered.')
+                } else {
+                    for (const schema of schemas) {
+                        process.stdout.write(`${schema.name}\n    ${String(schema.description).split('\n')[0]}\n`)
+                    }
+                }
+                process.exit(0)
+            }
+            let args = {}
+            if (runtime.options.toolArgs) {
+                try {
+                    args = JSON.parse(runtime.options.toolArgs)
+                } catch (err) {
+                    logger.error('--tool-args is not valid JSON: %s', err.message)
+                    process.exit(3)
+                }
+            }
+            let result
+            try {
+                result = await invokeTool(runtime.options.tool, args)
+            } catch (err) {
+                logger.error('%s', err.message)
+                process.exit(3)
+            }
+            process.stdout.write(toolResultText(result) + '\n')
+            // A tool that reports failure must not exit 0 — an agent reading
+            // CLI output has only the exit code to branch on.
+            process.exit(toolResultFailed(result) ? 1 : 0)
+        }
+    })
+
     onLoaded(async () => {
         const logger = useLogger()
         logger.debug(runtime.options, 'Mikser options')
@@ -247,6 +308,18 @@ export async function setup(options) {
             }
             process.exit(report.found ? 0 : 3)
         }
+
+        if (runtime.options.explain) {
+            const { explain, formatExplain } = await import('./explain.js')
+            const report = await explain(runtime.options.explain)
+            if (runtime.options.json) {
+                process.stdout.write(JSON.stringify(report, null, 2) + '\n')
+            } else {
+                process.stdout.write(formatExplain(report) + '\n')
+            }
+            process.exit(report.found ? 0 : 3)
+        }
+
 
         if (runtime.options.verify) {
             if (!runtime.manifest) {
@@ -868,14 +941,17 @@ export async function setup(options) {
         logger.notice('Mikser restarted')
     })
 
-    // Banner to stderr under --json, for the same reason the logger goes
-    // there: stdout must contain only the document.
+    // Banner to stderr under --json / --tool / --tools, for the same reason the
+    // logger goes there: stdout must contain only the document. An agent
+    // reading CLI output pipes stdout, and a banner in front of the JSON is
+    // the difference between a parse and a crash.
     //
     // argv directly, not runtime.options: commander parses in a lifecycle
     // hook, which runs after setup() returns, so options.json is still
     // undefined here. The logger has no such problem — it writes during the
     // run, by which time options exist.
-    if (runtime.options?.json || process.argv.includes('--json')) {
+    const quietStdout = ['--json', '--tool', '--tools'].some(flag => process.argv.includes(flag))
+    if (runtime.options?.json || quietStdout) {
         process.stderr.write(`mikser. ${packageInfo.version}\n`)
     } else {
         console.info('\x1b[1mmikser\x1b[22;5;38;2;255;63;0m.\x1b[0m %s\n', packageInfo.version)

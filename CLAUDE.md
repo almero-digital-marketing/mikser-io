@@ -198,6 +198,25 @@ brevity.
   Strings produce a v9 migration error pointing at the new shape.
 - `manager.js` — file watching (chokidar) and cron scheduling.
 - `source.js` — `useSource` codifies the folder-of-files pattern.
+- `tools.js` — tool registry. `registerTool(name, {description,
+  inputSchema}, handler)` / `toolNames()` / `toolSchema()` / `invokeTool()`,
+  stored on `runtime.tools`. There are TWO agent workflows — one speaking
+  MCP over HTTP, one running the CLI and reading its output — and every
+  tool used to live in the mcp plugin, reachable only through a session,
+  so the CLI agent saw a much smaller engine. The registry is substrate
+  and the transports are consumers: `--tools` / `--tool` dispatch through
+  it, mcp mirrors its registrations into it, and a tool registered by any
+  plugin reaches both surfaces with no per-tool CLI code. MCP keeps the
+  tools themselves, the transport, sessions, resources and prompts.
+  Dispatched at `onImport`, not `onLoaded` — the engine's own onLoaded is
+  registered during setup(), ahead of the plugins that register the tools.
+- `provenance.js` — where a value was WRITTEN: source, field path, line,
+  column. Formats register (`registerProvenanceFormat` / `probeFormat`)
+  rather than being special-cased; yaml/json/front-matter use the `yaml`
+  parser's ranges, and anything without ranges uses the one-pass uuid
+  probe. Field paths are free; line/col is computed on demand and cached
+  in `mikser_provenance` against the entity's checksum, so a build pays
+  nothing.
 - `routes.js` — HTTP route registry. Plugins mount on
   `runtime.options.app` directly; the Express router stack has the
   paths but not the intent (loopback-only? streaming?). So plugins
