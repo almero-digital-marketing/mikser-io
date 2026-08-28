@@ -9,6 +9,7 @@ import path from 'path'
 import fm from 'front-matter'
 import yaml from 'yaml'
 import runtime from './runtime.js'
+import { trackedInfo, untrack, recordReads } from './track.js'
 
 // Stable content fingerprint for entities — used by manifest snapshots,
 // engine mutation tracking, and the layouts dispatcher's hash-aware
@@ -761,7 +762,16 @@ export async function expandEntity(entity, paths, options = {}) {
 
     // Deep clone so the caller's entity (typically the catalog row) is
     // never mutated. `structuredClone` is in Node since 17.
-    const result = structuredClone(entity)
+    //
+    // Unwrapped first. A sidecar is handed a read-recording view of its
+    // entity's meta so the engine can see which keys it consumes, and that view
+    // is a Proxy — which structuredClone rejects outright, because it copies
+    // internal slots and a proxy has none. Cloning the raw data instead keeps
+    // both properties that are in tension here: the caller's entity is still
+    // never mutated, and unwrapping reads nothing through the view, so no key
+    // is recorded as consumed merely because it was copied.
+    const tracked = trackedInfo(entity?.meta)
+    const result = structuredClone(untrack(entity))
     if (!result?.meta || typeof result.meta !== 'object') return result
 
     const ctx = {
@@ -782,6 +792,14 @@ export async function expandEntity(entity, paths, options = {}) {
         await walkExpandPath(result.meta, parts, ctx)
     }
 
+    // Re-applied, so a sidecar reading from the EXPANDED copy is still
+    // recorded. Without this the feature would quietly stop working for any
+    // sidecar that expands refs — which is most of them — because the reads
+    // that matter happen on what expandEntity returns, not on what it was
+    // given.
+    if (tracked && result?.meta && typeof result.meta === 'object') {
+        result.meta = recordReads(result.meta, tracked.path, tracked.record)
+    }
     return result
 }
 
@@ -890,7 +908,7 @@ async function expandSingleRef(node, key, ref, tail, ctx) {
     // Clone the resolved entity before placing it in the result tree.
     // findRef typically returns a reference to the catalog row; without
     // the clone, subsequent expansions would mutate the catalog.
-    const resolvedCopy = structuredClone(resolved)
+    const resolvedCopy = structuredClone(untrack(resolved))
     node[key] = resolvedCopy
     if (tail.length > 0 && resolvedCopy.meta) {
         const childCtx = { ...ctx, seen: new Set([...ctx.seen, ref]) }
@@ -913,7 +931,7 @@ async function expandArrayRef(node, key, refs, tail, ctx) {
             )
         }
         // Clone — same reasoning as expandSingleRef.
-        const resolvedCopy = structuredClone(resolved)
+        const resolvedCopy = structuredClone(untrack(resolved))
         if (tail.length > 0 && resolvedCopy.meta) {
             const childCtx = { ...ctx, seen: new Set([...ctx.seen, ref]) }
             await walkExpandPath(resolvedCopy.meta, tail, childCtx)

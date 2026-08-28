@@ -115,6 +115,56 @@ export function createTrack({ partial = true, query = true, lookup = true, meta 
     return track
 }
 
+// How a recording view identifies itself and hands back what it wraps.
+//
+// A Proxy is viral in a way plain data is not: it survives every assignment and
+// spread, and then reaches an API that works on internal slots and cannot cope.
+// `structuredClone` is the one that matters here — it rejects ANY proxy, because
+// a proxy exotic object has no internal slots to copy — and mikser clones
+// entities in expandEntity() to avoid mutating the caller's catalog row.
+//
+// So a view has to be undoable. Reading this symbol returns the raw target plus
+// what is needed to re-apply the view afterwards, which keeps both properties in
+// tension: the clone is taken from untouched data, and the result can be wrapped
+// again so later reads are still recorded.
+const READS = Symbol.for('mikser.recordReads')
+
+// The raw object behind a recording view, or null when `value` is not one.
+export function trackedInfo(value) {
+    if (value === null || typeof value !== 'object') return null
+    return value[READS] ?? null
+}
+
+// `value` with every recording view in it replaced by what it wraps.
+//
+// Returns the SAME reference when nothing was wrapped, so the common case costs
+// a walk and no allocation. Unwrapping deliberately does not go through the get
+// trap: reading every key to copy it would record every key as read, and a
+// contract that says a layout consumes everything is worth nothing — worse, the
+// build would then invalidate on any change at all.
+export function untrack(value) {
+    const info = trackedInfo(value)
+    // The target's own contents are raw: views are created lazily on access and
+    // never written back, so unwrapping the outermost one is enough.
+    if (info) return info.target
+    if (Array.isArray(value)) {
+        let changed = false
+        const out = value.map(v => { const u = untrack(v); if (u !== v) changed = true; return u })
+        return changed ? out : value
+    }
+    if (value && typeof value === 'object' && (value.constructor === Object || !value.constructor)) {
+        let changed = false
+        const out = {}
+        for (const [k, v] of Object.entries(value)) {
+            const u = untrack(v)
+            if (u !== v) changed = true
+            out[k] = u
+        }
+        return changed ? out : value
+    }
+    return value
+}
+
 // Property paths that say nothing about the data. Reading `.length` to
 // iterate, or `.toJSON` because something serialized, is not a template
 // depending on a key — recording them would bury the real ones.
@@ -150,6 +200,9 @@ export function recordReads(value, path, record, cache = new WeakMap()) {
     const isArray = Array.isArray(value)
     const proxy = new Proxy(value, {
         get(target, prop, receiver) {
+            // Answered before anything else, and never recorded: this is the
+            // engine asking what it is holding, not a template reading content.
+            if (prop === READS) return { target, path, record }
             const out = Reflect.get(target, prop, receiver)
             // Symbols are iteration and type-coercion machinery, never keys an
             // author writes.
