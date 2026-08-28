@@ -31,6 +31,11 @@ import { onInitialized, onLoad, onLoaded } from './lifecycle.js'
 // engine.js's onInitialize callback AFTER engine's own options chain
 // and BEFORE the .parse() call — preserves the order of options in
 // --help output.
+// Two hours. Long enough for a gigabyte at 1.2 Mbps, which is below any link
+// this runs on, and short enough to remain a bound. Applied only when a
+// streaming route exists, so a plain build server keeps Node's default.
+const STREAMING_REQUEST_TIMEOUT = 2 * 60 * 60 * 1000
+
 export function attachServerCliOptions(commander) {
     commander
         ?.option('-s --server [port]', 'start an Express server on the given port (defaults to 3001)')
@@ -224,11 +229,25 @@ export function setupServer() {
                 // large attachments) cannot raise it for itself. Hence a
                 // config knob here rather than in the plugin.
                 //
-                // `0` disables the cap entirely. That is a deliberate choice
+                // Raised automatically when a streaming route is mounted; see
+                // below. `0` disables the cap entirely. That is a deliberate choice
                 // for a trusted-network build server and a bad one facing the
                 // internet, where it removes the only bound on how long a
                 // client can hold a connection open doing nothing.
-                const requestTimeout = runtime.config.server?.requestTimeout
+                // A streaming route is one a facade must not buffer — an
+                // upload surface, an SSE stream — and it is exactly the shape
+                // Node's 5-minute cap mismeasures. `registerRoute` already
+                // records which routes those are, so the engine can tell
+                // without being told twice.
+                //
+                // Two hours rather than `0`: a 1GB upload needs better than
+                // 1.2 Mbps to fit, which any real link clears, while a finite
+                // bound still stops a client holding a connection open
+                // forever. Disabling it entirely stays available and stays a
+                // deliberate choice.
+                const streaming = (runtime.routes ?? []).filter(r => r.streaming)
+                const configured = runtime.config.server?.requestTimeout
+                const requestTimeout = configured ?? (streaming.length ? STREAMING_REQUEST_TIMEOUT : undefined)
                 if (requestTimeout != null) {
                     httpServer.requestTimeout = requestTimeout
                     // headersTimeout must not exceed requestTimeout, or Node
@@ -237,8 +256,12 @@ export function setupServer() {
                     if (requestTimeout !== 0) {
                         httpServer.headersTimeout = Math.min(httpServer.headersTimeout, requestTimeout)
                     }
-                    logger.info('Server request timeout: %s',
-                        requestTimeout === 0 ? 'disabled' : `${requestTimeout}ms`)
+                    logger.info('Server request timeout: %s%s',
+                        requestTimeout === 0 ? 'disabled' : `${Math.round(requestTimeout / 60000)}m`,
+                        configured == null
+                            ? ` (raised from Node's 5m default for ${streaming.length} streaming route(s): `
+                              + `${streaming.map(r => r.path).join(', ')} — set config.server.requestTimeout to override)`
+                            : '')
                 }
                 runtime.options.httpServer = httpServer
             })
