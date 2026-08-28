@@ -341,21 +341,32 @@ CLI code and no second list to keep in step. The mcp plugin still owns
 the tools themselves, the transport, sessions, resources and prompts; the
 engine knows only a name, a description, an input schema and a function.
 
-The mirroring is **one-way**: mcp's registrations flow into the engine's
-registry, not the reverse. A tool registered directly against
-`registerTool` is reachable from `--tool` but does not appear in an MCP
-session, because sessions are bound from the substrate's own list and MCP
-wants a zod shape for `inputSchema` while the engine is deliberately
-zod-free. Register through `runtime.options.mcp` to reach both.
+The mirroring runs both ways. mcp's registrations flow into the engine's
+registry, so everything it registers is reachable from `--tool`; and a
+session binds the engine's own registrations too, converting their schema
+to zod at bind time. The engine declares an input as
+`{ name: { type, required?, description? } }` rather than as zod, because
+the registry is transport agnostic and should not depend on one
+transport's schema library. The vocabulary covers string / number /
+boolean / array and stops there — anything richer would be a schema
+language, which the engine has no business owning. A tool needing real
+validation registers through `runtime.options.mcp` with zod, which is
+what every tool in that plugin does.
 
-`--explain` and `--verify` predate all of this and stay as flags rather
-than becoming `--tool mikser_explain`. Both call the same engine
-functions the tools call — `explain()` and `manifest.verify()` — so there
-is no second implementation, only a second rendering. Two things justify
-the separate flags: they work with no mcp plugin configured, which
-matters for a bare `mikser --verify` in CI; and `--verify` exits `0` /
-`1` / `2` for OK / WARN / FAIL, a gate contract that `--tool`'s `0` / `1`
-cannot express.
+**`mikser_explain`, `mikser_verify` and `mikser_build_report` are the
+engine's own**, registered in `src/builtin-tools.js` rather than by a
+plugin. That is what makes `--tool mikser_verify` work on a bare engine,
+the same as `--verify` — before, the engine's diagnostics needed an agent
+surface configured to be reachable as tools, which is backwards.
+
+`--explain` and `--verify` stay as flags rather than becoming `--tool`
+invocations. They are not a second implementation: the flag and the tool
+both call `explain()` and `manifest.verify()`. Routing the flag through
+the tool would add a JSON serialize-and-reparse for nothing. What the
+flags carry that the tool cannot is presentation and exit status —
+`formatExplain`'s aligned columns are for a person, and `--verify` exits
+`0` / `1` / `2` for OK / WARN / FAIL, a CI gate contract that `--tool`'s
+`0` / `1` cannot express without lying about one of the three.
 
 ## Over a transport
 

@@ -12,6 +12,7 @@ import { OPERATION, TASKS } from './constants.js'
 import { changeExtension, formatErrorContext, projectMeta, lookupKeys } from './utils.js'
 import { reportRendered, reportSkipped, reportError, reportWarning, renderErrorCount, emitReport, finishCycle } from './report.js'
 import { toolSchemas, invokeTool, toolResultText, toolResultFailed } from './tools.js'
+import { registerBuiltinTools } from './builtin-tools.js'
 import { useDatabase } from './database/index.js'
 import render from './render.js'
 import postprocess, { loadPlugin as loadPostPlugin } from './postprocess.js'
@@ -106,6 +107,10 @@ export async function setup(options) {
         queue: new Queue({ concurrency: 1 })
     }
     runtime.state = {}
+    // The engine's own diagnostics, as tools. Registered here rather than by a
+    // plugin so they exist on a bare engine — `--tool mikser_verify` must not
+    // need an agent surface configured when `--verify` does not.
+    registerBuiltinTools()
 
     onInitialize(async () => {
         runtime.engine.commander?.version(packageInfo.version)

@@ -210,6 +210,13 @@ brevity.
   tools themselves, the transport, sessions, resources and prompts.
   Dispatched at `onImport`, not `onLoaded` — the engine's own onLoaded is
   registered during setup(), ahead of the plugins that register the tools.
+- `builtin-tools.js` — the engine's own diagnostics as tools
+  (`mikser_explain`, `mikser_verify`, `mikser_build_report`). Registered
+  by the engine, not by mcp, so `--tool mikser_verify` works on a bare
+  engine exactly as `--verify` does. Schemas use a neutral
+  `{ type, required?, description? }` vocabulary; mcp converts to zod at
+  bind time, because the registry must not depend on one transport's
+  schema library.
 - `provenance.js` — where a value was WRITTEN: source, field path, line,
   column. Formats register (`registerProvenanceFormat` / `probeFormat`)
   rather than being special-cased; yaml/json/front-matter use the `yaml`
