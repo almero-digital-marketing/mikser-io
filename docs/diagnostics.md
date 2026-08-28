@@ -21,6 +21,7 @@ engine source, the entry point is missing and belongs on this page.
 | Why does this page's output look stale? | [`runtime.manifest`](#runtimemanifest) |
 | Two files seem to fight over one output | [`--explain`](#--explain-entity), [`--verify`](#--verify) |
 | Which source file produced this built output? | [`runtime.manifest`](#runtimemanifest), `mikser_which` |
+| Where was this VALUE written — file, field, line? | [`runtime.provenance`](#runtimeprovenance) |
 | What would break if I changed this file? | [`runtime.manifest`](#runtimemanifest) `affectedBy` |
 | Did my schema validate anything at all? | [`schemas.names()`](#schemasnames--schemaslookup) |
 
@@ -306,7 +307,10 @@ reporting occurrences per destination; `mikser_read_output` reads the
 bytes currently on disk for a destination, which is a different question
 from what the catalog or the manifest says should be there;
 `mikser_which` goes the other way, from a built destination back to the
-source that produced it and the line that defines a given selector; and
+source that produced it — reading recorded provenance where it exists and
+labelling each answer `meta-field` / `source-content` (recorded) or `scan`
+(not), because a recorded answer and a guessed one warrant different trust;
+and
 `mikser_update_entity({ dryRun: true })` reports the blast radius of an
 edit before making it.
 
@@ -456,6 +460,56 @@ rule, so the preview and the cycle it previews cannot disagree. What it
 cannot model is how the entity's own frontmatter would change — that is
 parsed during import, so an edit that moves `meta.layout` moves the
 destination too, and this does not see it.
+
+### `runtime.provenance`
+
+Where a value was **written** — source file, field path, line and column.
+
+| Method | Answers |
+| --- | --- |
+| `positionsFor(entity)` | `{ 'items[2].label': { line, col }, … }` for every leaf of the entity's meta |
+| `locate(entity, fieldPath)` | one position, or null |
+| `forget(id)` | drop a cached entry |
+
+The field PATH costs nothing — it comes from walking `entity.meta`, which is
+already in memory, so it is always available. Line and column need one parse
+of the raw source, and that happens **on demand**, never during a build. The
+result is cached in `mikser_provenance` against the entity's checksum, so the
+first question about a file pays one parse and every later one pays nothing
+until the file changes. A build pays nothing at all.
+
+Formats are handled by registered handlers rather than by a chain of
+`if (extension === …)`:
+
+| Format | How the position is found |
+| --- | --- |
+| yaml, json | `YAML.parseDocument` reports a range on every node; YAML is a superset of JSON, so one parse covers both |
+| front matter | the block is parsed the same way, with the line offset added back |
+| archieml | no ranges from the parser — the uuid probe below; registered by `mikser-io-aml` |
+| csv rows | synthetic entities with no file of their own; the row is located in the PARENT csv by its key; registered by `mikser-io-csv` |
+| remote (`gdrive://`, `github://`, …) | read through `readEntityContent`, so the provider dispatch applies as everywhere else |
+| assets | none — meta is synthesized, so no source position exists |
+
+`registerProvenanceFormat(name, { test, positions })` adds one; `probeFormat(name,
+{ test, parse })` is the shortcut for a parser that reports no ranges. Later
+registrations win. A format that ships in its own package registers there — the
+engine has no business knowing archieml exists.
+
+**The probe**, for a parser with no ranges: substitute a unique token for every
+value, re-parse **once** with the format's own parser, and read each position
+off wherever its token actually landed. This is mikser 4.x's `plugins/guide.js`
+mechanism with the thing that killed it removed — it re-parsed once per FIELD
+and needed worker processes and a disk cache to survive that. Positions are
+read from where tokens landed rather than from assuming a substitution matched
+the intended field, so a repeated value cannot produce a confidently wrong
+answer. There is no regex over the value, so its size is irrelevant.
+
+Enabling `provenanceComments` appends the recorded closure to a rendered page
+as an HTML comment. It is off by default and refuses to run when `--mode
+production` or `NODE_ENV=production` — injecting markers changes the bytes that
+ship, which is why the predecessor was only ever safe in development.
+`mikser_which` answers the same question against the same records without
+touching the output, and is the one to reach for.
 
 ### `layouts.inspect()`
 

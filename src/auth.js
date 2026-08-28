@@ -138,14 +138,22 @@ export async function authorize(req, verifier, { allowRemote = false, trustLoopb
             // Absent (every verifier before this existed), the answer is
             // today's: 401 invalid_token, which is right for the common case
             // and is what a client needs in order to refresh at all.
-            const refined = verifier.rejectionFor?.(req)
+            // Named fields rather than a spread: a refinement must not be
+            // able to reach `ok` or `principal`, and listing what may cross
+            // is how that stays true when someone adds a field later.
+            // `scope` is load-bearing on an insufficient_scope challenge —
+            // RFC 6750 §3.1 puts the capability the caller lacks in it, and
+            // without it the client is told it is unauthorized but not for
+            // what.
+            const { status, code, description, scope } = verifier.rejectionFor?.(req) ?? {}
             return {
                 ok: false,
-                status: refined?.status ?? 401,
+                status: status ?? 401,
                 reason: 'invalid',
-                code: refined?.code ?? 'invalid_token',
-                description: refined?.description,
-                error: refined?.description ?? 'Invalid credential',
+                code: code ?? 'invalid_token',
+                description,
+                scope,
+                error: description ?? 'Invalid credential',
             }
         }
         // Nothing presented. No `code`: RFC 6750 §3.1 says a challenge to a
