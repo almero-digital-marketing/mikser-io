@@ -1079,7 +1079,7 @@ export function isFullCycle(rt = runtime) {
 
 // ── operating-system and file-manager litter ────────────────────────────
 //
-// Exposing a source folder over a network filesystem (mikser-io-webdav) or
+// Exposing a source folder over a network filesystem (mikser-io-drive) or
 // simply opening it in a file manager drops metadata files into it. Every one
 // of them would otherwise become an entity, render a page, and appear in a
 // catalog.
@@ -1146,7 +1146,7 @@ export const JUNK_IGNORE = [
 // the engine has no business knowing what a particular library's sidecar file
 // is called. What it can provide is the mechanism: a plugin that writes
 // metadata next to content says so, and both the scan and the watcher honour
-// it. (mikser-io-webdav registers `*.nephelemeta` for exactly this reason:
+// it. (mikser-io-drive registers `*.nephelemeta` for exactly this reason:
 // the collection-level file is dot-prefixed and was already invisible, while
 // the per-file one — `page.md.nephelemeta` — is not, and was measurably
 // becoming an entity.)
