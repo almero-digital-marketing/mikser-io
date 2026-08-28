@@ -507,6 +507,8 @@ What was rendered and whether it needs redoing.
 | `recordedHashes()` | the dep-hashes dependents last saw |
 | `queryAffected(mutated)` | which query-dependent snapshots this mutation hits |
 | `snapshotsAt(destination)` | every snapshot claiming a destination — the reverse of `snapshotsFor`, and the way back from a built file to what produced it |
+| `sourcesBehind(snapshot)` | the source entities that fed one render, each with `via` naming HOW it got there (layout, partial, ref, or the recorded query it matched) |
+| `sourcesOf(destination)` | the same across every entity claiming a destination, unioned — what `mikser_which` answers from |
 | `affectedBy(entity)` | which destinations would re-render if this entity changed, each with the same `reason` the build report uses |
 | `verify({outputFolder})` | `{ verdict, missing, mismatched, unverifiable, orphaned, collisions }` — what `--verify` reports; pure, no mutations |
 | `collisions()` | destinations claimed by more than one entity, with the ids claiming each |
@@ -517,6 +519,15 @@ What was rendered and whether it needs redoing.
 destinations and a caller asking "what happened to this?" does not know
 them in advance — which is exactly the position you are in when a page
 did not change and you want to know why.
+
+`sourcesBehind` is the reverse of everything else here, and it lives in the
+engine because the `refClosure` IS the engine's record of what a render
+consumed — which is what makes the answer authoritative rather than a
+guess at which file might hold something. A bundle assembled from
+`findEntities({ collection: 'styles' })` records that query, so re-running
+it returns exactly the parts that went in. A query whose filter could not
+be serialized names no members: it invalidates on any mutation, which is
+not the same as "every entity fed this render".
 
 `affectedBy(entity)` answers the same question one step earlier: *before*
 editing a shared file, which outputs does this reach? It runs the real
