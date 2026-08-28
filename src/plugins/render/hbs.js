@@ -45,7 +45,7 @@ function* walkPartials(node) {
 // helper args) can surface them under additional keys.
 export function parseReferences(source) {
     if (typeof source !== 'string' || !source) {
-        return { variables: [], partials: [], iterations: [], helpers: [] }
+        return { variables: [], partials: [], iterations: [], assigns: [], helpers: [] }
     }
     let ast
     try {
@@ -53,28 +53,49 @@ export function parseReferences(source) {
     } catch (err) {
         // Author-side parse failure shouldn't kill inspect(). Surface
         // the message and an empty result.
-        return { variables: [], partials: [], iterations: [], helpers: [], parseError: err.message }
+        return { variables: [], partials: [], iterations: [], assigns: [], helpers: [], parseError: err.message }
     }
 
     const variables  = new Set()
-    const partials   = new Set()
+    // Keyed by name and merged across call sites, so one partial rendered
+    // eight times is one entry holding the union of what it is ever passed.
+    const partials   = new Map()
     const iterations = []
     const helpers    = new Set()
+
+    // Handlebars has no file-scoped assignment; aliases come from block
+    // params (`as |x|`), which are scoped to their block. That scope is known
+    // HERE and nowhere downstream, so paths are resolved as they are recorded
+    // rather than exported for a caller to guess at.
+    const deref = (path, scope) => {
+        if (!path) return path
+        const [head, ...rest] = String(path).split('.')
+        const base = scope[head]
+        return base ? [base, ...rest].join('.') : path
+    }
+    const record = (path, scope) => {
+        const resolved = deref(path, scope)
+        if (resolved) variables.add(resolved)
+        return resolved
+    }
+    // A partial argument's path, or null when it is a literal — a quoted
+    // string is a value the caller supplied and depends on nothing.
+    const pathOfValue = (v) => (v?.type === 'PathExpression' ? v.original : null)
 
     // Built-in block helpers that aren't user-defined and shouldn't
     // pollute the helpers set. `each` shows up as an iteration instead.
     const BUILTIN_BLOCKS = new Set(['if', 'unless', 'each', 'with', 'lookup'])
 
-    function visit(node) {
+    function visit(node, scope = {}) {
         if (!node || typeof node !== 'object') return
         switch (node.type) {
             case 'Program':
-                for (const child of node.body ?? []) visit(child)
+                for (const child of node.body ?? []) visit(child, scope)
                 break
             case 'MustacheStatement':
                 // {{path.to.var}} — record the path.
                 if (node.path?.type === 'PathExpression' && !BUILTIN_BLOCKS.has(node.path.original)) {
-                    variables.add(node.path.original)
+                    record(node.path.original, scope)
                 }
                 // {{helper arg1 arg2}} with args → it's a helper call.
                 if (node.params?.length && node.path?.original && !BUILTIN_BLOCKS.has(node.path.original)) {
@@ -82,8 +103,8 @@ export function parseReferences(source) {
                 }
                 // Walk param paths too — they're variable refs.
                 for (const param of node.params ?? []) {
-                    if (param?.type === 'PathExpression') variables.add(param.original)
-                    if (param?.type === 'SubExpression') visit(param)
+                    if (param?.type === 'PathExpression') record(param.original, scope)
+                    if (param?.type === 'SubExpression') visit(param, scope)
                 }
                 break
             case 'SubExpression':
@@ -91,55 +112,91 @@ export function parseReferences(source) {
                     helpers.add(node.path.original)
                 }
                 for (const param of node.params ?? []) {
-                    if (param?.type === 'PathExpression') variables.add(param.original)
-                    if (param?.type === 'SubExpression') visit(param)
+                    if (param?.type === 'PathExpression') record(param.original, scope)
+                    if (param?.type === 'SubExpression') visit(param, scope)
                 }
                 break
-            case 'BlockStatement':
-                // {{#each posts as |post|}}…{{/each}}
+            case 'BlockStatement': {
+                // Block params bind inside the block only, so the child scope
+                // is a copy: `{{#each a as |x|}}` must not leak `x` to whatever
+                // follows the block.
+                const inner = { ...scope }
+                const blockParam = node.program?.blockParams?.[0] ?? null
                 if (node.path?.original === 'each') {
+                    // {{#each posts as |post|}}…{{/each}}
                     const collection = node.params?.[0]?.type === 'PathExpression'
                         ? node.params[0].original
                         : null
                     if (collection) {
-                        const item = node.program?.blockParams?.[0] ?? '(each)'
-                        iterations.push({ item, collection })
-                        variables.add(collection)
+                        const resolved = record(collection, scope)
+                        iterations.push({ item: blockParam ?? '(each)', collection })
+                        // `[]` marks an ELEMENT. Without it `{{#each cases as
+                        // |c|}}{{c.specs}}` reports `cases.specs`, a key that
+                        // exists on no document — the specs are on each case.
+                        if (blockParam) inner[blockParam] = `${resolved}[]`
                     }
                 } else if (BUILTIN_BLOCKS.has(node.path?.original)) {
                     // {{#if cond}}/{{#unless cond}}/{{#with x}} — record the
                     // condition path as a variable ref.
                     for (const param of node.params ?? []) {
-                        if (param?.type === 'PathExpression') variables.add(param.original)
-                        if (param?.type === 'SubExpression') visit(param)
+                        if (param?.type === 'PathExpression') {
+                            const resolved = record(param.original, scope)
+                            // {{#with data.meta.hero as |hero|}} — the same
+                            // aliasing liquid spells `{% assign %}`.
+                            if (node.path.original === 'with' && blockParam) inner[blockParam] = resolved
+                        }
+                        if (param?.type === 'SubExpression') visit(param, scope)
                     }
                 } else {
                     // User-defined block helper.
                     if (node.path?.original) helpers.add(node.path.original)
                     for (const param of node.params ?? []) {
-                        if (param?.type === 'PathExpression') variables.add(param.original)
-                        if (param?.type === 'SubExpression') visit(param)
+                        if (param?.type === 'PathExpression') record(param.original, scope)
+                        if (param?.type === 'SubExpression') visit(param, scope)
                     }
                 }
-                if (node.program) visit(node.program)
-                if (node.inverse) visit(node.inverse)
+                if (node.program) visit(node.program, inner)
+                if (node.inverse) visit(node.inverse, scope)
                 break
+            }
             case 'PartialStatement':
-            case 'PartialBlockStatement':
+            case 'PartialBlockStatement': {
                 if (node.name?.type === 'PathExpression') {
-                    partials.add(node.name.original)
+                    const name = node.name.original
+                    const entry = partials.get(name) ?? { name, args: {}, aliases: [] }
+                    // The arguments the partial is called WITH. Dropping these
+                    // was the hole: `{{> ui/btn label=r.more}}` makes this
+                    // template depend on `r.more`, and a contract built from
+                    // one file could not see a key consumed one file down.
+                    for (const pair of node.hash?.pairs ?? []) {
+                        const path = pathOfValue(pair.value)
+                        if (path) entry.args[pair.key] = record(path, scope)
+                    }
+                    // `{{> ui/btn someContext}}` — a positional context rather
+                    // than named arguments. It rebinds the partial's root, so
+                    // it is reported as an alias with no name to bind to.
+                    for (const param of node.params ?? []) {
+                        const path = pathOfValue(param)
+                        if (path) entry.aliases.push({ from: record(path, scope), to: null })
+                    }
+                    partials.set(name, entry)
                 }
-                if (node.program) visit(node.program)
-                if (node.inverse) visit(node.inverse)
+                if (node.program) visit(node.program, scope)
+                if (node.inverse) visit(node.inverse, scope)
                 break
+            }
         }
     }
     visit(ast)
 
     return {
         variables:  Array.from(variables).sort(),
-        partials:   Array.from(partials).sort(),
+        partials:   Array.from(partials.values()).sort((a, b) => a.name.localeCompare(b.name)),
         iterations,
+        // Handlebars has no file-scoped assignment; its aliases are block
+        // params, already resolved above. Present and empty so every engine
+        // returns the same shape and no caller has to branch on the engine.
+        assigns:    [],
         helpers:    Array.from(helpers).sort(),
     }
 }
