@@ -7,6 +7,14 @@
 // the first. Closing that by adding a CLI flag per tool would drift the moment
 // anyone added a tool.
 //
+// One direction, today. The mcp plugin mirrors its registrations into here, so
+// every tool it registers is reachable from the CLI. The reverse is NOT true: a
+// tool registered directly against this registry does not appear in an MCP
+// session, because the substrate binds sessions from its own list and MCP wants
+// a zod shape for `inputSchema` while the engine is deliberately zod-free.
+// Registering through `runtime.options.mcp` therefore remains the way to reach
+// both surfaces, and that is what every tool does now.
+//
 // So the REGISTRY is substrate and the transports are consumers. ADR-0006's
 // five tests, which MCP itself failed on release cadence:
 //

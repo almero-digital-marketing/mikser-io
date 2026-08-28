@@ -334,12 +334,28 @@ only the status to branch on.
 
 The registry lives in the engine (`registerTool` / `toolNames` /
 `invokeTool`), and the transports are consumers of it. That is what makes
-the parity hold rather than decay: a tool registered by any plugin — mcp,
-layouts, vector, one written next week — is reachable from both surfaces
-the moment it exists, with no per-tool CLI code and no second list to
-keep in step. The mcp plugin still owns the tools themselves, the
-transport, sessions, resources and prompts; the engine knows only a name,
-a description, an input schema and a function.
+the parity hold rather than decay: a tool registered through
+`runtime.options.mcp` — by mcp, layouts, vector, or one written next week
+— is reachable from both surfaces the moment it exists, with no per-tool
+CLI code and no second list to keep in step. The mcp plugin still owns
+the tools themselves, the transport, sessions, resources and prompts; the
+engine knows only a name, a description, an input schema and a function.
+
+The mirroring is **one-way**: mcp's registrations flow into the engine's
+registry, not the reverse. A tool registered directly against
+`registerTool` is reachable from `--tool` but does not appear in an MCP
+session, because sessions are bound from the substrate's own list and MCP
+wants a zod shape for `inputSchema` while the engine is deliberately
+zod-free. Register through `runtime.options.mcp` to reach both.
+
+`--explain` and `--verify` predate all of this and stay as flags rather
+than becoming `--tool mikser_explain`. Both call the same engine
+functions the tools call — `explain()` and `manifest.verify()` — so there
+is no second implementation, only a second rendering. Two things justify
+the separate flags: they work with no mcp plugin configured, which
+matters for a bare `mikser --verify` in CI; and `--verify` exits `0` /
+`1` / `2` for OK / WARN / FAIL, a gate contract that `--tool`'s `0` / `1`
+cannot express.
 
 ## Over a transport
 
