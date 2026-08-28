@@ -288,8 +288,26 @@ export function createSqliteDatabase({
         const currentConfig = runtime.options.configChecksum ?? null
         const configChanged = Boolean(recordedConfig && currentConfig && recordedConfig !== currentConfig)
 
+        // Report-and-exit invocations never rebuild, so wiping for them
+        // destroys the very state they were asked to describe — and then they
+        // answer from the empty cache as though that were the answer. Measured:
+        // one `--tool mikser_query_entities` after a config edit dropped 521
+        // entities and replied `total: 0`, which reads as "there are none".
+        //
+        // The staleness is real and still worth saying out loud; what is wrong
+        // is doing something irreversible about it on a read.
+        const reportOnly = Boolean(
+            runtime.options?.explain || runtime.options?.verify
+            || runtime.options?.tool || runtime.options?.tools)
+
         let upgradedFromVersion = null
-        if (configChanged && !(recorded && recorded !== version)) {
+        if (reportOnly && ((recorded && recorded !== version) || configChanged)) {
+            logger?.warn(
+                'The cache is stale (%s changed since it was written) and this is a read-only run, '
+                + 'so it was NOT wiped — the answer below describes the last build, which may not '
+                + 'match your sources. Run a build to refresh it.',
+                configChanged ? 'config' : 'schema version')
+        } else if (configChanged && !(recorded && recorded !== version)) {
             logger?.warn(
                 'Config changed since the last run. Wiping the cache and rebuilding from sources ' +
                 '(files are the source of truth — no source data is affected). Note this tracks the ' +
@@ -297,7 +315,7 @@ export function createSqliteDatabase({
                 runtime.options.config,
             )
         }
-        if ((recorded && recorded !== version) || configChanged) {
+        if (!reportOnly && ((recorded && recorded !== version) || configChanged)) {
             // Schema mismatch on upgrade or downgrade. Per ADR-0002 the
             // files on disk are the source of truth and this database
             // is a derived cache, so the right behavior is to wipe the

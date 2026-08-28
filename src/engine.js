@@ -12,6 +12,7 @@ import { OPERATION, TASKS } from './constants.js'
 import { changeExtension, formatErrorContext, projectMeta, lookupKeys } from './utils.js'
 import { reportRendered, reportSkipped, reportError, reportWarning, renderErrorCount, emitReport, finishCycle } from './report.js'
 import { toolSchemas, invokeTool, toolResultText, toolResultFailed } from './tools.js'
+import { useDatabase } from './database/index.js'
 import render from './render.js'
 import postprocess, { loadPlugin as loadPostPlugin } from './postprocess.js'
 import map from 'p-map'
@@ -252,6 +253,23 @@ export async function setup(options) {
                 }
                 process.exit(0)
             }
+            // An empty catalog answers every question with a confident
+            // nothing — `null`, `total: 0`, "no render claims this
+            // destination" — all of which read as "the thing you asked about
+            // does not exist" when the truth is "nothing has been built here
+            // yet". Said once, before the answer, so it cannot be missed.
+            const entityCount = (() => {
+                try {
+                    return useDatabase().handle
+                        .prepare('SELECT count(*) AS n FROM mikser_entities').get()?.n ?? 0
+                } catch { return null }
+            })()
+            if (entityCount === 0 && !runtime.manifest?.size?.()) {
+                logger.warn('The catalog and manifest are empty — no build has run in this working '
+                    + 'folder. Tools answer from what the last build recorded, so this one will '
+                    + 'report nothing found. Run a build first.')
+            }
+
             let args = {}
             if (runtime.options.toolArgs) {
                 try {

@@ -310,6 +310,20 @@ npx mikser --tools
 npx mikser --tool mikser_which --tool-args '{"destination":"/bg/index.html","text":"Контакти"}'
 ```
 
+A report-and-exit run — `--explain`, `--verify`, `--tools`, `--tool` —
+never wipes the cache, even when the config or the schema version has
+moved. Wiping for one destroys the state it was asked to describe and
+then answers from the empty result as though that were the answer;
+measured, one `--tool mikser_query_entities` after an edit to
+`mikser.config.js` dropped 521 entities and replied `total: 0`. The
+staleness is still reported, loudly. A build still wipes, because a build
+is what repopulates.
+
+An empty catalog is said out loud too, before the answer: every tool
+replies `null` / `total: 0` / "no render claims this destination" when
+nothing has been built, and all of those read as "the thing you asked
+about does not exist".
+
 `--tools` lists what is registered, with `--json` for the full schemas.
 `--tool` runs one and prints its result; stdout carries only that result
 — the banner and every log line move to stderr, as under `--json` — so
