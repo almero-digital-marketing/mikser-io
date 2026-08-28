@@ -77,6 +77,15 @@ export const SNAPSHOTS_SCHEMA = `
         inputParts  TEXT,
         outputHash  TEXT,
         refClosure  TEXT,
+        -- Meta keys this render actually READ, as dotted paths.
+        --
+        -- Kept out of refClosure deliberately: those are edges to other
+        -- entities and drive invalidation, while these are property paths on
+        -- the entity's own meta and drive nothing. They exist because static
+        -- parsing structurally cannot see them: a sidecar reads meta in plain
+        -- JavaScript, and no parser for any template engine will ever find
+        -- an optional chain like row.meta?.hero?.tags.
+        metaReads   TEXT,
         renderedAt  INTEGER,
         parent      TEXT,
         PRIMARY KEY (id, destination)
@@ -197,7 +206,7 @@ function buildRefClosure(entity, deps) {
     return closure
 }
 
-function buildSnapshot(entity, deps, outputHash) {
+function buildSnapshot(entity, deps, outputHash, metaReads) {
     const snapshot = {
         id: entity.id,
         destination: entity.destination,
@@ -210,6 +219,9 @@ function buildSnapshot(entity, deps, outputHash) {
         refClosure: buildRefClosure(entity, deps),
         renderedAt: Date.now(),
     }
+    // Sorted and deduped: this is a SET of paths, and a stable order keeps a
+    // snapshot comparable between runs.
+    if (metaReads?.length) snapshot.metaReads = [...new Set(metaReads)].sort()
     if (entity.parent) snapshot.parent = entity.parent
     if (outputHash) snapshot.outputHash = outputHash
     return snapshot
@@ -226,6 +238,7 @@ function rowToSnap(row) {
         inputParts:  row.inputParts ? JSON.parse(row.inputParts) : undefined,
         outputHash:  row.outputHash ?? undefined,
         refClosure:  row.refClosure ? JSON.parse(row.refClosure) : undefined,
+        metaReads:   row.metaReads  ? JSON.parse(row.metaReads)  : undefined,
         renderedAt:  row.renderedAt ?? undefined,
         parent:      row.parent ?? undefined,
     }
@@ -239,6 +252,7 @@ function snapToRow(snap) {
         inputParts:  snap.inputParts  ? JSON.stringify(snap.inputParts) : null,
         outputHash:  snap.outputHash  ?? null,
         refClosure:  snap.refClosure  ? JSON.stringify(snap.refClosure) : null,
+        metaReads:   snap.metaReads   ? JSON.stringify(snap.metaReads)  : null,
         renderedAt:  snap.renderedAt  ?? null,
         parent:      snap.parent      ?? null,
     }
@@ -362,7 +376,7 @@ export function createManifest(db) {
         SELECT id FROM mikser_snapshots WHERE destination = ?
     `)
     const stmtLookupByDestination = db.prepare(`
-        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, renderedAt, parent
+        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, metaReads, renderedAt, parent
         FROM mikser_snapshots WHERE destination = ?
     `)
     const stmtDeleteByDestination = db.prepare(`
@@ -399,18 +413,18 @@ export function createManifest(db) {
     `)
 
     const stmtLookupById = db.prepare(`
-        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, renderedAt, parent
+        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, metaReads, renderedAt, parent
         FROM mikser_snapshots WHERE id = ? ORDER BY destination
     `)
     const stmtLookup = db.prepare(`
-        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, renderedAt, parent
+        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, metaReads, renderedAt, parent
         FROM mikser_snapshots WHERE id = ? AND destination = ?
     `)
     const stmtUpsert = db.prepare(`
         INSERT OR REPLACE INTO mikser_snapshots
-            (id, destination, inputHash, inputParts, outputHash, refClosure, renderedAt, parent)
+            (id, destination, inputHash, inputParts, outputHash, refClosure, metaReads, renderedAt, parent)
         VALUES
-            (@id, @destination, @inputHash, @inputParts, @outputHash, @refClosure, @renderedAt, @parent)
+            (@id, @destination, @inputHash, @inputParts, @outputHash, @refClosure, @metaReads, @renderedAt, @parent)
     `)
     const stmtDeleteByPK = db.prepare(`
         DELETE FROM mikser_snapshots WHERE id = ? AND destination = ?
@@ -426,7 +440,7 @@ export function createManifest(db) {
         SELECT id, destination FROM mikser_snapshots WHERE parent = ?
     `)
     const stmtSelectAll = db.prepare(`
-        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, renderedAt, parent
+        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, metaReads, renderedAt, parent
         FROM mikser_snapshots
     `)
     const stmtCount = db.prepare(`SELECT COUNT(*) AS c FROM mikser_snapshots`)
@@ -845,8 +859,8 @@ export function createManifest(db) {
         },
 
         // Record a successful render. Single INSERT OR REPLACE.
-        record(entity, deps) {
-            stmtUpsert.run(snapToRow(buildSnapshot(entity, deps)))
+        record(entity, deps, metaReads) {
+            stmtUpsert.run(snapToRow(buildSnapshot(entity, deps, undefined, metaReads)))
         },
 
         // Return the set of entity ids whose recorded snapshots have a
@@ -1140,7 +1154,7 @@ onFinalize(async () => {
 
     for await (const { output, entity, deps } of useJournal('Output', [OPERATION.RENDER])) {
         if (output?.success && !output.skipped) {
-            renderedEntries.push({ entity, deps })
+            renderedEntries.push({ entity, deps, metaReads: output.metaReads })
             if (entity.pages > 1) {
                 const parentId = entity.parent ?? entity.id
                 if (!newDestinationsByParent.has(parentId)) {
@@ -1273,10 +1287,10 @@ onFinalize(async () => {
     // `parent` is checked too, mirroring _stmtDeleteByIdOrParent — a deleted
     // parent takes its paginated children's snapshots with it.
     const recordedSnapshots = []
-    for (const { entity, deps } of renderedEntries) {
+    for (const { entity, deps, metaReads } of renderedEntries) {
         if (deleted.has(entity.id) || (entity.parent && deleted.has(entity.parent))) continue
         const outputHash = await hashOutputFile(entity.destination)
-        recordedSnapshots.push(buildSnapshot(entity, deps, outputHash))
+        recordedSnapshots.push(buildSnapshot(entity, deps, outputHash, metaReads))
     }
 
     // Apply all DB mutations atomically.

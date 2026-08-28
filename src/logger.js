@@ -31,11 +31,16 @@ import { Writable } from 'node:stream'
 import runtime from './runtime.js'
 import { useLogger } from './engine.js'
 import { onLoad } from './lifecycle.js'
+import { captureWarning } from './report.js'
 
 // Custom level — `notice` slots between info and warn. Used by mikser
 // for "the build cycle completed" / "the engine restarted" lines that
 // want visibility above info noise but aren't warnings.
 const CUSTOM_LEVELS = { notice: 35 }
+
+// pino's numeric level for warn. The report keeps warn and error apart, so
+// the capture stream matches on this exactly rather than on ">= warn".
+const WARN_LEVEL = 40
 
 // Plugin-side log transport registry — paired with `addLogTransport`
 // below. Two-state lifecycle:
@@ -157,6 +162,16 @@ export function createMikserLogger(level = 'info') {
         // raw pino record still carries `level`, so third-party
         // transports get full structured data.
         ignore:        'pid,hostname,time',
+        // The terminal gets the SENTENCE; the structured fields go to the
+        // report and to transports.
+        //
+        // Warnings carry `{ code, ...fields }` so the build report has
+        // something assertable, and pino-pretty would otherwise print that
+        // object under every one of them — turning a one-line warning into a
+        // six-line block. The fields are still on the raw record, which is
+        // what the report stream and every transport read, so nothing is lost
+        // by not showing them twice.
+        hideObject:    true,
         customLevels:  'notice:35',
         customPrettifiers: {
             level: () => '',
@@ -168,6 +183,32 @@ export function createMikserLogger(level = 'info') {
     })
 
     const streams = [{ level, stream: prettyStream }]
+
+    // The build report's `warnings` are a view of this stream rather than a
+    // channel of their own. Anything that calls logger.warn is a warning,
+    // wherever it was raised — including inside a render worker, whose logger
+    // already comes back over the IPC port and is re-emitted here, so no
+    // separate transport is needed to carry one out of a thread.
+    //
+    // Filtered to warn exactly. multistream would also hand this every error,
+    // and the report keeps those in a bucket of their own: `errors` means a
+    // render THREW and wrote nothing, which is a different fact about the
+    // build than "this shipped and it is wrong".
+    streams.push({
+        level: 'warn',
+        stream: new Writable({
+            write(chunk, _encoding, callback) {
+                for (const line of String(chunk).split('\n')) {
+                    if (!line) continue
+                    try {
+                        const record = JSON.parse(line)
+                        if (record.level === WARN_LEVEL) captureWarning(record)
+                    } catch { /* not a record we can read; the terminal still got it */ }
+                }
+                callback()
+            },
+        }),
+    })
 
     // Two sources of transports merged into one list:
     //

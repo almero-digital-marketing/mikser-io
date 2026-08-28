@@ -189,15 +189,22 @@ export function reportSkipped(entity, reason) {
     store().skipped.push({ id: entity?.id, destination: entity?.destination ?? null, reason })
 }
 
-// Called ALONGSIDE logger.warn, not instead of it: a human reading the
-// terminal still needs the sentence, and the sentence is where the
-// explanation lives. This carries the assertable part.
+// Fed by the log stream, not called directly. `warnings` is a VIEW of what
+// went through logger.warn — there is no second way to raise one, because a
+// second way is a second thing to forget: every warning the engine, a plugin,
+// or a template emits is a warn-level log record, and this is where those get
+// kept for the report.
 //
-// `code` is the contract. Add fields freely; renaming a code is a breaking
-// change to anyone asserting on it.
-export function reportWarning(code, fields = {}) {
+// So the contract is the log call: `logger.warn({ code, ...fields }, msg)`.
+// `code` is what anyone asserting on the report matches on, and renaming one
+// is a breaking change.
+//
+// Still gated on the report being wanted: in a long watch session nobody asked
+// to report on, this would otherwise grow without bound.
+export function captureWarning(record) {
     if (!reportWanted()) return
-    store().warnings.push({ code, ...fields })
+    const { level, time, pid, hostname, msg, ...fields } = record
+    store().warnings.push({ ...fields, ...(msg ? { message: msg } : {}) })
 }
 
 // A render that RAN and THREW. Recorded unconditionally — not gated on

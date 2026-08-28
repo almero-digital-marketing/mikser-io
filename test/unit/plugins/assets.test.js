@@ -334,7 +334,14 @@ describe('assets plugin: a preset that matched nothing', () => {
             const warnings = h.logs.filter(l =>
                 l.level === 'warn' && l.args.join(' ').includes('Assets preset'))
             assert.equal(warnings.length, 1, `expected one warning, got ${warnings.length}`)
-            const text = format(...warnings[0].args)
+            // Structured first, sentence second — the call is
+            // logger.warn({ code, ... }, msg, ...values), so the fields the
+            // report keys on are the first argument and the message is what
+            // follows it.
+            const [fields, ...message] = warnings[0].args
+            assert.equal(fields.code, 'preset-no-match', 'carries the code the report is asserted on')
+            assert.equal(fields.preset, 'thumb')
+            const text = format(...message)
             assert.match(text, /"thumb"/, 'names the preset that matched nothing')
             assert.ok(!text.includes('"resize"'), 'does not name the preset that matched')
             assert.match(text, /\/files\/media\/devices/, 'quotes the patterns')

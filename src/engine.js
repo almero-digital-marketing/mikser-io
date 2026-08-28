@@ -10,7 +10,7 @@ import { useJournal, updateEntry } from './journal.js'
 import { globby } from 'globby'
 import { OPERATION, TASKS } from './constants.js'
 import { changeExtension, formatErrorContext, projectMeta, lookupKeys } from './utils.js'
-import { reportRendered, reportSkipped, reportError, reportWarning, renderErrorCount, emitReport, finishCycle } from './report.js'
+import { reportRendered, reportSkipped, reportError, renderErrorCount, emitReport, finishCycle } from './report.js'
 import { toolSchemas, invokeTool, toolResultText, toolResultFailed } from './tools.js'
 import { registerBuiltinTools } from './builtin-tools.js'
 import { useDatabase } from './database/index.js'
@@ -22,7 +22,7 @@ import packageInfo from '../package.json' with { type: 'json' }
 import { attachServerCliOptions, setupServer } from './server.js'
 import { createMikserLogger } from './logger.js'
 import { inputHashOf } from './utils.js'
-import { createTrack } from './track.js'
+import { createTrack, mergeTrack } from './track.js'
 import { queryContext } from './database/query-context.js'
 
 // Build a structuredClone-safe copy of runtime.options for WORKER
@@ -39,6 +39,26 @@ import { queryContext } from './database/query-context.js'
 // out — workers don't need them; they have access to the catalog via
 // their own sqlite handle and call back into the engine via the IPC
 // port for logging.
+// The parent half of the worker IPC port, shared by the render and
+// postprocess paths because they carry the same traffic.
+//
+// A worker is a separate thread with its own runtime singleton, so it cannot
+// reach `runtime.state.report`. It does not need to: `logger` is the only
+// passenger, and re-emitting a worker's record here puts it through the parent's
+// own streams — including the one the report reads. A warning raised inside a
+// render therefore lands in the report by the same route as its message reaches
+// the terminal, with no second channel to keep in step.
+function workerMessages() {
+    return event => {
+        const message = JSON.parse(event.data)
+        switch (message.command) {
+            case 'logger':
+                runtime.engine.logger[message.data.log](...message.data.args)
+                break
+        }
+    }
+}
+
 function workerSafeOptions(opts) {
     const result = {}
     for (const [k, v] of Object.entries(opts)) {
@@ -517,7 +537,11 @@ export async function setup(options) {
                 // those renders get layout-only deps (added by
                 // manifest.collectEdges) and rely on coarser
                 // invalidation. INLINE is the default mode.
-                const track = createTrack()
+                // `meta: true` turns on read-recording over the entity's own
+                // meta. Opt-out rather than opt-in: a contract that is only
+                // correct when someone remembered to enable it is a contract
+                // nobody can rely on. Set `metaReads: false` to switch it off.
+                const track = createTrack({ meta: runtime.options.metaReads !== false })
                 const renderOptions = {
                     entity: renderEntity,
                     options: {
@@ -562,12 +586,7 @@ export async function setup(options) {
                                 return undefined
                             case TASKS.WORKER:
                                 const mc = new MessageChannel();
-                                mc.port2.onmessage = event => {
-                                    const message = JSON.parse(event.data)
-                                    if (message.command == 'logger') {
-                                        runtime.engine.logger[message.data.log](...message.data.args)
-                                    }
-                                }
+                                mc.port2.onmessage = workerMessages()
                                 mc.port2.unref()
                                 renderOptions.port = mc.port1
                                 // Strip plugin-surface functions
@@ -595,10 +614,57 @@ export async function setup(options) {
                                 )
                         }
                     })
+
+                    // One shape from both dispatch modes. A worker returns its
+                    // track's CONTENTS alongside the output, because the track
+                    // itself could not be sent to it — folding them in here is
+                    // what gives a worker render the same partial, lookup and
+                    // meta-read deps an inline one has always had.
+                    const rendered = result
+                    result = rendered?.output
+                    if (rendered?.track) mergeTrack(track, rendered.track)
+
                     if (!signal.aborted) {
+                        // Meta reads ride on `output`, which is already
+                        // free-form JSON on the journal row, rather than in
+                        // `deps`: deps is the edge list that drives
+                        // invalidation, and a property path is not an edge.
+                        //
+                        // Both halves are merged here. The template's reads
+                        // come through the render track; the SIDECAR's come
+                        // through the context, because a sidecar runs earlier,
+                        // in the layouts plugin, against its own track — and
+                        // the sidecar is the half no parser can see.
+                        const metaReads = [
+                            ...(track?.metaReads ?? []),
+                            ...(context?.sidecarMetaReads ?? []),
+                        ]
                         entry.output = {
                             success: true,
                             result,
+                            ...(metaReads.length ? { metaReads: [...new Set(metaReads)].sort() } : {}),
+                        }
+                        // A render that produced nothing at all. Distinct from
+                        // a render that THREW, which lands in `errors` and
+                        // leaves the previous good bytes on disk: this one
+                        // succeeded, wrote an empty file over whatever was
+                        // there, and counted itself in `rendered`.
+                        //
+                        // Deliberately narrow. It catches total failure, not a
+                        // page that rendered its chrome and lost its content —
+                        // that output is not empty and this will not see it.
+                        // Only a string can be judged; a renderer returning
+                        // some other shape is left alone rather than guessed at.
+                        if (typeof result === 'string' && result.trim() === '') {
+                            logger.warn(
+                                { code: 'empty-output', entity: entity.id,
+                                  layout: entity.meta?.layout ?? null,
+                                  destination: entity.destination ?? null },
+                                'Rendered %s to an EMPTY file at %s. The render succeeded, so this is not in ' +
+                                'errors — but it overwrote the destination with nothing. Usually the layout ' +
+                                'produced no output for this entity: check that it matched the layout you expect ' +
+                                'and that the branch it took writes something.',
+                                entity.name || entity.id, entity.destination ?? '(no destination)')
                         }
                         // Manifest owns the refClosure schema; we just
                         // hand it the entity, the track, and the sidecar
@@ -694,8 +760,8 @@ export async function setup(options) {
         for (const [destination, ids] of renderedTo) {
             if (ids.size < 2) continue
             const entities = [...ids].sort()
-            reportWarning('destination-collision', { destination, entities })
             logger.warn(
+                { code: 'destination-collision', destination, entities },
                 'Destination collision: %s written by %d entities in this cycle (%s). '
                 + 'One overwrote the other — whichever rendered last wins.',
                 destination, entities.length, entities.join(', '),
@@ -843,12 +909,7 @@ export async function setup(options) {
                                 // Stateless postprocessors (post-mjml) work
                                 // out-of-the-box.
                                 const mc = new MessageChannel()
-                                mc.port2.onmessage = event => {
-                                    const message = JSON.parse(event.data)
-                                    if (message.command == 'logger') {
-                                        runtime.engine.logger[message.data.log](...message.data.args)
-                                    }
-                                }
+                                mc.port2.onmessage = workerMessages()
                                 mc.port2.unref()
                                 postprocessOptions.port = mc.port1
                                 // Same options-sanitization as the render

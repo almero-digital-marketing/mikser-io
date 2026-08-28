@@ -40,7 +40,7 @@ export function filterKey(filter) {
 // The returned object exposes `partials: Set<string>` and
 // `queries: Array<filter | null>` directly. Consumers iterate either
 // shape; both are owned by the track for the lifetime of the run.
-export function createTrack({ partial = true, query = true, lookup = true } = {}) {
+export function createTrack({ partial = true, query = true, lookup = true, meta = false } = {}) {
     const track = {}
     if (lookup) {
         // Lookups a TEMPLATE made by name: runtime.href('/contacts'),
@@ -84,6 +84,22 @@ export function createTrack({ partial = true, query = true, lookup = true } = {}
         track.partials = partials
         track.partial = (target) => { if (target) partials.add(target) }
     }
+    if (meta) {
+        // Which keys of the entity's own meta the render actually READ.
+        //
+        // Not an edge, and deliberately kept out of the refClosure: these are
+        // property paths on the entity itself, not references to other
+        // entities, and inserting them into mikser_refs would put noise in the
+        // invalidation graph.
+        //
+        // The point is what static parsing structurally cannot see. A layout's
+        // contract is assembled by walking templates, but a sidecar reads meta
+        // in plain JavaScript — `row.meta?.hero?.tags` — and no parser for any
+        // engine will ever find that. Observing the read is the only way.
+        const metaReads = new Set()
+        track.metaReads = metaReads
+        track.metaRead = (path) => { if (path) metaReads.add(path) }
+    }
     if (query) {
         const queries = []
         const queryKeys = new Set()
@@ -97,4 +113,112 @@ export function createTrack({ partial = true, query = true, lookup = true } = {}
         }
     }
     return track
+}
+
+// Property paths that say nothing about the data. Reading `.length` to
+// iterate, or `.toJSON` because something serialized, is not a template
+// depending on a key — recording them would bury the real ones.
+const UNINTERESTING = new Set([
+    'length', 'constructor', 'prototype', 'toJSON', 'toString', 'valueOf',
+    'then', 'inspect', 'nodeType', 'hasOwnProperty', 'isPrototypeOf',
+    'propertyIsEnumerable', 'toLocaleString',
+])
+
+// A read-recording view of a value.
+//
+// Every property access is reported as a dotted path and the result is wrapped
+// again, so `data.meta.hero.tags` is recorded a segment at a time and deep
+// reads are captured without knowing the shape in advance.
+//
+// Engine-agnostic by construction, which is the whole reason it is worth
+// having: it never sees a template. Whatever reads the object is recorded —
+// liquid, handlebars, eta, a sidecar's plain JavaScript, a helper — because
+// they all reach the data through this one object.
+//
+// Array indices collapse to a single `[]` marker rather than `0`, `1`, `2`.
+// The contract wants "each case has specs", not "case 7 has specs", and the
+// static closure already speaks that vocabulary, so the two line up.
+//
+// Proxies are cached per underlying object so that identity holds within one
+// render: code doing `a.b === a.b` keeps working, and a cyclic structure does
+// not recurse forever.
+export function recordReads(value, path, record, cache = new WeakMap()) {
+    if (value === null || typeof value !== 'object') return value
+    const hit = cache.get(value)
+    if (hit) return hit
+
+    const isArray = Array.isArray(value)
+    const proxy = new Proxy(value, {
+        get(target, prop, receiver) {
+            const out = Reflect.get(target, prop, receiver)
+            // Symbols are iteration and type-coercion machinery, never keys an
+            // author writes.
+            if (typeof prop === 'symbol' || UNINTERESTING.has(prop)) return out
+            if (typeof out === 'function') return out
+            // Only properties the object ACTUALLY HAS.
+            //
+            // Template engines probe for protocol members on every value they
+            // touch — LiquidJS asks for `toLiquid`, iteration asks for `next` —
+            // and recording those would put engine machinery in a document's
+            // contract, differently per engine, which is exactly the coupling
+            // this is supposed to avoid.
+            //
+            // Absent keys are not lost by this: a template naming a key the
+            // document lacks is the STATIC closure's business, and it reports
+            // it. This half answers the other question — what was actually
+            // read — and a probe for a property that is not there read nothing.
+            if (!Object.hasOwn(target, prop)) return out
+
+            const isIndex = isArray && /^\d+$/.test(prop)
+            const childPath = isIndex
+                ? `${path}[]`
+                : (path ? `${path}.${prop}` : String(prop))
+            record(childPath)
+            return recordReads(out, childPath, record, cache)
+        },
+        // Kept truthful so `in`, spread and Object.keys behave exactly as they
+        // would without the proxy. A view that changed the answers would be a
+        // worse bug than the blindness it is fixing.
+        has(target, prop) { return Reflect.has(target, prop) },
+        ownKeys(target) { return Reflect.ownKeys(target) },
+        getOwnPropertyDescriptor(target, prop) { return Reflect.getOwnPropertyDescriptor(target, prop) },
+    })
+    cache.set(value, proxy)
+    return proxy
+}
+
+// A track's CONTENTS, as plain data that survives structured clone.
+//
+// A track is an object of closures, so it cannot be handed to a worker — which
+// is why worker renders used to be dispatched without one and fell back to
+// layout-only deps. The closures are what cannot cross; the collected data can.
+// So the worker builds its own track and returns this on the way back.
+//
+// Deliberately NOT the logger pattern. The logger proxies each call over the
+// IPC port because a log line arriving late costs nothing. Dependencies are
+// different: `collectEdges` runs on the line after the render is awaited, and
+// the port is a SEPARATE channel from the one carrying the result, so nothing
+// orders the last message before the promise resolves. A dep that lost the race
+// would be silently missing from a green build. Returning the data with the
+// result is ordered by construction.
+export function serializeTrack(track) {
+    if (!track) return null
+    return {
+        partials:  track.partials  ? [...track.partials]  : undefined,
+        queries:   track.queries   ? [...track.queries]   : undefined,
+        metaReads: track.metaReads ? [...track.metaReads] : undefined,
+        lookups:   track.lookups   ? [...track.lookups].map(([k, v]) => [k, [...v]]) : undefined,
+    }
+}
+
+// Fold serialized contents back into a live track. Every slot is a set, so a
+// merge is idempotent and an inline render folding its own data back into
+// itself changes nothing.
+export function mergeTrack(target, data) {
+    if (!target || !data) return target
+    for (const p of data.partials  ?? []) target.partial?.(p)
+    for (const q of data.queries   ?? []) target.query?.(q)
+    for (const m of data.metaReads ?? []) target.metaRead?.(m)
+    for (const [name, ids] of data.lookups ?? []) target.lookup?.(name, ids)
+    return target
 }

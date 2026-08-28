@@ -5,7 +5,6 @@ import { createRequire } from 'node:module'
 import { globby } from 'globby'
 import _ from 'lodash'
 import map from 'p-map'
-import { reportWarning } from '../report.js'
 import { isFullCycle } from '../utils.js'
 
 // Normalize a `options.presets[name]` value to a consistent
@@ -134,8 +133,8 @@ export function assets(options = {}) {
         for (const preset of configured) {
             if (matchTally.matched.has(preset)) continue
             const { matches } = normalizePresetConfig(options.presets[preset])
-            reportWarning('preset-no-match', { preset, evaluated: matchTally.evaluated, patterns: matches })
             logger.warn(
+                { code: 'preset-no-match', preset, evaluated: matchTally.evaluated, patterns: matches },
                 'Assets preset %j matched none of the %d entities evaluated (patterns: %s). ' +
                 'Patterns run against entity.id, which files({ outputFolder }) does NOT prefix — ' +
                 'the prefix appears on name and meta.url only.',

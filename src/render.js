@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from 'node:fs'
 import { readFile, unlink } from 'node:fs/promises'
 import { createRequire } from 'node:module'
+import { createTrack, recordReads, serializeTrack } from './track.js'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import _ from 'lodash'
@@ -8,6 +9,12 @@ import Database from 'better-sqlite3'
 import { useLogger } from './engine.js'
 import { formatLogArgs } from './utils.js'
 import engineRuntime from './runtime.js'
+// The report code every template-raised warning carries. Templates pass a
+// sentence, not a code — the one caller that predates this passes
+// "📊 Rendering report ..." — so the code is fixed here and the sentence
+// travels as `message`. Renaming this is a breaking change to anyone
+// asserting on it (see report.js).
+const TEMPLATE_WARNING = 'template-warning'
 
 // Worker-side sqlite handle. Opened lazily on first render task (we
 // only know the workingFolder/runtimeFolder once we receive a task —
@@ -93,6 +100,18 @@ function lookupUrlViaDb(ref, preset, origin, track) {
 }
 
 export default async ({ entity, options, config, context, state, logger, port, track }) => {
+    // A worker is dispatched WITHOUT a track: it is an object of closures, and
+    // those cannot be structured-cloned across a thread boundary. Dropping it
+    // was why worker renders fell back to layout-only deps — every partial the
+    // template pulled in and every href it resolved went unrecorded, so a
+    // change to one of them did not re-render the page that used it.
+    //
+    // The closures are the part that cannot cross. The collected data is not,
+    // so the worker makes its own track here and returns its CONTENTS with the
+    // result, where the engine folds them into the real one.
+    const ownTrack = !track
+    track = track ?? createTrack({ meta: options?.metaReads !== false })
+
     logger = logger || {
         info(...args) {
             port.postMessage(JSON.stringify({ command: 'logger', data: { log: 'info', args } }))
@@ -183,12 +202,39 @@ export default async ({ entity, options, config, context, state, logger, port, t
 
     ensureWorkerDb(options)
 
+    // Read-recording views of the data a template renders from.
+    //
+    // This is the half of a layout's contract that static parsing cannot
+    // reach. Walking templates finds what the TEMPLATES read; it cannot find
+    // what a sidecar or a helper reads, because that is plain JavaScript with
+    // no syntax to parse. Observing the access is the only way, and observing
+    // it here — on the one object every engine receives — makes it
+    // engine-agnostic by construction rather than by porting effort.
+    //
+    // Prefixed `data.meta.` to match the vocabulary the static closure already
+    // reports, so the two can be compared without translating between them.
+    const view = track?.metaRead
+        ? (value, prefix) => (value && typeof value === 'object'
+            ? recordReads(value, prefix, track.metaRead)
+            : value)
+        : (value) => value
+
+    // The entity is copied rather than proxied whole: `entity.id`,
+    // `entity.layout` and `entity.destination` are engine plumbing, read all
+    // over this file, and recording them as content keys would be noise.
+    // Only `meta` is content.
+    const observed = track?.metaRead && entity?.meta
+        ? { ...entity, meta: view(entity.meta, 'data.meta') }
+        : entity
+
     const runtime = {
-        [entity.type]: entity,
-        entity,
+        [entity.type]: observed,
+        entity: observed,
         plugins,
         config: config[`render-${renderer}`],
-        data: context.data,
+        data: context.data && typeof context.data === 'object' && context.data.meta
+            ? { ...context.data, meta: view(context.data.meta, 'data.meta') }
+            : context.data,
         // Worker-side catalog lookup by href. Replaces the previous
         // state.layouts.sitemap map that was serialized per render
         // task. Goes through the same WAL-backed read-only handle
@@ -231,7 +277,15 @@ export default async ({ entity, options, config, context, state, logger, port, t
         // specifiers. Handlebars appends an internal options object as
         // the last arg, which we strip before joining.
         log: (...args) => (useLogger() ?? logger).info(formatLogArgs(args)),
-        warn: (...args) => (useLogger() ?? logger).warn(formatLogArgs(args)),
+        // `warn` carries structure the other four do not, because it is the
+        // one level that ends up in the build report — and a warning that
+        // cannot be traced to a page is barely a warning. The message stays
+        // exactly what the template passed; the fields are what a test matches
+        // on. In a worker this record travels the same IPC port as any other
+        // log, which is the whole reason no separate channel is needed.
+        warn: (...args) => (useLogger() ?? logger).warn(
+            { code: TEMPLATE_WARNING, entity: entity.id, layout: entity.meta?.layout ?? null },
+            formatLogArgs(args)),
         error: (...args) => (useLogger() ?? logger).error(formatLogArgs(args)),
         debug: (...args) => (useLogger() ?? logger).debug(formatLogArgs(args)),
         trace: (...args) => (useLogger() ?? logger).trace(formatLogArgs(args)),
@@ -244,7 +298,13 @@ export default async ({ entity, options, config, context, state, logger, port, t
     }
 
     const rendererPlugin = plugins[`render-${renderer}`]
-    return await rendererPlugin?.render({ entity, options, config: rendererPlugin?.options, context, plugins, runtime, state, logger, track })
+    const output = await rendererPlugin?.render({ entity, options, config: rendererPlugin?.options, context, plugins, runtime, state, logger, track })
+
+    // One shape for both dispatch modes, so the engine unpacks in one place
+    // rather than branching on how the render happened. An inline render folds
+    // its own contents back into the track it was handed, which is a no-op —
+    // every slot is a set.
+    return { output, track: ownTrack ? serializeTrack(track) : null }
 }
 
 // Build the error thrown when a submitted entity goes through a full
