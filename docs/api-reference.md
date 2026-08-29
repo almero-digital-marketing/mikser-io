@@ -552,6 +552,9 @@ exactly the one that needs telling.
 
 `siblingDestinations(folder, relativePath)` reports files differing only by
 extension, which may render to the same destination.
+`locateEntityFile(id)` resolves a catalog id to its `{ collection, relativePath }`,
+or `{ error }` — taken from the entity rather than by splitting the id, since the
+prefix is configurable and the extension may have been stripped.
 
 ## Search
 
@@ -614,6 +617,299 @@ flag separates the file **declaring** something from the files merely using
 it, in any text format, with no per-language grammar involved. It returns the
 line rather than a verdict about it, so where the heuristic is wrong the
 evidence is in the result.
+
+## Content
+
+Reading an entity's source, and deciding what "source" even means for it.
+
+### `readEntityContent(entity, { reload } = {})`
+
+Returns one of `{ content }`, `{ contentError }`, `{ contentSkipped }` — an
+object to `Object.assign` onto the entity, or use directly. Dispatches by URI
+scheme: plain paths and `file://` read from disk, `http(s)://` goes through the
+built-in provider, anything else dynamic-imports `mikser-io-provider-<scheme>`.
+
+`entity.content` already being a string short-circuits the whole dispatch, which
+spares re-fetching a remote document a source plugin eagerly pulled in. Pass
+`reload: true` when you want the bytes **as they are now** — between builds the
+catalog copy and the file on disk part ways, and a whole-file rewrite built from
+the catalog copy silently discards whatever changed underneath. An entity with
+no `uri` keeps what it has rather than erroring.
+
+### `looksTextual(buffer)` / `isTextEntity(entity)`
+
+`looksTextual` answers "is this text?" from the BYTES: no NUL and a clean UTF-8
+decode. This is what decides whether content comes back, and it is why a
+`.liquid`, `.njk`, `.toml` or a format nobody has written yet is readable
+without being added to a list first.
+
+`isTextEntity` is a cheap extension guess with no I/O. It is a **hint** — the
+extension list behind it is hand-maintained and therefore wrong about anything
+not yet added. Never gate a read on it.
+
+### `mimeForEntity(entity)`
+
+Content type for the entity's `destination`, from the IANA registry via
+`mime-types`. Null when the entity has no destination or the extension is
+unregistered.
+
+### `checksumOf(content)` / `checksum(uri)`
+
+`checksumOf` hashes a string; `checksum` hashes a file, sampling head and tail
+for large ones rather than reading the whole thing.
+
+## Collections and sources
+
+### `useCollection(runtime, name)`
+
+The folder behind a collection, and guarded writes into it.
+
+```js
+const documents = useCollection(runtime, 'documents')
+documents.folder                          // absolute path
+await documents.write('blog/post.md', text)
+await documents.remove('blog/post.md')
+documents.resolveWithin('blog/post.md')   // absolute path, or throws
+```
+
+`write`, `remove` and `resolveWithin` refuse a path that resolves outside the
+collection folder. This matters whenever the path comes from a request body or
+a form: joining a folder with `../../x` lands outside it. The path is resolved
+and then contained rather than rejected on a literal `..`, so `blog/../post.md`
+still works.
+
+### `useSource(core, options)`
+
+Codifies the folder-of-files pattern: scan a folder, emit entities, watch for
+changes, sweep deletions.
+
+| Option | Meaning |
+| --- | --- |
+| `collection`, `type`, `folder` | Required. |
+| `extensions` | Default `['*']`. |
+| `ignore` | Glob patterns to skip. |
+| `phase` | `'loaded'` (default) or another lifecycle phase. |
+| `content` | Load file content into the entity at sync time. |
+| `load` | `async (entity) => meta` — your parse step. |
+| `idPrefix` | Defaults to `/<collection>`. |
+| `stripExtensionFromId` | Default false (documents style). |
+| `progress` | Progress label. |
+
+### `sweepDeleted(collection, scanned, onDelete, ownerPrefix)`
+
+Removes catalog entities whose files are gone. **`ownerPrefix` is mandatory and
+load-bearing.** Collections are multi-emitter: the file source scans a folder,
+but a CSV plugin fans rows into the same collection, and a remote sync emits
+there with a `gdrive://` uri. The sweep only considers entities whose `uri` is
+rooted under the prefix — without it, every cycle's file sweep wipes every
+other emitter's entities.
+
+### `useRenderer(runtime, { defaultTimeout } = {})`
+
+Returns `{ render }` — the batching renderer the engine dispatches through,
+with a per-task timeout (default 30s). A plugin that needs to render something
+outside the normal cycle goes through this rather than importing a renderer
+package directly.
+
+## Query context
+
+`queryContext` is the `AsyncLocalStorage` that lets a catalog query made during
+a render record itself as a dependency, so an aggregate page invalidates when a
+new matching entity lands.
+
+It only works if the whole tree shares ONE module instance of `mikser-io`. In
+the side-by-side dev layout that means the npm workspace at the parent folder
+is not ergonomics but correctness: without it, npm installs a second copy into
+a sibling's own `node_modules`, a plugin's `queryContext` is then a different
+AsyncLocalStorage than the engine's, queries record no edges, and index pages,
+sitemaps and feeds silently stop rebuilding. Production consumers resolve both
+from their own tree, so the problem is local to the dev workspace.
+
+## Auth
+
+Building a token-gated or loopback-only route.
+
+| Export | Does |
+| --- | --- |
+| `resolveAuth(config)` | build a verifier from endpoint config |
+| `requireAuth(verifier, options)` | Express middleware |
+| `authorize(req, verifier, { allowRemote, trustLoopback })` | the check itself |
+| `bearer({ token, name, subject, capabilities, scope })` | a static-token verifier |
+| `loopbackOnly({ message })` | middleware refusing non-loopback callers |
+| `hasCapability(principal, capability)` | test a resolved principal |
+
+A principal may carry a `scope` — a sift filter that narrows what it can see.
+Anything reading content on a principal's behalf must apply it; see the warning
+under [Search](#search) for why an unscoped read behind a scoped endpoint is
+the failure mode to watch for.
+
+## References
+
+The `$`-keyed reference graph (ADR-0007), reachable at `runtime.refs` or via
+`useRefsIndex()`.
+
+| Method | Answers |
+| --- | --- |
+| `inboundFor(target)` / `outboundFor(source)` | static `$`-ref edges |
+| `dynamicInboundFor` / `dynamicOutboundFor` | render-time edges (layout, partial, query, lookup) |
+| `inverseClosureOf(seeds)` | everything reachable backwards — what invalidation walks |
+| `resolveRefIds(ref)` | which entities a ref string resolves to |
+| `rename({ from, to })` | rewrite refs across the catalog, as one cascade |
+| `allRefs()` / `size()` | inventory |
+
+### `refFilter(ref)` / `matchesRef(entity, ref)` / `lookupKeys(entity)`
+
+One relation in three directions — as a catalog query, as a predicate, and in
+reverse. **They must be changed together.** A key present in one and missing
+from the others is silent: `meta.url` once lived only in `refFilter`, which
+made every `$`-ref to a served path non-invalidating without any error
+anywhere.
+
+### `extractRefs(meta)` / `isRefKey(key)` / `expandEntity(entity, paths, options)` / `projectMeta(meta)`
+
+Find the `$`-keys in a meta tree, test one key, inline referenced entities
+along dotted paths, and drop `$`-keys for output.
+
+## Provenance
+
+Where a value was **written** — source file, field path, line, column.
+
+```js
+const positions = await useProvenance().positionsFor(entity)
+// { 'items[2].label': { line, col }, … }
+```
+
+| Method | Answers |
+| --- | --- |
+| `positionsFor(entity)` | every leaf of the entity's meta |
+| `locate(entity, fieldPath)` | one position, or null |
+| `forget(id)` | drop a cached entry |
+| `size()` | how many entries are cached |
+
+Field paths are free — they come from walking meta, already in memory. Line and
+column need one parse of the raw source, done **on demand** and cached against
+the entity's checksum, so a build pays nothing.
+
+`registerProvenanceFormat(name, { test, positions })` adds a format rather than
+special-casing one. A format whose parser reports no ranges registers a
+`probeFormat(name, { test, parse })` instead, which recovers positions in one
+pass without the parser's help.
+
+## Manifest and outputs
+
+`runtime.manifest` holds render snapshots. Full treatment lives in
+[diagnostics.md](diagnostics.md) — indexed by the question each surface
+answers — but the ones an application reaches for:
+
+| Method | Answers |
+| --- | --- |
+| `affectedBy(entity)` | which destinations would re-render if this changed |
+| `collisions()` | destinations more than one entity writes to |
+| `snapshotsFor(id)` / `snapshotsAt(destination)` | what rendered, and from what |
+| `skipDecision(entity, …)` | the engine's own skip rule, with the reason |
+
+`sourcesOf(destination)` is the reverse lookup: what produced this built file,
+each tagged with how it got there. `sourcesBehind(snapshot)` does the same from
+a snapshot you already hold. `resolveOutputPath(destination)` maps a
+destination to a path on disk, and `writeOutput(file, bytes)` writes one.
+
+## Tools
+
+The tool registry — named, described, invokable capabilities. Two agent
+workflows exist and are equally real: one speaking MCP over HTTP, one running
+the CLI and reading its output. A tool registered here reaches both.
+
+```js
+registerTool('audit', {
+    description: 'What this answers, in prose an agent will actually read.',
+    inputSchema: { path: { type: 'string', required: true } },
+}, async ({ path }) => ok({ … }))
+```
+
+`invokeTool(name, args)` runs one — it accepts the bare name or the `mikser_`
+prefixed form. `toolNames()`, `toolSchema(name)` and `toolSchemas()` enumerate.
+`toolResultText(result)` pulls the text back out of a tool result, and
+`toolResultFailed(result)` says whether it failed.
+
+The registry is deliberately zod-free: schemas use a neutral
+`{ type, required?, description? }` vocabulary, because it must not depend on
+one transport's schema library. `mikser-io-mcp` converts to zod at bind time.
+
+## Routes
+
+An Express router stack has the paths but not the intent. Plugins declare each
+mount as they make it, so a facade generator, a healthcheck list or a
+diagnostics view can read one inventory.
+
+```js
+registerRoute({
+    path: '/api',
+    plugin: 'api',
+    reachability: 'public',   // 'public' | 'token' | 'loopback'
+    streaming: false,         // true for SSE/WS, which a facade must not buffer
+})
+```
+
+`registerRoute` also folds in the origin/URL building and the standard boot
+log. `listRoutes()` returns the inventory; `reachabilityOf` and `routeLocation`
+answer about one route. `isLoopback(ip)` is the check behind
+`reachability: 'loopback'` — note that the server's trust-proxy default is
+`'loopback'`, not Express's `false`, which is what keeps that gate correct
+behind a same-host reverse proxy.
+
+## Cycles and the build report
+
+`nextCycleId()` reserves the id of the cycle a pending change will be picked up
+by; `whenCycleCompletes(id)` resolves once it finishes, with its report.
+Together they turn "write and guess" into one call that says what the edit
+invalidated. `currentCycle()` and `buildReport()` read the cycle in progress and
+the last completed report.
+
+## Logging
+
+`addLogTransport({ target, options, level })` adds a pino transport from a
+plugin factory or any later hook. Called before the logger is built, it queues;
+after, it live-rebuilds the multistream. This is what lets Better Stack,
+Datadog, Loki, Axiom or Sentry ship as ordinary sibling plugins with no engine
+change per vendor.
+
+Prefer this over `runtime.config.logging.transports` from plugin code — the
+declarative form is for user config.
+
+## Junk
+
+`registerJunk({ ignore, match })` teaches the engine to skip editor and OS
+debris; `isJunkPath(filePath)` asks.
+
+## What is not here
+
+Plugin factories — `yaml()`, `json()`, `frontMatter()`, `assets()`,
+`resources()`, `shares()`, `observer()`, `mapper()`, `commands()`,
+`renderHbs()` — are configured rather than called, and live in
+[configuration.md](configuration.md).
+
+`mikser-io` exports more than this page covers, deliberately. Five kinds of
+export are engine plumbing:
+
+- **Factories the engine calls once** — `createManifest`, `createRefs`,
+  `createProvenance`, `createSqliteDatabase`, `createTrack`, `createIndex`,
+  `createSubscribers`.
+- **Schema constants** the test suites build against rather than copying —
+  `SNAPSHOTS_SCHEMA`, `REFS_SCHEMA`, `FAILURES_SCHEMA`, `PROVENANCE_SCHEMA`.
+- **Report and cycle internals** — `reportRendered`, `reportSkipped`,
+  `reportError`, `emitReport`, `resetReport`, `finishCycle`, `inputHashOf`.
+- **Render-time tracking** — `recordReads`, `untrack`, `trackedInfo`,
+  `serializeTrack`, `mergeTrack`, `observeConsumed`. These implement
+  dependency recording; a plugin observes its RESULTS through
+  `runtime.manifest` and `runtime.refs` instead.
+- **Template helper plumbing** — `assetUrlHelper`, `resourceUrlHelper`,
+  `hrefUrlHelpers`, `fileHelpers`, `renderPreset`, wired into renderers rather
+  than called.
+
+They are exported because the engine's own modules and its test suite need them
+across file boundaries, not as an invitation. If you find yourself reaching for
+one from a plugin, that is worth raising — it usually means a capability is
+missing from the surface above.
 
 ## Database
 
