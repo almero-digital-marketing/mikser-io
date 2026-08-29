@@ -1,7 +1,7 @@
 import { readFileSync, existsSync } from 'node:fs'
 import { readFile, unlink } from 'node:fs/promises'
 import { createRequire } from 'node:module'
-import { createTrack, recordReads, serializeTrack } from './track.js'
+import { createTrack, recordReads, serializeTrack, observeConsumed } from './track.js'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import _ from 'lodash'
@@ -110,7 +110,8 @@ export default async ({ entity, options, config, context, state, logger, port, t
     // so the worker makes its own track here and returns its CONTENTS with the
     // result, where the engine folds them into the real one.
     const ownTrack = !track
-    track = track ?? createTrack({ meta: options?.metaReads !== false })
+    track = track ?? createTrack({ meta: options?.metaReads !== false,
+                                   consumed: options?.metaReads !== false })
 
     logger = logger || {
         info(...args) {
@@ -259,7 +260,20 @@ export default async ({ entity, options, config, context, state, logger, port, t
                 : typeof result.id === 'string' ? [result.id]
                 : Object.values(result).map(e => e?.id).filter(Boolean)
             track?.lookup?.(href, ids)
-            return result
+            // The entity goes to the TEMPLATE, which then reads fields off it.
+            // Recording those against the entity they belong to is what gives a
+            // document that never renders a contract — and this is the second
+            // way one reaches a render, alongside a sidecar's findEntity.
+            //
+            // `lookupUrl` needs no equivalent: it hands back a URL string, so
+            // nothing is ever read off an entity by the caller.
+            if (!result) return result
+            if (typeof result.id === 'string') return observeConsumed(result, track)
+            const observedByLang = {}
+            for (const [lang, row] of Object.entries(result)) {
+                observedByLang[lang] = row?.id ? observeConsumed(row, track) : row
+            }
+            return observedByLang
         },
         // Resolve a served-entity reference to its deployed URL, absolute
         // when runtime.options.url is set (ADR-0011).

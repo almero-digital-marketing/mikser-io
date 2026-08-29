@@ -147,7 +147,7 @@ export async function readManifest(workdir) {
         let rows = []
         try {
             rows = db.prepare(`
-                SELECT id, destination, inputHash, outputHash, refClosure, metaReads, renderedAt, parent
+                SELECT id, destination, inputHash, outputHash, refClosure, metaReads, consumedReads, renderedAt, parent
                 FROM mikser_snapshots
             `).all()
         } catch { /* table not present yet — return [] */ }
@@ -158,6 +158,7 @@ export async function readManifest(workdir) {
             outputHash:  row.outputHash ?? undefined,
             refClosure:  row.refClosure ? JSON.parse(row.refClosure) : undefined,
             metaReads:   row.metaReads  ? JSON.parse(row.metaReads)  : undefined,
+            consumedReads: row.consumedReads ? JSON.parse(row.consumedReads) : undefined,
             renderedAt:  row.renderedAt ?? undefined,
             parent:      row.parent ?? undefined,
         }))
