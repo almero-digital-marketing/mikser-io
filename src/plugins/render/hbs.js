@@ -163,7 +163,10 @@ export function parseReferences(source) {
             case 'PartialBlockStatement': {
                 if (node.name?.type === 'PathExpression') {
                     const name = node.name.original
-                    const entry = partials.get(name) ?? { name, args: {}, aliases: [] }
+                    // A handlebars partial always renders in the caller's
+                    // context, so anything it reads resolves against the scope
+                    // at the call site.
+                    const entry = partials.get(name) ?? { name, args: {}, aliases: [], inherits: true }
                     // The arguments the partial is called WITH. Dropping these
                     // was the hole: `{{> ui/btn label=r.more}}` makes this
                     // template depend on `r.more`, and a contract built from
