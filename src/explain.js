@@ -228,6 +228,16 @@ export async function explain(reference) {
                     : 'unknown',
             outputHash: snap.outputHash ?? null,
             parent: snap.parent ?? null,
+            // Which keys of its OWN meta the render read, and which keys it
+            // read off OTHER entities.
+            //
+            // refClosure answers "what would re-render this". These answer
+            // "what does it actually use", which is the question behind a
+            // document that renders to a hole: a key the layout never touches
+            // is either a typo or dead weight, and nothing else on this report
+            // distinguishes them. Empty when the catalog predates the record.
+            metaReads: snap.metaReads ?? [],
+            consumedReads: (snap.consumedReads ?? []).map(([id, keys]) => ({ entity: id, keys })),
             refClosure: (snap.refClosure ?? []).map(entry =>
                 entry.kind === 'query'
                     ? {
@@ -382,6 +392,22 @@ export function formatExplain(report) {
                 : '  [UNRESOLVED — nothing answers to this name]'
             const gone = e.gone?.length ? '  [TARGET DELETED SINCE]' : ''
             out.push(`  ${e.kind.padEnd(10)} ${e.target}${bound}${e.hash ? `  ${e.hash}` : ''}${gone}`)
+        }
+
+        // What the render actually READ, as against what would re-render it.
+        // Capped, because a large page reads a lot and a wall of keys buries
+        // the rest of the report — the full list is in --json.
+        const SHOWN = 12
+        const shown = (keys) => keys.length > SHOWN
+            ? `${keys.slice(0, SHOWN).join(', ')} … +${keys.length - SHOWN} more`
+            : keys.join(', ')
+        if (r.metaReads?.length) {
+            row('metaReads', `${r.metaReads.length} key${r.metaReads.length === 1 ? '' : 's'} of its own meta`)
+            out.push(`             ${shown(r.metaReads)}`)
+        }
+        for (const c of r.consumedReads ?? []) {
+            row('consumed', `${c.entity}  (${c.keys.length})`)
+            out.push(`             ${shown(c.keys)}`)
         }
     }
 

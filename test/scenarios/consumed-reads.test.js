@@ -19,7 +19,7 @@
 
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { setupFixture, runMikser, cleanup, freshWorkdir, readManifest } from './_harness.js'
+import { setupFixture, runMikser, cleanup, freshWorkdir, readManifest, stripAnsi } from './_harness.js'
 
 const CONFIG = `
 import { documents, frontMatter, renderHbs } from 'mikser-io'
@@ -92,5 +92,43 @@ describe('fields read off other entities', () => {
         // lookup rather than a scan of every field of every render.
         for (const id of consumed.keys()) assert.match(id, /^\/documents\//)
         assert.ok(!consumed.has('/documents/page.md'), 'a render does not consume itself')
+    })
+})
+
+// --explain is where a person at a terminal asks about ONE entity, so it is
+// where "and here is what its render actually read" belongs. refClosure already
+// answers "what would re-render this"; these answer "what does it actually
+// use", which is the question behind a document that renders to a hole.
+describe('--explain reports what a render read', () => {
+    const workdir = freshWorkdir('explain-reads')
+    after(() => cleanup(workdir))
+
+    let text, json
+    before(async () => {
+        await setupFixture(workdir, FIXTURE)
+        await runMikser(workdir, [])
+        text = stripAnsi((await runMikser(workdir, ['--explain', '/documents/page.md'])).stdout)
+        json = JSON.parse((await runMikser(workdir, ['--explain', '/documents/page.md', '--json'])).stdout)
+    })
+
+    it('names the entity whose fields it read, and which fields', () => {
+        assert.match(text, /consumed\s+\/documents\/nav\.md/)
+        assert.match(text, /items\[\]\.label/)
+    })
+
+    it('carries the same facts in --json, per render', () => {
+        // Per render, not per entity: a paginated document has several, and
+        // they can differ.
+        const consumed = json.renders?.[0]?.consumedReads ?? []
+        const nav = consumed.find(c => c.entity === '/documents/nav.md')
+        assert.ok(nav, `consumedReads: ${JSON.stringify(consumed)}`)
+        assert.ok(nav.keys.includes('items[].label'))
+    })
+
+    it('says nothing when there is nothing to say', () => {
+        // A document that read no other entity must not gain an empty heading —
+        // a report grows a section per feature and stops being readable.
+        const other = stripAnsi(text)
+        assert.ok(!/consumed\s+$/m.test(other))
     })
 })
