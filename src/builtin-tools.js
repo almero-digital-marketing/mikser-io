@@ -97,6 +97,45 @@ export function registerBuiltinTools() {
     )
 
     registerTool(
+        'search',
+        {
+            description:
+                'Find a string across the catalog in ONE call — "where does this appear?". Searches entity meta '
+                + 'values and, when asked, the source files themselves and the built output, returning '
+                + '{ id, collection, path, field, snippet } per hit.\n\n'
+                + 'This is how you locate content you can only describe by what it says: a menu label, a phone '
+                + 'number, a sentence you were asked to change. Paging the catalog to find it means reading '
+                + 'everything, most of which is fonts and image derivatives, and finding a SECOND copy of the same '
+                + 'label somewhere else is then a matter of luck.\n\n'
+                + 'in: ["meta"] searches structured values, no file I/O. in: ["content"] reads source files, '
+                + 'binaries skipped. Default is both. in: ["output"] searches the BUILT files instead and reports '
+                + '`occurrences` per destination — the blast-radius question, which is what you want before editing '
+                + 'anything shared. The scopes answer different questions and none implies another: a string can be '
+                + 'in the output because a layout writes it, with no source entity containing it anywhere.',
+            inputSchema: {
+                query: { type: 'string', required: true,
+                    description: 'Text to find. A plain substring unless `regex` is true. Case-sensitive by default.' },
+                collection: { type: 'string',
+                    description: 'Restrict to one collection (e.g. "documents"). Omit to search all.' },
+                in: { type: 'array',
+                    description: 'Where to look: "meta", "content", "output". Default is meta + content.' },
+                regex: { type: 'boolean',
+                    description: 'Treat `query` as a JavaScript regular expression rather than a literal substring.' },
+                ignoreCase: { type: 'boolean', description: 'Case-insensitive matching. Default false.' },
+                limit: { type: 'number', description: 'Maximum hits to return (default 50).' },
+            },
+        },
+        async (args) => {
+            try {
+                const { searchEntities } = await import('./search.js')
+                return ok(await searchEntities(args ?? {}))
+            } catch (err) {
+                return fail(err.message)
+            }
+        },
+    )
+
+    registerTool(
         'sources',
         {
             description:

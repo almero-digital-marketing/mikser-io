@@ -483,6 +483,68 @@ Query types throughout: function, lodash match object, or `undefined` for all.
 
 ---
 
+## Search
+
+`queryEntities` sifts **meta**. `searchEntities` answers the other question —
+*where does this text appear?* — across structured values, source files and
+built output.
+
+### `searchEntities(options)`
+
+```js
+import { searchEntities } from 'mikser-io'
+
+const { hits, count, truncated } = await searchEntities({
+    query: 'NOVAPRESS',
+    in: ['meta', 'content'],   // default
+})
+```
+
+| Option | Meaning |
+| --- | --- |
+| `query` | Text to find. A plain substring unless `regex` is true. Required. |
+| `in` | `'meta'`, `'content'`, `'output'`. Default `['meta', 'content']`. |
+| `collection` | Restrict to one collection. |
+| `filter` | Sift filter narrowing **what may be searched at all** — see below. |
+| `regex` | Treat `query` as a JavaScript regular expression. |
+| `ignoreCase` | Case-insensitive matching. Default false. |
+| `limit` | Maximum hits (default 50). `truncated` says when it stopped early. |
+
+The three scopes answer different questions and none implies another. `meta`
+walks structured values as dotted paths and touches no files. `content` reads
+the **source**. `output` walks the **built** folder and reports `occurrences`
+per destination — the blast-radius question, and the one where a string can be
+present because a layout writes it, with no source entity containing it
+anywhere.
+
+Whether a file is text is decided by reading its bytes, not by its extension,
+so a `.njk` source or a `.webmanifest` output is searched without first being
+added to a list of known formats.
+
+`truncated` is load-bearing: it separates "these are the hits" from "these are
+the first N", which a caller acting on a blast radius cannot afford to guess.
+
+> **Unscoped by default.** A bare call reads every entity and every source
+> file — drafts, unpublished documents, layouts, sidecar JavaScript. The `api`
+> plugin narrows `list` through each endpoint's own sift scope; nothing
+> narrows this. Anything that puts search behind a request **must** pass that
+> same scope as `filter`, or a public endpoint listing only published
+> documents will happily search the unpublished ones. There is deliberately no
+> `search` operation in the `api` plugin and no route in this module.
+
+### Primitives
+
+Exported so a caller building a different question out of the same parts does
+not reimplement them: `countMatches`, `snippetAround`, `lineOfFirstMatch`,
+`flattenMeta`, `findOccurrences`, `walkFiles`.
+
+`findOccurrences(text, needle)` returns every occurrence with `line`, `col`,
+the line's `text`, and `leading` — whether the match begins its line. That one
+flag separates the file **declaring** something from the files merely using
+it, in any text format, with no per-language grammar involved. It returns the
+line rather than a verdict about it, so where the heuristic is wrong the
+evidence is in the result.
+
 ## Database
 
 ```js
