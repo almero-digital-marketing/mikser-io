@@ -40,7 +40,7 @@ export function filterKey(filter) {
 // The returned object exposes `partials: Set<string>` and
 // `queries: Array<filter | null>` directly. Consumers iterate either
 // shape; both are owned by the track for the lifetime of the run.
-export function createTrack({ partial = true, query = true, lookup = true, meta = false } = {}) {
+export function createTrack({ partial = true, query = true, lookup = true, meta = false, consumed = false } = {}) {
     const track = {}
     if (lookup) {
         // Lookups a TEMPLATE made by name: runtime.href('/contacts'),
@@ -99,6 +99,28 @@ export function createTrack({ partial = true, query = true, lookup = true, meta 
         const metaReads = new Set()
         track.metaReads = metaReads
         track.metaRead = (path) => { if (path) metaReads.add(path) }
+    }
+    if (consumed) {
+        // Which fields of OTHER entities this render read.
+        //
+        // `metaReads` covers the entity being rendered. This covers the ones it
+        // pulled in — a page reads a navigation document through a query and
+        // then takes `items[].label` off it, and until now nothing recorded
+        // that. The consequence is that a document which never renders had no
+        // derivable contract at all: the engine knew THAT a page queried it,
+        // never which of its keys mattered.
+        //
+        // Keyed by the consumed entity's id, because the answer is per-entity:
+        // "what does anything read from navigation.yml" is the question, and it
+        // is asked from the other side.
+        const consumedReads = new Map()
+        track.consumedReads = consumedReads
+        track.consumedRead = (id, path) => {
+            if (!id || !path) return
+            let paths = consumedReads.get(id)
+            if (!paths) consumedReads.set(id, paths = new Set())
+            paths.add(path)
+        }
     }
     if (query) {
         const queries = []
@@ -261,6 +283,8 @@ export function serializeTrack(track) {
         queries:   track.queries   ? [...track.queries]   : undefined,
         metaReads: track.metaReads ? [...track.metaReads] : undefined,
         lookups:   track.lookups   ? [...track.lookups].map(([k, v]) => [k, [...v]]) : undefined,
+        consumedReads: track.consumedReads
+            ? [...track.consumedReads].map(([k, v]) => [k, [...v]]) : undefined,
     }
 }
 
@@ -273,5 +297,20 @@ export function mergeTrack(target, data) {
     for (const q of data.queries   ?? []) target.query?.(q)
     for (const m of data.metaReads ?? []) target.metaRead?.(m)
     for (const [name, ids] of data.lookups ?? []) target.lookup?.(name, ids)
+    for (const [id, paths] of data.consumedReads ?? []) {
+        for (const path of paths) target.consumedRead?.(id, path)
+    }
     return target
+}
+
+// A queried entity, wrapped so what a render reads off it is recorded against
+// THAT entity rather than the one being rendered.
+//
+// Only `meta` is wrapped: id, name and uri are how the caller identifies the
+// row, not content, and recording them would bury the keys that matter. Returns
+// the entity untouched when there is nothing to record into, so a call site can
+// wrap unconditionally.
+export function observeConsumed(entity, track) {
+    if (!track?.consumedRead || !entity?.id || !entity.meta || typeof entity.meta !== 'object') return entity
+    return { ...entity, meta: recordReads(entity.meta, '', (path) => track.consumedRead(entity.id, path)) }
 }

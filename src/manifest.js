@@ -86,6 +86,11 @@ export const SNAPSHOTS_SCHEMA = `
         -- JavaScript, and no parser for any template engine will ever find
         -- an optional chain like row.meta?.hero?.tags.
         metaReads   TEXT,
+        -- Keys of OTHER entities this render read, keyed by the entity they
+        -- belong to. The counterpart to metaReads, and the only record of what
+        -- a document that never renders is actually needed FOR: the engine knew
+        -- that a page queried it, never which of its fields mattered.
+        consumedReads TEXT,
         renderedAt  INTEGER,
         parent      TEXT,
         PRIMARY KEY (id, destination)
@@ -206,7 +211,7 @@ function buildRefClosure(entity, deps) {
     return closure
 }
 
-function buildSnapshot(entity, deps, outputHash, metaReads) {
+function buildSnapshot(entity, deps, outputHash, metaReads, consumedReads) {
     const snapshot = {
         id: entity.id,
         destination: entity.destination,
@@ -222,6 +227,7 @@ function buildSnapshot(entity, deps, outputHash, metaReads) {
     // Sorted and deduped: this is a SET of paths, and a stable order keeps a
     // snapshot comparable between runs.
     if (metaReads?.length) snapshot.metaReads = [...new Set(metaReads)].sort()
+    if (consumedReads?.length) snapshot.consumedReads = consumedReads
     if (entity.parent) snapshot.parent = entity.parent
     if (outputHash) snapshot.outputHash = outputHash
     return snapshot
@@ -239,6 +245,7 @@ function rowToSnap(row) {
         outputHash:  row.outputHash ?? undefined,
         refClosure:  row.refClosure ? JSON.parse(row.refClosure) : undefined,
         metaReads:   row.metaReads  ? JSON.parse(row.metaReads)  : undefined,
+        consumedReads: row.consumedReads ? JSON.parse(row.consumedReads) : undefined,
         renderedAt:  row.renderedAt ?? undefined,
         parent:      row.parent ?? undefined,
     }
@@ -253,6 +260,7 @@ function snapToRow(snap) {
         outputHash:  snap.outputHash  ?? null,
         refClosure:  snap.refClosure  ? JSON.stringify(snap.refClosure) : null,
         metaReads:   snap.metaReads   ? JSON.stringify(snap.metaReads)  : null,
+        consumedReads: snap.consumedReads ? JSON.stringify(snap.consumedReads) : null,
         renderedAt:  snap.renderedAt  ?? null,
         parent:      snap.parent      ?? null,
     }
@@ -376,7 +384,7 @@ export function createManifest(db) {
         SELECT id FROM mikser_snapshots WHERE destination = ?
     `)
     const stmtLookupByDestination = db.prepare(`
-        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, metaReads, renderedAt, parent
+        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, metaReads, consumedReads, renderedAt, parent
         FROM mikser_snapshots WHERE destination = ?
     `)
     const stmtDeleteByDestination = db.prepare(`
@@ -413,18 +421,18 @@ export function createManifest(db) {
     `)
 
     const stmtLookupById = db.prepare(`
-        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, metaReads, renderedAt, parent
+        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, metaReads, consumedReads, renderedAt, parent
         FROM mikser_snapshots WHERE id = ? ORDER BY destination
     `)
     const stmtLookup = db.prepare(`
-        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, metaReads, renderedAt, parent
+        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, metaReads, consumedReads, renderedAt, parent
         FROM mikser_snapshots WHERE id = ? AND destination = ?
     `)
     const stmtUpsert = db.prepare(`
         INSERT OR REPLACE INTO mikser_snapshots
-            (id, destination, inputHash, inputParts, outputHash, refClosure, metaReads, renderedAt, parent)
+            (id, destination, inputHash, inputParts, outputHash, refClosure, metaReads, consumedReads, renderedAt, parent)
         VALUES
-            (@id, @destination, @inputHash, @inputParts, @outputHash, @refClosure, @metaReads, @renderedAt, @parent)
+            (@id, @destination, @inputHash, @inputParts, @outputHash, @refClosure, @metaReads, @consumedReads, @renderedAt, @parent)
     `)
     const stmtDeleteByPK = db.prepare(`
         DELETE FROM mikser_snapshots WHERE id = ? AND destination = ?
@@ -440,7 +448,7 @@ export function createManifest(db) {
         SELECT id, destination FROM mikser_snapshots WHERE parent = ?
     `)
     const stmtSelectAll = db.prepare(`
-        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, metaReads, renderedAt, parent
+        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, metaReads, consumedReads, renderedAt, parent
         FROM mikser_snapshots
     `)
     const stmtCount = db.prepare(`SELECT COUNT(*) AS c FROM mikser_snapshots`)
@@ -859,8 +867,8 @@ export function createManifest(db) {
         },
 
         // Record a successful render. Single INSERT OR REPLACE.
-        record(entity, deps, metaReads) {
-            stmtUpsert.run(snapToRow(buildSnapshot(entity, deps, undefined, metaReads)))
+        record(entity, deps, metaReads, consumedReads) {
+            stmtUpsert.run(snapToRow(buildSnapshot(entity, deps, undefined, metaReads, consumedReads)))
         },
 
         // Return the set of entity ids whose recorded snapshots have a
@@ -1154,7 +1162,8 @@ onFinalize(async () => {
 
     for await (const { output, entity, deps } of useJournal('Output', [OPERATION.RENDER])) {
         if (output?.success && !output.skipped) {
-            renderedEntries.push({ entity, deps, metaReads: output.metaReads })
+            renderedEntries.push({ entity, deps, metaReads: output.metaReads,
+                                   consumedReads: output.consumedReads })
             if (entity.pages > 1) {
                 const parentId = entity.parent ?? entity.id
                 if (!newDestinationsByParent.has(parentId)) {
@@ -1287,10 +1296,10 @@ onFinalize(async () => {
     // `parent` is checked too, mirroring _stmtDeleteByIdOrParent — a deleted
     // parent takes its paginated children's snapshots with it.
     const recordedSnapshots = []
-    for (const { entity, deps, metaReads } of renderedEntries) {
+    for (const { entity, deps, metaReads, consumedReads } of renderedEntries) {
         if (deleted.has(entity.id) || (entity.parent && deleted.has(entity.parent))) continue
         const outputHash = await hashOutputFile(entity.destination)
-        recordedSnapshots.push(buildSnapshot(entity, deps, outputHash, metaReads))
+        recordedSnapshots.push(buildSnapshot(entity, deps, outputHash, metaReads, consumedReads))
     }
 
     // Apply all DB mutations atomically.

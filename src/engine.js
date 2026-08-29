@@ -541,7 +541,8 @@ export async function setup(options) {
                 // meta. Opt-out rather than opt-in: a contract that is only
                 // correct when someone remembered to enable it is a contract
                 // nobody can rely on. Set `metaReads: false` to switch it off.
-                const track = createTrack({ meta: runtime.options.metaReads !== false })
+                const track = createTrack({ meta: runtime.options.metaReads !== false,
+                                            consumed: runtime.options.metaReads !== false })
                 const renderOptions = {
                     entity: renderEntity,
                     options: {
@@ -639,10 +640,28 @@ export async function setup(options) {
                             ...(track?.metaReads ?? []),
                             ...(context?.sidecarMetaReads ?? []),
                         ]
+                        // Which keys of OTHER entities this render read, keyed
+                        // by the entity they belong to. Merged from the same two
+                        // places: the render's own track, and the sidecar's,
+                        // which runs earlier on the main thread.
+                        const consumedReads = new Map()
+                        for (const [cid, paths] of [
+                            ...(track?.consumedReads ?? []),
+                            ...(context?.sidecarConsumedReads ?? []),
+                        ]) {
+                            const into = consumedReads.get(cid) ?? new Set()
+                            for (const path of paths) into.add(path)
+                            consumedReads.set(cid, into)
+                        }
                         entry.output = {
                             success: true,
                             result,
                             ...(metaReads.length ? { metaReads: [...new Set(metaReads)].sort() } : {}),
+                            ...(consumedReads.size ? {
+                                consumedReads: [...consumedReads]
+                                    .map(([cid, paths]) => [cid, [...paths].sort()])
+                                    .sort(([a], [b]) => a.localeCompare(b)),
+                            } : {}),
                         }
                         // A render that produced nothing at all. Distinct from
                         // a render that THREW, which lands in `errors` and
