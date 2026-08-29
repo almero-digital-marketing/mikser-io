@@ -484,6 +484,25 @@ export function createManifest(db) {
         WHERE refClosure LIKE '%"kind":"query"%'
     `)
 
+    // Everything that rendered through a layout — the blast radius of a change
+    // to a layout SIDECAR.
+    //
+    // A sidecar is reachable by none of the three routes affectedBy otherwise
+    // walks: it never renders, so it has no snapshots; nothing points at it by
+    // ref; and no query matches it. Its dependency is the layout's input
+    // digest, which is not an edge. So the preview answered "nothing would be
+    // affected" for a change that re-renders the entire site — the one
+    // direction of wrong that matters, since it says a site-wide edit is safe.
+    //
+    // The blast radius really is everything: the layouts plugin folds every
+    // OTHER sidecar under the folder into each layout's `shared` digest, so any
+    // sidecar edit moves every layout's checksum, and every page renders
+    // through some layout.
+    const stmtSnapshotsWithLayout = db.prepare(`
+        SELECT id, destination, refClosure FROM mikser_snapshots
+        WHERE refClosure LIKE '%"kind":"layout"%'
+    `)
+
     // Snapshots holding a non-query edge that names any of the given keys,
     // by the name asked for OR by the entity it bound to. Both, for the same
     // reason skipDecision reads both — a name survives a rename only through
@@ -572,6 +591,28 @@ export function createManifest(db) {
             }
 
             const affected = []
+
+            // Sidecars take the route above rather than the candidate walk:
+            // skipDecision compares against the edges a snapshot recorded, and
+            // no snapshot records an edge to a sidecar — it would answer "skip"
+            // for every page and hide the whole radius.
+            if (entity.type === 'sidecar') {
+                for (const row of stmtSnapshotsWithLayout.iterate()) {
+                    let layoutEdge = null
+                    try {
+                        layoutEdge = JSON.parse(row.refClosure ?? '[]').find(e => e.kind === 'layout') ?? null
+                    } catch { /* unreadable closure — still affected, just unattributed */ }
+                    affected.push({
+                        id: row.id,
+                        destination: row.destination,
+                        reason: 'ref-changed',
+                        ...(layoutEdge?.target ? { dependency: layoutEdge.target } : {}),
+                        why: 'a layout sidecar feeds every layout through its shared digest',
+                    })
+                }
+                return affected
+            }
+
             for (const { id, destination } of candidates.values()) {
                 // Its own renders: the premise of the question is that this
                 // entity changed, so asking skipDecision — which compares the

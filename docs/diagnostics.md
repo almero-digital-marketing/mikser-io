@@ -563,6 +563,18 @@ cannot model is how the entity's own frontmatter would change — that is
 parsed during import, so an edit that moves `meta.layout` moves the
 destination too, and this does not see it.
 
+**Layout sidecars are the one entity answered by a different route.** A
+sidecar never renders, nothing points at it by ref, and no query matches
+it, so all three candidate walks come back empty — yet editing one
+re-renders the whole site. Its dependency is the layout's *input digest*,
+not an edge: `mikser-io-layouts` folds every sidecar script under the
+folder into a single `sharedDigest` carried by every layout's checksum, so
+one sidecar edit moves every layout. `affectedBy` therefore reports every
+destination that rendered through any layout, each attributed to the
+layout it went through. Entities with no layout — a copied asset, a
+`files()` passthrough — stay out, or the answer would be "everything,
+always", which is the same non-answer as "nothing" with the sign flipped.
+
 ### `runtime.provenance`
 
 Where a value was **written** — source file, field path, line and column.
