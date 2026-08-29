@@ -1,6 +1,6 @@
 {
   "name": "mikser-io",
-  "version": "9.40.3",
+  "version": "9.41.0",
   "description": "<p align=\"center\">   <img src=\"mikser-lockup-stacked.svg\" alt=\"mikser\" width=\"198\" /> </p>",
   "main": "index.js",
   "exports": {
@@ -46,6 +46,7 @@
     "is-url": "^1.2.4",
     "line-reader": "^0.4.0",
     "lodash": "^4.18.1",
+    "mime-types": "^3.0.2",
     "minimatch": "^10.2.5",
     "node-cron": "^4.2.1",
     "p-map": "^7.0.4",

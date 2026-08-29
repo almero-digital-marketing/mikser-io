@@ -1219,9 +1219,87 @@ describe('readEntityContent', () => {
         }
     })
 
-    it('built-in filesystem read: contentSkipped for binary extension', async () => {
-        const result = await readEntityContent({ id: '/x', uri: '/some/path/photo.png' })
-        assert.match(result.contentSkipped, /Non-text format \(\.png\)/)
+    it('built-in filesystem read: contentSkipped for a binary file', async () => {
+        // A real file with real binary bytes. The previous fixture pointed at
+        // /some/path/photo.png, which does not exist — it passed because the
+        // extension gate refused it without ever opening it, so it asserted
+        // the rule rather than the outcome.
+        let dir
+        try {
+            dir = await mkdtemp(path.join(tmpdir(), 'mikser-read-content-'))
+            const filePath = path.join(dir, 'photo.png')
+            await writeFile(filePath, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]))
+            const result = await readEntityContent({ id: '/x', uri: filePath })
+            assert.match(result.contentSkipped, /Not text \(\.png\)/)
+            assert.equal(result.content, undefined)
+        } finally {
+            if (dir) await rm(dir, { recursive: true })
+        }
+    })
+
+    it('built-in filesystem read: reads a text format the extension list never had', async () => {
+        // The reported gap. `.ect` is an engine mikser SHIPS a renderer for
+        // and it was refused as "Non-text format"; .njk, .scss and .toml were
+        // in the same position. One entry per format is the shape this avoids.
+        let dir
+        try {
+            dir = await mkdtemp(path.join(tmpdir(), 'mikser-read-content-'))
+            for (const [name, text] of [
+                ['view.ect', '<% @title %>'],
+                ['theme.njk', '{% block body %}{% endblock %}'],
+                ['conf.toml', 'title = "x"'],
+                ['style.scss', '$c: red; a { color: $c; }'],
+                ['query.sql', 'select 1;'],
+            ]) {
+                const filePath = path.join(dir, name)
+                await writeFile(filePath, text, 'utf8')
+                const result = await readEntityContent({ id: '/x', uri: filePath })
+                assert.equal(result.content, text, `${name} must be readable`)
+            }
+        } finally {
+            if (dir) await rm(dir, { recursive: true })
+        }
+    })
+
+    it('built-in filesystem read: believes the bytes over a lying extension', async () => {
+        // The old gate trusted `.md` and handed back a utf8 decode of a PNG.
+        let dir
+        try {
+            dir = await mkdtemp(path.join(tmpdir(), 'mikser-read-content-'))
+            const filePath = path.join(dir, 'notreally.md')
+            await writeFile(filePath, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 1, 2, 3]))
+            const result = await readEntityContent({ id: '/x', uri: filePath })
+            assert.equal(result.content, undefined, 'a .md that is really a PNG is not text')
+            assert.match(result.contentSkipped, /binary/)
+        } finally {
+            if (dir) await rm(dir, { recursive: true })
+        }
+    })
+
+    it('reload: returns the bytes on disk, not the catalog copy', async () => {
+        // The catalog copy is what the last build saw. Handing it back while
+        // reporting a file read is how a whole-file rewrite silently discards
+        // an edit made since the build.
+        let dir
+        try {
+            dir = await mkdtemp(path.join(tmpdir(), 'mikser-read-content-'))
+            const filePath = path.join(dir, 'about.md')
+            await writeFile(filePath, 'DISK', 'utf8')
+            const entity = () => ({ id: '/x', uri: filePath, content: 'CATALOG' })
+
+            assert.equal((await readEntityContent(entity())).content, 'CATALOG',
+                'the default still short-circuits — that is what spares a remote refetch')
+            assert.equal((await readEntityContent(entity(), { reload: true })).content, 'DISK')
+        } finally {
+            if (dir) await rm(dir, { recursive: true })
+        }
+    })
+
+    it('reload: keeps what it has when there is nothing fresher to read', async () => {
+        // A synthetic entity has no file. Falling through to "no uri" would
+        // turn a working read into an error.
+        const result = await readEntityContent({ id: '/synthetic', content: 'BUILT' }, { reload: true })
+        assert.equal(result.content, 'BUILT')
     })
 
     it('built-in filesystem read: contentError when file does not exist', async () => {

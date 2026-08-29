@@ -8,6 +8,7 @@ import { minimatch } from 'minimatch'
 import path from 'path'
 import fm from 'front-matter'
 import yaml from 'yaml'
+import { contentType } from 'mime-types'
 import runtime from './runtime.js'
 import { trackedInfo, untrack, recordReads } from './track.js'
 
@@ -188,32 +189,31 @@ export function refFilter(refValue) {
 // else that produces Content-Type from an entity). Pure function; no
 // engine state — lives here rather than inside one plugin so other
 // plugins don't have to reach across the plugin folder for it.
-const MIME_BY_EXT = {
-    pdf:   'application/pdf',
-    html:  'text/html; charset=utf-8',
-    xml:   'application/xml; charset=utf-8',
-    xhtml: 'application/xhtml+xml; charset=utf-8',
-    rss:   'application/rss+xml; charset=utf-8',
-    atom:  'application/atom+xml; charset=utf-8',
-    json:  'application/json; charset=utf-8',
-    css:   'text/css; charset=utf-8',
-    js:    'application/javascript; charset=utf-8',
-    svg:   'image/svg+xml',
-    png:   'image/png',
-    jpg:   'image/jpeg',
-    jpeg:  'image/jpeg',
-    webp:  'image/webp',
-    gif:   'image/gif',
-    mp4:   'video/mp4',
-    webm:  'video/webm',
-    txt:   'text/plain; charset=utf-8',
-    md:    'text/markdown; charset=utf-8',
+// Content types come from `mime-types` — the IANA registry via mime-db —
+// rather than the nineteen-entry table this used to carry. That table was
+// wrong by omission for everything it had not been taught: a .woff2, .avif,
+// .wasm, .ico or .mp3 in the output got no content type at all, and a caller
+// serving it had to guess.
+//
+// One deliberate change came with the swap: `.js` is `text/javascript`, which
+// RFC 9239 made the registered type and `application/javascript` obsolete.
+// Browsers have accepted both for years.
+function mimeForExtension(ext) {
+    const type = contentType(ext)
+    if (!type) return null
+    // mime-db assigns charsets from its own `charset` field, which the XML
+    // family does not carry — so `application/rss+xml` came back bare where
+    // the old table said `; charset=utf-8`. Restored as a RULE about XML
+    // rather than as four more rows to keep. Deliberately not applied to
+    // `image/svg+xml`, which the old table also served without a charset.
+    return /charset=/i.test(type) || !/^application\/(xml$|.*\+xml$)/.test(type)
+        ? type
+        : `${type}; charset=utf-8`
 }
 
 export function mimeForEntity(entity) {
     if (!entity?.destination) return null
-    const ext = path.extname(entity.destination).toLowerCase().replace(/^\./, '')
-    return MIME_BY_EXT[ext] ?? null
+    return mimeForExtension(path.extname(entity.destination).toLowerCase())
 }
 
 // File-extension allowlist for "is this source readable as utf8?". Used
@@ -237,10 +237,79 @@ const TEXT_EXTENSIONS = new Set([
 // Returns false for binaries (png/pdf/mp4/etc.) and for entities
 // without a uri. Pass the entity, not a bare extension — keeps the
 // call site readable and lines up with mimeForEntity's signature.
+//
+// A HINT, not a verdict. The list above is hand-maintained, so it is wrong
+// about every extension nobody has added yet — `.njk`, `.scss`, `.toml`, and
+// `.ect`, which is an engine mikser itself ships a renderer for. Anything
+// deciding whether content can be READ should ask looksTextual about the
+// bytes instead; this stays for callers that want a cheap guess with no I/O.
 export function isTextEntity(entity) {
     if (!entity?.uri) return false
     const ext = path.extname(entity.uri).slice(1).toLowerCase()
     return TEXT_EXTENSIONS.has(ext)
+}
+
+// How much of a file is enough to tell text from binary. A binary format that
+// hides every NUL and every invalid sequence for 8KB is not one anybody
+// stores in a content repository.
+const SNIFF_BYTES = 8 * 1024
+
+// Is this text? Asked of the BYTES, not of the extension.
+//
+// An extension allowlist is a list that goes stale silently, and it fails in
+// the direction that costs most: it refuses a file it has no opinion about.
+// That is how reading a `.liquid` template — from an engine that renders
+// Liquid — came back "Non-text format".
+//
+// Bytes do not go stale. A file with no NUL that decodes as UTF-8 is text,
+// whether it is Nunjucks, TOML, SQL or something nobody has written yet.
+export function looksTextual(buf) {
+    if (buf.includes(0)) return false
+    try {
+        new TextDecoder('utf8', { fatal: true }).decode(trimPartialTail(buf))
+        return true
+    } catch {
+        return false
+    }
+}
+
+// Drop a trailing codepoint a bounded read cut in half — and ONLY that.
+//
+// The tempting version retries the decode while chopping bytes off the end
+// until it succeeds. That also chops away genuinely corrupt bytes: `74 65 78
+// 74 C3 28` is invalid UTF-8, but drop two bytes and `text` decodes clean, so
+// a JPEG whose tail happens to be bad reads as text. The tail is forgiven only
+// when it is a valid multi-byte sequence that has not finished yet.
+function trimPartialTail(buf) {
+    // A lead byte is 11xxxxxx and starts a sequence of a known length; the
+    // bytes after it are continuations, 10xxxxxx. Walk back over at most 3
+    // continuations — a 4-byte sequence is the longest UTF-8 has.
+    for (let back = 1; back <= 4 && back <= buf.length; back++) {
+        const byte = buf[buf.length - back]
+        if (byte < 0x80) return buf                       // ASCII: nothing pending
+        if ((byte & 0xc0) === 0x80) continue              // continuation, keep walking
+        const expected = (byte & 0xe0) === 0xc0 ? 2
+                       : (byte & 0xf0) === 0xe0 ? 3
+                       : (byte & 0xf8) === 0xf0 ? 4
+                       : 0                                // not a lead byte at all
+        // `back` bytes run from the lead to the end. Fewer than the sequence
+        // needs means it was cut; anything else is complete, or corrupt, and
+        // corrupt is the decoder's call to make rather than ours.
+        return expected && back < expected ? buf.subarray(0, buf.length - back) : buf
+    }
+    return buf
+}
+
+// Read the first `limit` bytes of a file, for sniffing.
+async function readPrefix(file, limit) {
+    const handle = await open(file, 'r')
+    try {
+        const buf = Buffer.alloc(limit)
+        const { bytesRead } = await handle.read(buf, 0, limit, 0)
+        return buf.subarray(0, bytesRead)
+    } finally {
+        await handle.close()
+    }
 }
 
 // Cache resolved provider modules so we don't re-import per read.
@@ -306,9 +375,20 @@ async function loadProviderModule(scheme, workingFolder) {
 // Usage:
 //
 //   Object.assign(entity, await readEntityContent(entity))
-export async function readEntityContent(entity) {
+export async function readEntityContent(entity, { reload = false } = {}) {
     if (!entity) return {}
-    if (typeof entity.content === 'string') return { content: entity.content }
+    // The fast path exists to avoid re-FETCHING a remote document a source
+    // plugin already pulled in, and it short-circuits before any of the
+    // dispatch below. That makes it a correctness problem for a caller asking
+    // to see the SOURCE: between builds the catalog copy and the file on disk
+    // part ways, and this handed back the catalog's — under a name that says
+    // it read the file. An agent then rewrites the whole file from a version
+    // it never saw, silently discarding whatever changed underneath it.
+    //
+    // `reload` is how a caller says it wants the bytes as they are now. An
+    // entity with no uri has nothing fresher to offer, so it keeps what it
+    // has rather than falling through to an error.
+    if (typeof entity.content === 'string' && (!reload || !entity.uri)) return { content: entity.content }
     if (!entity.uri) return { contentError: 'entity has no uri' }
 
     const m = URI_SCHEME_RE.exec(entity.uri)
@@ -324,14 +404,19 @@ export async function readEntityContent(entity) {
 
     // Built-in filesystem read: no scheme (plain path) or `file://`.
     if (!scheme || scheme === 'file') {
-        if (!isTextEntity(entity)) {
-            const ext = path.extname(entity.uri).slice(1).toLowerCase()
-            return {
-                contentSkipped: `Non-text format (.${ext}). Read the file directly at entity.uri, or use a render API to materialize output.`,
-            }
-        }
+        const target = scheme === 'file' ? entity.uri.replace(/^file:\/\//i, '') : entity.uri
         try {
-            const target = scheme === 'file' ? entity.uri.replace(/^file:\/\//i, '') : entity.uri
+            // Decided by the bytes, not by the extension. The extension list
+            // refused `.njk`, `.scss`, `.toml` and `.ect` — the last of which
+            // mikser ships a renderer for — so reading a layout depended on
+            // which engine it happened to be written in.
+            if (!looksTextual(await readPrefix(target, SNIFF_BYTES))) {
+                const ext = path.extname(entity.uri).slice(1).toLowerCase()
+                return {
+                    contentSkipped: `Not text${ext ? ` (.${ext})` : ''} — the bytes are binary, not an unrecognised `
+                        + 'extension. Read the file directly at entity.uri, or use a render API to materialize output.',
+                }
+            }
             return { content: await readFile(target, 'utf8') }
         } catch (err) {
             return { contentError: err.message }
