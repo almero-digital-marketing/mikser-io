@@ -483,6 +483,76 @@ Query types throughout: function, lodash match object, or `undefined` for all.
 
 ---
 
+## Writing source files
+
+`updateEntity` is a catalog operation. `writeEntitySource` writes the FILE, with
+the checks that make a whole-file rewrite safe to perform without having watched
+the file the whole time.
+
+### `writeEntitySource(options)`
+
+```js
+import { writeEntitySource } from 'mikser-io'
+
+const preview = await writeEntitySource({
+    id: '/documents/about.md',
+    content: next,
+    dryRun: true,          // writes nothing; reports what it would re-render
+})
+
+const result = await writeEntitySource({
+    id: '/documents/about.md',
+    content: next,
+    ifChecksum: preview.currentChecksum,
+})
+```
+
+| Option | Meaning |
+| --- | --- |
+| `id` | Catalog id of an existing entity. Alternative to the pair below. |
+| `collection` + `relativePath` | Where to write. Required unless `id` is given. |
+| `content` | The COMPLETE file. Anything omitted is deleted — there is no patch mode. |
+| `ifChecksum` | Only write if the file's current DISK checksum equals this. |
+| `dryRun` | Write nothing; return the blast radius and any advisory. |
+| `awaitCycle` | Resolve once the cycle that picks the write up finishes, with its build report attached as `report`. |
+
+**Never throws for an expected outcome.** A bad id, a path that escapes the
+collection, a checksum that no longer matches — each returns
+`{ ok: false, refused }` with the facts needed to retry, because those are
+answers rather than faults. `refused` is one of `unresolvable-id`,
+`collection-mismatch`, `incomplete-target`, `invalid-target`,
+`checksum-mismatch`.
+
+**Containment.** `relativePath` cannot leave the collection folder. This
+matters because the path often comes from a request body or a CMS form, and
+`path.join(folder, '../../x')` resolves outside the folder and writes there. It
+is resolved and then contained rather than rejected on a literal `..`, so
+`blog/../about.md` still works. The refusal happens before anything stats the
+file — reporting a checksum for an out-of-tree path is a disclosure on its own.
+
+**The precondition is not a lock.** A writer landing between the check and the
+write still wins. It closes the window that matters in practice: read, think,
+write back a whole file built from a copy that is now stale.
+
+`ifChecksum` is compared against the DISK. `readEntity`'s `checksum` is the
+catalog's, which lags between builds — pass `diskChecksum`, or the
+`currentChecksum` a refusal hands back.
+
+### Advisories
+
+`contentAdvisories(entity, content)` names files a caller must not edit blind,
+from `meta.specLocked` / `meta.generated` or from a header in the first 40
+lines. Two kinds, kept apart because the instruction differs: `spec-locked`
+means the bytes answer to a document outside the repo, `generated` means
+editing the file is pointless because the next build overwrites it.
+`advisoryWarning(advisories)` renders one line of prose for a response meant to
+be read rather than parsed. Both are reported by `writeEntitySource` — on the
+dry run and again on the way out, since a caller that never read the file is
+exactly the one that needs telling.
+
+`siblingDestinations(folder, relativePath)` reports files differing only by
+extension, which may render to the same destination.
+
 ## Search
 
 `queryEntities` sifts **meta**. `searchEntities` answers the other question —

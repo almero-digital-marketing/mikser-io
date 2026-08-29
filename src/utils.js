@@ -1077,20 +1077,38 @@ export function useCollection(runtime, name) {
         return folder
     }
 
+    // A path that cannot leave the collection folder.
+    //
+    // `path.join(folder, '../../x')` resolves outside the folder and writes
+    // there, which turns a collection handle into an arbitrary-write
+    // primitive the moment a relative path comes from a request body or a CMS
+    // form. Resolved and then contained rather than rejected on a literal
+    // `..`, so `a/../b.md` — which lands inside — still works.
+    function resolveWithin(relativePath) {
+        const folder = resolveFolder()
+        const uri = path.resolve(folder, relativePath ?? '')
+        const root = path.resolve(folder)
+        if (uri !== root && !uri.startsWith(root + path.sep)) {
+            throw new Error(
+                `Path escapes the ${name} collection: ${JSON.stringify(relativePath)} resolves outside ${root}`)
+        }
+        return uri
+    }
+
     return {
         name,
         get folder() { return resolveFolder() },
+        resolveWithin,
 
         async write(relativePath, content = '') {
-            const uri = path.join(resolveFolder(), relativePath)
+            const uri = resolveWithin(relativePath)
             await mkdir(path.dirname(uri), { recursive: true })
             await writeFile(uri, content, 'utf8')
             return uri
         },
 
         async remove(relativePath) {
-            const uri = path.join(resolveFolder(), relativePath)
-            await unlink(uri)
+            await unlink(resolveWithin(relativePath))
         },
     }
 }
