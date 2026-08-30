@@ -21,7 +21,34 @@
 // attribute them.
 
 import path from 'node:path'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import runtime from './runtime.js'
+
+// The change set in effect for the current call.
+//
+// Threading an id through every write is fine for one API and hopeless across
+// a plugin ecosystem: mikser-io-drive writes with fs.writeFile, forms writes
+// its own entities, and each new mutating tool would have to remember. An
+// ambient context means a caller declares the set ONCE and everything written
+// underneath is attributed, including by code that has never heard of change
+// sets.
+const changeSetContext = new AsyncLocalStorage()
+
+// Run `fn` with a change set in effect. Writes inside it are attributed to
+// that set unless they name a different one explicitly.
+export function withChangeSet(set, fn) {
+    if (!set?.changeSet) return fn()
+    return changeSetContext.run({
+        changeSet: set.changeSet,
+        summary: set.summary ?? null,
+        principal: set.principal ?? null,
+        undoOf: set.undoOf ?? null,
+    }, fn)
+}
+
+export function currentChangeSet() {
+    return changeSetContext.getStore() ?? null
+}
 
 function store() {
     runtime.changeSets ??= new Map()
@@ -45,6 +72,14 @@ function relativeToWorkingFolder(uri) {
 // undo needs "changed the hero text on the devices page", not a file count.
 // First one wins: later writes in the same set are the same request.
 export function recordChangeSetWrite({ changeSet, summary, principal, uri, operation = 'write', undoOf } = {}) {
+    // An explicit id always wins; otherwise take whatever set is in effect.
+    // A write with neither stays unclaimed, which is the correct outcome for
+    // an API or human write that no request owns.
+    const ambient = currentChangeSet()
+    changeSet ??= ambient?.changeSet
+    summary ??= ambient?.summary
+    principal ??= ambient?.principal
+    undoOf ??= ambient?.undoOf
     if (!changeSet || !uri) return null
     const rel = relativeToWorkingFolder(uri)
     // Outside the working folder there is nothing a repo-scoped consumer can

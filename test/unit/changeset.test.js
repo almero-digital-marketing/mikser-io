@@ -9,7 +9,9 @@ import path from 'node:path'
 import runtime from '../../src/runtime.js'
 import {
     recordChangeSetWrite, pendingChangeSets, clearChangeSets, forgetAllChangeSets,
+    withChangeSet, currentChangeSet,
 } from '../../src/changeset.js'
+import { useCollection, writeEntity } from '../../src/utils.js'
 import { writeEntitySource } from '../../src/write.js'
 
 let root, docs
@@ -118,5 +120,77 @@ describe('writeEntitySource', () => {
         assert.equal(result.changeSet, undefined)
         assert.equal(await readFile(path.join(docs, 'plain.md'), 'utf8'), 'body\n')
         assert.deepEqual(pendingChangeSets(), [])
+    })
+})
+
+describe('the ambient change set', () => {
+    it('attributes a write that never names a set', async () => {
+        // The point of the design: a plugin that has never heard of change
+        // sets still produces undoable work.
+        await withChangeSet({ changeSet: 'req-9', summary: 'One request' }, async () => {
+            recordChangeSetWrite({ uri: path.join(docs, 'x.md') })
+        })
+        const [set] = pendingChangeSets()
+        assert.equal(set.id, 'req-9')
+        assert.equal(set.summary, 'One request')
+        assert.deepEqual(set.paths, ['documents/x.md'])
+    })
+
+    it('lets an explicit id win over the ambient one', async () => {
+        await withChangeSet({ changeSet: 'ambient' }, async () => {
+            recordChangeSetWrite({ changeSet: 'explicit', uri: path.join(docs, 'x.md') })
+        })
+        assert.deepEqual(pendingChangeSets().map(s => s.id), ['explicit'])
+    })
+
+    it('claims nothing outside a context', () => {
+        // An API or human write owned by no request stays unclaimed, which is
+        // what keeps it out of an agent's undo.
+        recordChangeSetWrite({ uri: path.join(docs, 'x.md') })
+        assert.deepEqual(pendingChangeSets(), [])
+        assert.equal(currentChangeSet(), null)
+    })
+
+    it('does not leak out of its own call', async () => {
+        await withChangeSet({ changeSet: 'inside' }, async () => {})
+        recordChangeSetWrite({ uri: path.join(docs, 'after.md') })
+        assert.deepEqual(pendingChangeSets(), [])
+    })
+
+    it('survives an await inside the context', async () => {
+        // AsyncLocalStorage is the whole reason this works across the awaits a
+        // real write path is full of.
+        await withChangeSet({ changeSet: 'req-async' }, async () => {
+            await new Promise(resolve => setTimeout(resolve, 5))
+            recordChangeSetWrite({ uri: path.join(docs, 'late.md') })
+        })
+        assert.deepEqual(pendingChangeSets().map(s => s.id), ['req-async'])
+    })
+
+    it('catches a collection write with no change set argument anywhere', async () => {
+        // useCollection().write is the primitive drive-adjacent plugins and
+        // sources use; nothing here mentions a change set.
+        await withChangeSet({ changeSet: 'req-coll' }, async () => {
+            await useCollection(runtime, 'documents').write('via-handle.md', 'body\n')
+        })
+        assert.deepEqual(pendingChangeSets()[0].paths, ['documents/via-handle.md'])
+    })
+
+    it('catches a collection remove as a deletion', async () => {
+        await useCollection(runtime, 'documents').write('doomed.md', 'x\n')
+        forgetAllChangeSets()
+        await withChangeSet({ changeSet: 'req-del' }, async () => {
+            await useCollection(runtime, 'documents').remove('doomed.md')
+        })
+        const [set] = pendingChangeSets()
+        assert.deepEqual(set.deletions, ['documents/doomed.md'])
+    })
+
+    it('catches writeEntity, which a rename cascade runs per referring file', async () => {
+        const uri = path.join(docs, 'ref.md')
+        await withChangeSet({ changeSet: 'req-rename' }, async () => {
+            await writeEntity({ uri }, { title: 'renamed' })
+        })
+        assert.deepEqual(pendingChangeSets()[0].paths, ['documents/ref.md'])
     })
 })

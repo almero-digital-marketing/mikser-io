@@ -598,9 +598,38 @@ clearChangeSets(['req-42'])
 
 | Export | Does |
 | --- | --- |
+| `withChangeSet({ changeSet, summary, principal }, fn)` | run `fn` with a set in effect |
+| `currentChangeSet()` | the set in effect, or null |
 | `recordChangeSetWrite({ changeSet, summary, principal, uri, operation, undoOf })` | attach one path to a set |
 | `pendingChangeSets()` | sets with unconsumed writes, oldest first |
 | `clearChangeSets(ids)` | drop what a consumer has committed |
+
+### Ambient, not threaded
+
+Passing an id through every write is fine for one API and hopeless across a
+plugin ecosystem — `mikser-io-drive` writes with `fs.writeFile`, a rename
+cascade goes through `writeEntity`, and every new mutating tool would have to
+remember. `withChangeSet` puts one in scope instead, and the write primitives
+attribute themselves:
+
+```js
+await withChangeSet({ changeSet: 'req-42', summary: 'Rewrite the hero copy' }, async () => {
+    await useCollection(runtime, 'documents').write('hero.md', text)   // attributed
+    await writeEntity({ uri }, { title })                             // attributed
+})
+```
+
+`useCollection().write` / `.remove` and `writeEntity` record automatically, so
+code that has never heard of change sets still produces undoable work. A plugin
+writing with raw `fs` calls `recordChangeSetWrite({ uri })` with no id and
+picks up whatever is in effect. An explicit id always wins over the ambient
+one, and a write with neither stays unclaimed.
+
+In `mikser-io-mcp`, a tool registered with `mutates: true` gets `changeSet` and
+`summary` added to its schema and its handler wrapped in `withChangeSet`
+automatically — declared once per tool rather than threaded through each write,
+because a new mutating tool that forgets the plumbing is one whose edits
+silently cannot be undone.
 
 Paths come back repo-relative and POSIX-separated, ready for a git pathspec.
 

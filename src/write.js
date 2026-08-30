@@ -24,7 +24,7 @@ import runtime from './runtime.js'
 import { readEntity, findEntities } from './catalog.js'
 import { useCollection, checksum, readEntityContent, lookupKeys } from './utils.js'
 import { nextCycleId, whenCycleCompletes } from './report.js'
-import { recordChangeSetWrite } from './changeset.js'
+import { recordChangeSetWrite, currentChangeSet } from './changeset.js'
 
 // How far into a file to look for a marker. A header nobody reads is not a
 // header; one buried 200 lines down is not either.
@@ -172,6 +172,14 @@ export async function writeEntitySource({
     summary,
     principal,
 } = {}) {
+    // An explicit id wins; otherwise inherit whatever set is in effect, so the
+    // response can name the set a caller would undo even when the caller never
+    // passed one.
+    const ambient = currentChangeSet()
+    changeSet ??= ambient?.changeSet
+    summary ??= ambient?.summary
+    principal ??= ambient?.principal
+
     if (id) {
         const located = await locateEntityFile(id)
         if (located.error) return { ok: false, refused: 'unresolvable-id', error: located.error }
@@ -306,6 +314,14 @@ export async function deleteEntitySource({
     summary,
     principal,
 } = {}) {
+    // An explicit id wins; otherwise inherit whatever set is in effect, so the
+    // response can name the set a caller would undo even when the caller never
+    // passed one.
+    const ambient = currentChangeSet()
+    changeSet ??= ambient?.changeSet
+    summary ??= ambient?.summary
+    principal ??= ambient?.principal
+
     if (id) {
         const located = await locateEntityFile(id)
         if (located.error) return { ok: false, refused: 'unresolvable-id', error: located.error }
