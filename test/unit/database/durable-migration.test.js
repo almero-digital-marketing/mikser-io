@@ -177,8 +177,10 @@ describe('comments are not DDL', () => {
             schemas: new Map([['n', { sql, durable: true }]]),
         })
         db.open()
+        // In the DURABLE file — that is what `durable: true` now means, and
+        // an unqualified sqlite_master would list the cache instead.
         const tables = db.handle
-            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+            .prepare("SELECT name FROM durable.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
             .all().map(t => t.name)
         db.close()
         assert.ok(tables.includes('real_rows'))

@@ -444,16 +444,31 @@ denial-of-service knob rather than a diagnostic, and it stays on the CLI.
 
 ## The database
 
-Everything mikser knows lives in one SQLite file at
-`<workingFolder>/runtime/mikser.sqlite`. It is readable while a build
-runs (WAL mode) and it is often faster to ask it directly than to add
-logging.
+**Two files, and the difference between them is what is safe to delete.**
+
+| File | Holds | If you delete it |
+| --- | --- | --- |
+| `runtime/mikser.sqlite` | the derived cache — catalog, refs, snapshots, journal | costs a rebuild, nothing else (ADR-0002: your files are the source of truth) |
+| `mikser.data.sqlite` | everything **not** derived — sign-ins, the change-set log | data loss; no file can reproduce it |
+
+The durable one sits at the working-folder root rather than in `runtime/`
+on purpose. That folder exists to be thrown away — it is gitignored, and
+`rm -rf runtime` is a line in real deploy scripts — so anything kept
+inside it is one careless command from gone. `--clear` removes the cache
+and does not touch the other file.
+
+`mikser.data.sqlite` holds credentials, so mikser adds it to `.gitignore`
+the first time it creates it. A working folder is usually a git repo, and
+`mikser-io-git` runs `git add -A` over it.
+
+Both are readable while a build runs (WAL mode), and it is often faster to
+ask them directly than to add logging.
 
 ```bash
 sqlite3 runtime/mikser.sqlite
 ```
 
-Five tables:
+The cache holds five tables:
 
 | Table | Holds |
 | --- | --- |
@@ -462,6 +477,15 @@ Five tables:
 | `mikser_refs` | the dependency graph, both directions |
 | `mikser_snapshots` | what was rendered, where, and from which inputs |
 | `mikser_meta` | schema version and config checksum, for cache invalidation |
+
+A plugin puts a table in the durable file by passing `durable: true` to
+`registerSchema` — the SQL is written exactly as it would be otherwise, and
+queries need no qualifier either, because the durable file is attached to the
+same connection and sqlite resolves an unqualified name across both.
+
+```js
+registerSchema('grants', 'CREATE TABLE IF NOT EXISTS my_grants (...)', { durable: true })
+```
 
 ### `mikser_journal`
 

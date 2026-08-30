@@ -56,9 +56,42 @@ the synchronization point.
 
 ## Decision
 
-### Single database file, schemas registered per subsystem
+### Two database files, schemas registered per subsystem
 
-One `runtime/mikser.sqlite` file. WAL mode + `synchronous=NORMAL` +
+Two files, split by whether the data is DERIVED.
+
+`runtime/mikser.sqlite` is the cache — catalog, refs, snapshots, journal.
+Per ADR-0002 the files on disk are the source of truth, so this can be
+deleted at any moment and costs a rebuild.
+
+`mikser.data.sqlite`, at the working-folder ROOT, is everything that is not
+derived: OAuth clients and refresh tokens, the change-set log. No file can
+reproduce it, so deleting it is data loss.
+
+They were one file, with a `durable: true` flag exempting tables from the
+wipe. That required a LIST of which tables were which, and the list was where
+the bugs lived — a config that did not load the owning plugin saw no durable
+tables and unlinked them; `--clear` had to be routed through the wipe rather
+than removing the file; the table names had to be parsed back out of DDL.
+Two files delete the list: a wipe is `unlink` again, and what must survive it
+is not in the file being unlinked. The durable file lives outside `runtime/`
+because that folder exists to be thrown away.
+
+`registerSchema(name, sql, { durable: true })` is unchanged as an API. A
+durable schema is applied on a short-lived connection whose own `main` is the
+durable file, so its unqualified `CREATE TABLE` lands there; the engine's
+connection then ATTACHes that file, so queries need no qualifier either.
+Requiring plugins to write `durable.` in their DDL was rejected: the decision
+would then be expressed twice, in the flag and in the SQL, and a plugin that
+set the flag and forgot the prefix would silently store its data in the file
+that gets deleted.
+
+The sync constraint below is a property of the CACHE only — render workers
+need a sync handle for template helpers. The durable store is read and
+written on the main thread alone, which is what leaves it free to move to
+another engine later.
+
+For the cache: WAL mode + `synchronous=NORMAL` +
 `foreign_keys=ON`. Every persistent subsystem registers its schema via
 `registerSchema(name, sql)` at module-eval time; the database is
 opened once in `onInitialize` and applies all registered schemas

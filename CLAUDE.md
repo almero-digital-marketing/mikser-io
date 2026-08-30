@@ -139,6 +139,10 @@ brevity.
   resolve them via dynamic import.
 - `database/` — `createSqliteDatabase()`, `registerSchema()`,
   `useDatabase()` (the `mikser_meta` table stamps schema_version).
+  Durable schemas are applied on a separate connection whose own `main`
+  is `mikser.data.sqlite`, then that file is ATTACHed as `durable`;
+  `adoptFromCache` carries tables out of a pre-split database, driven by
+  the `durable_tables` record the old design kept.
   `sift-to-sql.js` translates sift filters to SQL WHERE clauses
   against `INDEXED_COLUMNS`; un-pushed clauses fall through to
   JS-side sift. `query-context.js` is the AsyncLocalStorage that
@@ -150,6 +154,12 @@ brevity.
 - `server.js` — Express bring-up: CLI flags (`--server`, `--cors`,
   `--no-cors`), trust-proxy, CORS (with extensible header arrays for
   plugins to push onto), late-binding static mount + listen.
+- `report.js` — the `--json` build report. `warnings` is a VIEW of
+  `logger.warn`; `faults` is a view of `logger.error` **carrying a
+  `code`** — a subsystem declaring it cannot work, deduped by that code,
+  never cleared per cycle, and surfaced in `mikser_ping`. The log call is
+  the only registration for either; there is no `reportWarning()` or
+  `registerFault()` and there must not be.
 - `logger.js` — pino + pino-pretty (inline) + gauge progress + custom
   Writable for progress coordination + `pino.multistream` for
   third-party shipping. Two registration surfaces for transports:
@@ -434,10 +444,17 @@ Test coverage: `test/unit/source-sweep.test.js`.
 - **0008** — MCP-UI rendering + action delivery. Lives in
   `mikser-io-mcp/documentation/decisions/` (not core — moved with
   MCP).
-- **0009** — Sqlite is the engine's persistence substrate. Single
-  `runtime/mikser.sqlite` holds `mikser_entities` / `mikser_refs` /
-  `mikser_snapshots` / `mikser_journal` (+ `mikser_meta` for the
-  schema-version stamp). Sift→SQL pushdown + LRU for findById;
+- **0009** — Sqlite is the engine's persistence substrate. TWO files.
+  `runtime/mikser.sqlite` is the derived CACHE — `mikser_entities` /
+  `mikser_refs` / `mikser_snapshots` / `mikser_journal` (+ `mikser_meta`
+  for the schema-version stamp) — deletable at any moment.
+  `mikser.data.sqlite` at the WORKING-FOLDER ROOT holds everything not
+  derived (auth grants, the change-set log); `registerSchema(name, sql,
+  { durable: true })` routes a table there, SQL unchanged and queries
+  unqualified (it is ATTACHed as `durable`). It lives outside `runtime/`
+  because that folder exists to be deleted, and mikser gitignores it
+  because it holds credentials. The sync constraint is a property of the
+  CACHE only — the durable store is main-thread-only. Sift→SQL pushdown + LRU for findById;
   worker-side read-only sqlite for sync template helpers.
   `registerSchema(name, sql)` + `useDatabase()` is the plugin-side
   persistence pattern. Journal-on-sqlite (Phase 7) enables `--resume`;
