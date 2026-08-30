@@ -197,7 +197,8 @@ export function reportSkipped(entity, reason) {
 //
 // So the contract is the log call: `logger.warn({ code, ...fields }, msg)`.
 // `code` is what anyone asserting on the report matches on, and renaming one
-// is a breaking change.
+// is a breaking change. captureFault below is the same contract at error
+// level, where the code is required rather than conventional.
 //
 // Still gated on the report being wanted: in a long watch session nobody asked
 // to report on, this would otherwise grow without bound.
@@ -205,6 +206,73 @@ export function captureWarning(record) {
     if (!reportWanted()) return
     const { level, time, pid, hostname, msg, ...fields } = record
     store().warnings.push({ ...fields, ...(msg ? { message: msg } : {}) })
+}
+
+// The same view, one level up. An error carrying a `code` is a FAULT: a named
+// condition a subsystem reported about ITSELF, as distinct from `errors`,
+// which is one render that ran and threw.
+//
+// The contract is again the log call — `logger.error({ code, ...fields }, msg)`
+// — so there is no second way to raise one, exactly as there is no second way
+// to raise a warning. What differs is that the code is REQUIRED rather than
+// merely conventional: uncoded error records are events about one thing
+// (`Render error: doc-1`), already carried in `errors` with the entity
+// attached, and a build failing forty renders must not report forty faults.
+// The code is the fault's identity, and identity is what makes forty
+// occurrences one condition with a count.
+//
+// Deliberately NOT gated on reportWanted(), and never cleared per cycle:
+//
+//   A subsystem that cannot do its job goes on not doing it after the cycle
+//   that noticed ends. And the reader who most needs to know is not the
+//   operator watching the terminal — they saw the log line — but an agent
+//   connecting an hour later, for which the log is a channel it never reads.
+//   A search returning [] because it is broken and one returning [] because
+//   nothing matched are otherwise the same answer.
+//
+// Bounded by the number of distinct codes, which is why deduping is not
+// optional here the way it would be for a per-cycle list.
+export function captureFault(record) {
+    const { level, time, pid, hostname, msg, code, ...fields } = record
+    const at = time ?? Date.now()
+    const seen = faultStore().get(code)
+    if (seen) {
+        // The first occurrence keeps its fields. A later one is the same
+        // condition reported again, not new information about it.
+        seen.count++
+        seen.last = at
+        return
+    }
+    faultStore().set(code, {
+        code,
+        ...fields,
+        ...(msg ? { message: msg } : {}),
+        count: 1,
+        first: at,
+        last: at,
+    })
+}
+
+function faultStore() {
+    runtime.state ??= {}
+    runtime.state.faults ??= new Map()
+    return runtime.state.faults
+}
+
+// Every fault raised since the process started, most recently seen first.
+//
+// `last` is what tells a reader whether it is still happening: a fault whose
+// only occurrence was at boot and one still firing every cycle are different
+// facts, and presence alone expresses neither.
+export function faults() {
+    return [...faultStore().values()].sort((a, b) => b.last - a.last)
+}
+
+// For tests. Nothing in a running engine decides on a subsystem's behalf that
+// it has recovered — the condition that raised a fault is fixed by an
+// operator, and the restart that follows is what clears it.
+export function resetFaults() {
+    faultStore().clear()
 }
 
 // A render that RAN and THREW. Recorded unconditionally — not gated on
@@ -257,6 +325,12 @@ export function buildReport() {
         // failed build, whatever the other counts say.
         errors: errorStore(),
         warnings: report.warnings,
+        // Named conditions reported at error level: a subsystem saying it
+        // cannot work, as opposed to `errors`, which is a render that threw.
+        // Carried whole rather than filtered to this cycle — a fault raised at
+        // boot is still true during this build, and `last` says when it was
+        // last seen.
+        faults: faults(),
         summary: {
             rendered: report.rendered.length,
             errors: errorStore().length,
@@ -270,6 +344,7 @@ export function buildReport() {
             // number — see reportGated.
             gated: report.gated,
             warnings: report.warnings.length,
+            faults: faults().length,
         },
     }
 }

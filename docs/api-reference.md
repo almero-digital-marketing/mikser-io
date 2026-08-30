@@ -62,8 +62,16 @@ logger.info('Hello %s', 'world')
 logger.debug({ data }, 'Debug message')
 logger.warn('Something might be wrong')
 logger.error('Something failed: %s', err.message)
+logger.error({ code: 'vector-index' }, 'The index is unreadable: %s', err.message)  // a fault
 logger.notice('Completion message')  // styled green in info mode
 ```
+
+Two levels are also read by the build report, and the log call is the only way
+to raise either. `logger.warn({ code, ...fields }, msg)` becomes a `warnings`
+entry for that cycle. `logger.error` **with a `code`** becomes a *fault* — a
+subsystem declaring it cannot work — which persists across cycles and shows up
+in `mikser_ping`. Uncoded error lines are ordinary errors and are not captured.
+See [Diagnostics → Faults](./diagnostics.md#faults).
 
 ---
 
@@ -1077,6 +1085,12 @@ by; `whenCycleCompletes(id)` resolves once it finishes, with its report.
 Together they turn "write and guess" into one call that says what the edit
 invalidated. `currentCycle()` and `buildReport()` read the cycle in progress and
 the last completed report.
+
+`faults()` returns every fault raised since the process started — subsystems
+that have reported they cannot work — most recently seen first. Each entry
+carries its `code`, message, any fields from the log call, and `count` /
+`first` / `last`. Faults are raised by logging at error level with a `code`
+and nothing else; see [Diagnostics → Faults](./diagnostics.md#faults).
 
 ## Logging
 

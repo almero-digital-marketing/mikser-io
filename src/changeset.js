@@ -199,6 +199,13 @@ function prune(handle) {
 
 // Said once per process, not once per write: a broken log is one condition,
 // and repeating it per write buries the builds that follow it.
+//
+// The `code` is what makes this a FAULT rather than one more error line — it
+// is the identity report.js dedupes on, and what puts the condition in
+// mikser_ping. Without it the only reader is whoever is watching the terminal
+// at the moment it scrolls past, and the agent that asks for its change sets
+// an hour later sees an empty list with nothing to say it is empty because
+// the log is broken.
 let failureReported = false
 function reportChangeSetFailure(err) {
     if (failureReported) return
@@ -206,7 +213,7 @@ function reportChangeSetFailure(err) {
     const message = 'The change-set log could not be written (%s). Writes still land on disk, but they cannot be '
         + 'listed or undone until this is fixed.'
     try {
-        runtime.engine?.logger?.error(message, err.message)
+        runtime.engine?.logger?.error({ code: 'change-set-log' }, message, err.message)
     } catch { /* no logger yet — the console is what is left */ }
     if (!runtime.engine?.logger) console.error(message.replace('%s', err.message))
 }

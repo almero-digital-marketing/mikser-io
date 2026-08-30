@@ -31,16 +31,18 @@ import { Writable } from 'node:stream'
 import runtime from './runtime.js'
 import { useLogger } from './engine.js'
 import { onLoad } from './lifecycle.js'
-import { captureWarning } from './report.js'
+import { captureWarning, captureFault } from './report.js'
 
 // Custom level — `notice` slots between info and warn. Used by mikser
 // for "the build cycle completed" / "the engine restarted" lines that
 // want visibility above info noise but aren't warnings.
 const CUSTOM_LEVELS = { notice: 35 }
 
-// pino's numeric level for warn. The report keeps warn and error apart, so
-// the capture stream matches on this exactly rather than on ">= warn".
+// pino's numeric levels. The report keeps warn and error in separate buckets,
+// so the capture stream routes on these rather than taking everything the
+// stream hands it as one kind of thing.
 const WARN_LEVEL = 40
+const ERROR_LEVEL = 50
 
 // Plugin-side log transport registry — paired with `addLogTransport`
 // below. Two-state lifecycle:
@@ -184,16 +186,25 @@ export function createMikserLogger(level = 'info') {
 
     const streams = [{ level, stream: prettyStream }]
 
-    // The build report's `warnings` are a view of this stream rather than a
-    // channel of their own. Anything that calls logger.warn is a warning,
+    // The build report's `warnings` and `faults` are views of this stream
+    // rather than channels of their own. Anything that calls logger.warn is a
+    // warning and anything that calls logger.error with a `code` is a fault,
     // wherever it was raised — including inside a render worker, whose logger
     // already comes back over the IPC port and is re-emitted here, so no
-    // separate transport is needed to carry one out of a thread.
+    // separate transport is needed to carry either out of a thread.
     //
-    // Filtered to warn exactly. multistream would also hand this every error,
-    // and the report keeps those in a bucket of their own: `errors` means a
-    // render THREW and wrote nothing, which is a different fact about the
-    // build than "this shipped and it is wrong".
+    // One stream, two destinations, because the two are different facts and
+    // the report keeps them apart. A warning says something shipped and is
+    // wrong; a coded error says a subsystem cannot work at all. `errors` in
+    // the report is neither — it means a render THREW and wrote nothing, and
+    // stays exactly what it was.
+    //
+    // Uncoded error records are not captured. Those are events about one
+    // thing (`Render error: doc-1`), which already travels in `errors` with
+    // the entity attached, and a fault needs an identity to be one condition
+    // rather than forty. Note that `logger.error(err, msg)` puts an errno
+    // under `err` rather than at the top level, so a raw throw logged that way
+    // does not accidentally become a fault.
     streams.push({
         level: 'warn',
         stream: new Writable({
@@ -203,6 +214,7 @@ export function createMikserLogger(level = 'info') {
                     try {
                         const record = JSON.parse(line)
                         if (record.level === WARN_LEVEL) captureWarning(record)
+                        else if (record.level >= ERROR_LEVEL && record.code) captureFault(record)
                     } catch { /* not a record we can read; the terminal still got it */ }
                 }
                 callback()

@@ -25,6 +25,7 @@ engine source, the entry point is missing and belongs on this page.
 | What would break if I changed this file? | [`runtime.manifest`](#runtimemanifest) `affectedBy` |
 | I am an agent reading CLI output, not speaking MCP | [`--tools` / `--tool`](#the-two-agent-workflows) |
 | Did my schema validate anything at all? | [`schemas.names()`](#schemasnames--schemaslookup) |
+| A tool answered emptily — is it broken, or is there nothing to find? | [`faults`](#faults) |
 
 ## Command line
 
@@ -137,7 +138,7 @@ under this flag, so stdout parses whole.
 npx mikser --json | jq '.summary'
 ```
 
-Five buckets, and the distinction between them is the point:
+The buckets, and the distinction between them is the point:
 
 | Bucket | Meaning |
 | --- | --- |
@@ -146,6 +147,8 @@ Five buckets, and the distinction between them is the point:
 | `unchanged` | the render ran and produced bytes identical to what was already on disk |
 | `errors` | the render ran and **threw** — with `id`, `destination`, `error`, `layout` |
 | `gated` | a count — the source was unchanged, so no render was ever scheduled |
+| `warnings` | everything that went through `logger.warn` this cycle, with its `code` |
+| `faults` | subsystems that reported they **cannot work** — see [Faults](#faults) |
 
 Each report also carries `cycleId`, `startedAt` and `finishedAt`. Under
 `--watch` two consecutive reports are otherwise indistinguishable, so
@@ -657,6 +660,64 @@ content is clean.
 get, stats, config }` — the on-demand render cache, useful for asking
 what has been rendered outside a build.
 
+## Faults
+
+A **fault** is a subsystem saying it cannot do its job — as opposed to an
+error, which is one render that ran and threw.
+
+The difference matters because of how a broken subsystem fails. It does not
+raise; it answers. Search returns `[]`. The change-set log lists nothing.
+`affectedBy` reports that nothing is affected. Every one of those is
+byte-identical to the answer a *working* subsystem gives when there is
+genuinely nothing to report, which is why this class of bug is normally found
+by someone noticing the site is wrong days later.
+
+A fault is raised by logging at error level with a `code`:
+
+```js
+useLogger().error({ code: 'change-set-log' },
+    'The change-set log could not be written (%s). Writes still land on disk, '
+    + 'but they cannot be listed or undone until this is fixed.', err.message)
+```
+
+That log call is the *only* registration — the same contract as warnings,
+where `report.warnings` is a view of what went through `logger.warn`. There is
+no `registerFault()`, because a second way to raise one is a second thing to
+forget.
+
+The `code` is required, and is what separates a fault from an ordinary error
+line. It is the condition's identity, so forty occurrences are one fault with
+`count: 40` rather than forty faults. An uncoded `logger.error('Render error:
+%s', id)` is an event about one entity and already travels in `errors` with the
+entity attached. `logger.error(err, msg)` does not become a fault either — pino
+puts an errno under `err`, not at the top level, so a raw throw logged that way
+stays an event.
+
+Faults are recorded whether or not anyone asked for a report, and are **not**
+cleared between cycles. Both are deliberate: a subsystem that cannot work goes
+on not working after the cycle that noticed it ends, and the reader who most
+needs to know is usually not the operator watching the terminal — they saw the
+log line — but an agent connecting an hour later, for which the log is a
+channel it never reads.
+
+Where they surface:
+
+| Surface | Shape |
+| --- | --- |
+| `--json` | the `faults` array and `summary.faults` |
+| `mikser_ping` | a `faults` key, **absent** when there are none |
+| `faults()` | the same array, for a plugin or a REPL |
+
+Each entry carries the `code`, the message, any fields from the log call, and
+`count` / `first` / `last`. `last` is the field that says whether it is still
+happening: a fault seen once at boot and one firing every cycle read the same
+by presence alone.
+
+Nothing clears a fault. The condition is fixed by an operator, and the restart
+that follows is what clears it — an engine deciding on a subsystem's behalf
+that it has recovered would be inventing the one fact this surface exists to
+report honestly.
+
 ## When mikser is silent
 
 Silence is this engine's characteristic failure mode: a declaration that
@@ -677,6 +738,10 @@ surfaces that turn silence into a statement:
   part in cache invalidation, so a config change forces a rebuild; but a
   module the config *imports* does not. If you changed a helper the config
   pulls in, use `--force`.
+- **A tool that answers emptily because it is broken** — check
+  [`faults`](#faults) before reading an empty result as a fact about the
+  site. This is the one case where the answer and the failure are the same
+  bytes.
 - **A plugin that appears to do nothing** — `No plugins loaded` with a
   config present is a warning naming the file. A config that fails to
   load now exits non-zero rather than loading as empty.
