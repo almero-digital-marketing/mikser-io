@@ -24,6 +24,7 @@ import runtime from './runtime.js'
 import { readEntity, findEntities } from './catalog.js'
 import { useCollection, checksum, readEntityContent } from './utils.js'
 import { nextCycleId, whenCycleCompletes } from './report.js'
+import { recordChangeSetWrite } from './changeset.js'
 
 // How far into a file to look for a marker. A header nobody reads is not a
 // header; one buried 200 lines down is not either.
@@ -167,6 +168,9 @@ export async function writeEntitySource({
     ifChecksum,
     dryRun = false,
     awaitCycle = false,
+    changeSet,
+    summary,
+    principal,
 } = {}) {
     if (id) {
         const located = await locateEntityFile(id)
@@ -260,11 +264,17 @@ export async function writeEntitySource({
     const cycleId = nextCycleId()
     await handle.write(relativePath, content)
 
+    // AFTER the write, so a set only ever claims paths that actually moved.
+    // Claiming on intent would make a failed write undoable, and undoing a
+    // write that never happened is a way to delete someone else's file.
+    if (changeSet) recordChangeSetWrite({ changeSet, summary, principal, uri })
+
     const result = {
         ok: true, collection, relativePath,
         checksum: await fileChecksum(uri),
         bytes: Buffer.byteLength(content),
         cycleId,
+        ...(changeSet ? { changeSet } : {}),
         siblingDestinations: await siblingDestinations(handle.folder, relativePath),
     }
     // Echoed on the way out, not only on read. A caller that never read the
