@@ -45,7 +45,7 @@ function* walkPartials(node) {
 // helper args) can surface them under additional keys.
 export function parseReferences(source) {
     if (typeof source !== 'string' || !source) {
-        return { variables: [], partials: [], iterations: [], assigns: [], helpers: [] }
+        return { variables: [], partials: [], iterations: [], assigns: [], optional: [], helpers: [] }
     }
     let ast
     try {
@@ -53,7 +53,7 @@ export function parseReferences(source) {
     } catch (err) {
         // Author-side parse failure shouldn't kill inspect(). Surface
         // the message and an empty result.
-        return { variables: [], partials: [], iterations: [], assigns: [], helpers: [], parseError: err.message }
+        return { variables: [], partials: [], iterations: [], assigns: [], optional: [], helpers: [], parseError: err.message }
     }
 
     const variables  = new Set()
@@ -62,6 +62,12 @@ export function parseReferences(source) {
     const partials   = new Map()
     const iterations = []
     const helpers    = new Set()
+    // Keys the template reads only behind a guard, so their absence is
+    // tolerated rather than a gap. The same distinction liquid draws: a
+    // contract that reports every key as required makes an optional section
+    // look like a missing one, and an editor chases a field the page never
+    // needed.
+    const optional   = new Set()
 
     // Handlebars has no file-scoped assignment; aliases come from block
     // params (`as |x|`), which are scoped to their block. That scope is known
@@ -73,9 +79,12 @@ export function parseReferences(source) {
         const base = scope[head]
         return base ? [base, ...rest].join('.') : path
     }
-    const record = (path, scope) => {
+    const record = (path, scope, guarded = false) => {
         const resolved = deref(path, scope)
-        if (resolved) variables.add(resolved)
+        if (resolved) {
+            variables.add(resolved)
+            if (guarded) optional.add(resolved)
+        }
         return resolved
     }
     // A partial argument's path, or null when it is a literal — a quoted
@@ -86,16 +95,16 @@ export function parseReferences(source) {
     // pollute the helpers set. `each` shows up as an iteration instead.
     const BUILTIN_BLOCKS = new Set(['if', 'unless', 'each', 'with', 'lookup'])
 
-    function visit(node, scope = {}) {
+    function visit(node, scope = {}, guarded = false) {
         if (!node || typeof node !== 'object') return
         switch (node.type) {
             case 'Program':
-                for (const child of node.body ?? []) visit(child, scope)
+                for (const child of node.body ?? []) visit(child, scope, guarded)
                 break
             case 'MustacheStatement':
                 // {{path.to.var}} — record the path.
                 if (node.path?.type === 'PathExpression' && !BUILTIN_BLOCKS.has(node.path.original)) {
-                    record(node.path.original, scope)
+                    record(node.path.original, scope, guarded)
                 }
                 // {{helper arg1 arg2}} with args → it's a helper call.
                 if (node.params?.length && node.path?.original && !BUILTIN_BLOCKS.has(node.path.original)) {
@@ -103,8 +112,8 @@ export function parseReferences(source) {
                 }
                 // Walk param paths too — they're variable refs.
                 for (const param of node.params ?? []) {
-                    if (param?.type === 'PathExpression') record(param.original, scope)
-                    if (param?.type === 'SubExpression') visit(param, scope)
+                    if (param?.type === 'PathExpression') record(param.original, scope, guarded)
+                    if (param?.type === 'SubExpression') visit(param, scope, guarded)
                 }
                 break
             case 'SubExpression':
@@ -155,8 +164,16 @@ export function parseReferences(source) {
                         if (param?.type === 'SubExpression') visit(param, scope)
                     }
                 }
-                if (node.program) visit(node.program, inner)
-                if (node.inverse) visit(node.inverse, scope)
+                // `if` and `unless` are what make the content inside them
+                // optional; `each` and `with` are not — they narrow scope, and
+                // a key read inside one is read whenever the block runs at all.
+                //
+                // The CONDITION itself stays required: `{{#if hero}}` reads
+                // `hero` unconditionally to decide, exactly as liquid's `case`
+                // subject does.
+                const guards = node.path?.original === 'if' || node.path?.original === 'unless'
+                if (node.program) visit(node.program, inner, guarded || guards)
+                if (node.inverse) visit(node.inverse, scope, guarded || guards)
                 break
             }
             case 'PartialStatement':
@@ -200,6 +217,8 @@ export function parseReferences(source) {
         // params, already resolved above. Present and empty so every engine
         // returns the same shape and no caller has to branch on the engine.
         assigns:    [],
+        // Read only behind `{{#if}}` / `{{#unless}}`, so absence is tolerated.
+        optional:   Array.from(optional).sort(),
         helpers:    Array.from(helpers).sort(),
     }
 }

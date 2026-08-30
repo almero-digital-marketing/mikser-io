@@ -5,6 +5,8 @@ import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
+import { parseReferences as parseHbs } from '../../src/plugins/render/hbs.js'
+
 import { useRenderer } from '../../src/render.js'
 
 // Build a minimal runtime-like object exposing the surface useRenderer
@@ -380,5 +382,49 @@ describe('useRenderer', () => {
         await assert.rejects(() => render({ id: '/x' }, { timeout: 30 }), /Render timeout/)
         const elapsed = Date.now() - start
         assert.ok(elapsed < 200, `should time out fast, elapsed=${elapsed}ms`)
+    })
+})
+
+// A key read only behind a guard is not a missing key.
+//
+// The contract exists so an editor can be told what a layout needs. Reporting
+// every key as required makes an optional section look like a gap, and sends
+// someone chasing a field the page never wanted — which is the failure the
+// whole contract was built to prevent, arriving from the other side.
+describe('handlebars: optional keys', () => {
+    const parse = (src) => parseHbs(src)
+
+    it('marks what is read inside an if as tolerated', () => {
+        const r = parse('{{#if hero}}<img src={{hero.image}}>{{/if}}')
+        assert.ok(r.optional.includes('hero.image'))
+    })
+
+    it('keeps the condition itself required', () => {
+        // `{{#if hero}}` reads `hero` to decide. That read always happens.
+        const r = parse('{{#if hero}}<img src={{hero.image}}>{{/if}}')
+        assert.ok(!r.optional.includes('hero'), 'the condition is not optional — it is how the choice is made')
+        assert.ok(r.variables.includes('hero'))
+    })
+
+    it('treats unless the same way', () => {
+        const r = parse('{{#unless compact}}<p>{{summary}}</p>{{/unless}}')
+        assert.ok(r.optional.includes('summary'))
+        assert.ok(!r.optional.includes('compact'))
+    })
+
+    it('does not treat each or with as guards', () => {
+        // They narrow scope; they do not make the content conditional on a
+        // key being present. A key read inside one is read whenever the block
+        // runs at all.
+        const r = parse('{{#each cases as |c|}}{{c.name}}{{/each}}{{#with hero}}{{title}}{{/with}}')
+        assert.deepEqual(r.optional, [])
+    })
+
+    it('reports nothing optional when nothing is guarded', () => {
+        assert.deepEqual(parse('<h1>{{title}}</h1>').optional, [])
+    })
+
+    it('returns the field even for an empty template, so no caller branches', () => {
+        assert.deepEqual(parse('').optional, [])
     })
 })
