@@ -844,6 +844,36 @@ AsyncLocalStorage than the engine's, queries record no edges, and index pages,
 sitemaps and feeds silently stop rebuilding. Production consumers resolve both
 from their own tree, so the problem is local to the dev workspace.
 
+## Inventory
+
+What this mikser is made of.
+
+### `inventory({ workingFolder } = {})`
+
+Every installed mikser package with its version, purpose and links, and
+`active: true` on the ones actually running.
+
+```js
+[
+  { name: 'mikser-io-drive', version: '0.14.0', active: true,
+    summary: 'WebDAV for mikser-io. Exposes working-folder directories as …',
+    homepage: '…', repository: 'https://github.com/…', npm: 'https://www.npmjs.com/package/…' },
+]
+```
+
+**Derived, never declared.** Every plugin already carries a description, a
+homepage and a repository in its own `package.json`, kept current because npm
+publishes from it. A second summary held elsewhere would be one more thing to
+drift — and the first time it drifted it would be describing a plugin that had
+changed underneath it.
+
+**Installed and active are different facts.** A package in `node_modules` that
+no config loads explains nothing about a site's behaviour, and an agent told
+otherwise looks for a feature that is not switched on. `active` is reported
+only where it can be established — a plugin that mounts a route names itself
+there, a renderer registers under a known name — and is absent rather than
+`false` where it cannot, because `false` would be a claim.
+
 ## Roles
 
 Enforcement needs only the flat capability list. Explaining a refusal needs the

@@ -3,6 +3,7 @@ export * as constants from './src/constants.js'
 export * from './src/utils.js'
 export * from './src/auth.js'
 export * from './src/roles.js'
+export * from './src/inventory.js'
 export * from './src/report.js'
 // The diagnostics behind --explain. Exported so a transport — the MCP tool
 // surface, the api plugin's routes — can serve the same structured report the

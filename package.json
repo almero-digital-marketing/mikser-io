@@ -1,7 +1,7 @@
 {
   "name": "mikser-io",
-  "version": "9.52.0",
-  "description": "<p align=\"center\">   <img src=\"mikser-lockup-stacked.svg\" alt=\"mikser\" width=\"198\" /> </p>",
+  "version": "9.53.0",
+  "description": "A mixer for content: entities in, configurable render pipelines, outputs of any kind. Static sites are the canonical recipe, not the definition — the same engine renders PDFs, emails and whatever a renderer plugin produces. Files are the source of truth, every lifecycle phase is observable, and the build graph is queryable by an agent.",
   "main": "index.js",
   "exports": {
     ".": "./index.js",
