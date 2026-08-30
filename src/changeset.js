@@ -185,6 +185,20 @@ function prune(handle) {
     `).run(KEEP_SETS)
 }
 
+// Said once per process, not once per write: a broken log is one condition,
+// and repeating it per write buries the builds that follow it.
+let failureReported = false
+function reportChangeSetFailure(err) {
+    if (failureReported) return
+    failureReported = true
+    const message = 'The change-set log could not be written (%s). Writes still land on disk, but they cannot be '
+        + 'listed or undone until this is fixed.'
+    try {
+        runtime.engine?.logger?.error(message, err.message)
+    } catch { /* no logger yet — the console is what is left */ }
+    if (!runtime.engine?.logger) console.error(message.replace('%s', err.message))
+}
+
 function rowsToSets(handle, rows) {
     const stmt = handle.prepare(
         'SELECT path, operation FROM mikser_change_set_paths WHERE change_set = ? ORDER BY path')
@@ -283,7 +297,16 @@ export function recordChangeSetWrite({
 
     const handle = db()
     if (handle) {
-        try { persist(handle, set, rel, operation, entityId) } catch { /* memory still holds it */ }
+        try {
+            persist(handle, set, rel, operation, entityId)
+        } catch (err) {
+            // Loud. A swallowed failure here is invisible in exactly the way
+            // that matters: the write succeeds, an id comes back, and the log
+            // it points at silently never gains a row — which is how a stale
+            // column shape turned the whole feature into a no-op that looked
+            // like it was working.
+            reportChangeSetFailure(err)
+        }
     }
     return set.id
 }
@@ -298,7 +321,9 @@ export function pendingChangeSets() {
                 SELECT * FROM mikser_change_sets WHERE recorded_at IS NULL ORDER BY created_at ASC
             `).all()
             return rowsToSets(handle, rows).filter(set => set.paths.length)
-        } catch { /* fall through to memory */ }
+        } catch (err) {
+            reportChangeSetFailure(err)
+        }
     }
     return memorySets(set => !set.recordedAt).sort((a, b) => a.startedAt - b.startedAt)
 }
@@ -313,7 +338,9 @@ export function listChangeSets({ limit = 20 } = {}) {
                 SELECT * FROM mikser_change_sets ORDER BY created_at DESC LIMIT ?
             `).all(Math.max(1, Math.min(limit, 200)))
             return rowsToSets(handle, rows)
-        } catch { /* fall through to memory */ }
+        } catch (err) {
+            reportChangeSetFailure(err)
+        }
     }
     return memorySets().sort((a, b) => b.startedAt - a.startedAt).slice(0, limit)
 }

@@ -104,6 +104,78 @@ let db = null
 // duplicate detection. Same name twice = the later registration wins
 // (with a warning). Convention: `<owner>` matching the table prefix
 // (`catalog`, `manifest`, `vector`, etc.).
+// Column names a CREATE TABLE body declares, in order.
+//
+// Only the leading identifier of each top-level comma-separated clause, and
+// only when it is not a table constraint. Good enough for the schemas this
+// engine registers, and deliberately not a SQL parser.
+function columnsFrom(sqlScript, table) {
+    const re = new RegExp(
+        `CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?[\`"'\\[]?${table}[\`"'\\]]?\\s*\\(`, 'i')
+    const m = re.exec(sqlScript)
+    if (!m) return []
+    // Walk to the matching close paren so nested types and CHECK(...) do not
+    // end the body early.
+    let depth = 1
+    let i = m.index + m[0].length
+    const start = i
+    for (; i < sqlScript.length && depth > 0; i++) {
+        if (sqlScript[i] === '(') depth++
+        else if (sqlScript[i] === ')') depth--
+    }
+    const body = sqlScript.slice(start, i - 1)
+
+    const clauses = []
+    let current = ''
+    depth = 0
+    for (const ch of body) {
+        if (ch === '(') depth++
+        else if (ch === ')') depth--
+        if (ch === ',' && depth === 0) { clauses.push(current); current = '' } else current += ch
+    }
+    clauses.push(current)
+
+    const CONSTRAINTS = new Set(['primary', 'unique', 'foreign', 'check', 'constraint'])
+    return clauses
+        .map(clause => clause.replace(/--[^\n]*/g, '').trim())
+        .filter(Boolean)
+        .map(clause => clause.split(/\s+/)[0].replace(/["`\[\]]/g, ''))
+        .filter(name => name && !CONSTRAINTS.has(name.toLowerCase()))
+}
+
+// Add columns a DURABLE table has grown since it was created.
+//
+// `CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists, so
+// re-applying a schema never adds a column. For a cache table that is
+// invisible: the version bump wipes and recreates it. A durable table is
+// exactly the one that SURVIVES the wipe, so it is the only kind that can go
+// stale — and it goes stale silently, with every insert naming the new column
+// failing against a table that still has the old shape.
+function migrateDurableColumns(handle, schemas, logger) {
+    for (const value of schemas?.values?.() ?? []) {
+        const { sql, durable } = schemaEntry(value)
+        if (!durable) continue
+        for (const table of tableNamesFrom(sql)) {
+            let existing
+            try {
+                existing = new Set(handle.prepare(`PRAGMA table_info("${table}")`).all().map(c => c.name))
+            } catch { continue }
+            if (!existing.size) continue
+            for (const column of columnsFrom(sql, table)) {
+                if (existing.has(column)) continue
+                // Only ever ADD. Dropping or retyping a column in a durable
+                // table would discard data the whole flag exists to keep.
+                try {
+                    handle.exec(`ALTER TABLE "${table}" ADD COLUMN "${column}"`)
+                    logger?.info('Durable table %s gained column %s', table, column)
+                } catch (err) {
+                    logger?.warn('Could not add column %s to %s: %s', column, table, err.message)
+                }
+            }
+        }
+    }
+}
+
 // Table names a schema script creates. Used to decide what a cache wipe
 // must leave alone — the registry knows schema NAMES, and the wipe works in
 // tables.
@@ -498,7 +570,8 @@ export function createSqliteDatabase({
         }
 
         // Apply each subsystem's registered schema script. Idempotent
-        // CREATE statements mean replay-safe across opens.
+        // CREATE statements mean replay-safe across opens — but only for
+        // tables they can recreate; see migrateDurableColumns below.
         for (const [name, value] of schemas) {
             const { sql: sqlScript } = schemaEntry(value)
             try {
@@ -511,6 +584,11 @@ export function createSqliteDatabase({
                 throw new Error(`Schema "${name}" failed to apply: ${err.message}`)
             }
         }
+
+        // A durable table survives the wipe, so re-applying its CREATE is not
+        // enough to give it a column the schema has grown. Reconciled here,
+        // additively.
+        migrateDurableColumns(handle, schemas, logger)
     }
 
     function close() {
