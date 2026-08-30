@@ -8,7 +8,9 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { reachOf, actingRole, rolesIn, describeAuthority, explainRefusal } from '../../src/roles.js'
+import {
+    reachOf, actingRole, rolesIn, describeAuthority, explainRefusal, registerCapability,
+} from '../../src/roles.js'
 
 // lmed's real shape: widening tiers built by readWrite(...).
 const rw = (...names) => names.flatMap(n => [`drive:${n}`, `drive:${n}:write`])
@@ -26,12 +28,40 @@ const SUMMARIES = {
 describe('what a capability list means', () => {
     it('separates what can be changed from what can only be read', () => {
         const reach = reachOf(['drive:documents', 'drive:documents:write', 'drive:layouts'])
-        assert.deepEqual(reach.writable, ['documents'])
-        assert.deepEqual(reach.readOnly, ['layouts'], 'readOnly is what makes a refusal explainable')
+        assert.deepEqual(reach.writable.map(r => r.name), ['documents'])
+        assert.deepEqual(reach.readOnly.map(r => r.name), ['layouts'],
+            'readOnly is what makes a refusal explainable')
     })
 
-    it('ignores capabilities that name no collection', () => {
-        assert.deepEqual(reachOf(['mcp:use', 'api:list']), { writable: [], readOnly: [] })
+    it('keeps a capability no plugin has explained, rather than dropping it', () => {
+        // A role described only by the part of it that maps to folders is not
+        // described. These belong in `also`, not nowhere.
+        const reach = reachOf(['mcp:use', 'api:list'])
+        assert.deepEqual(reach.writable, [])
+        assert.deepEqual(reach.readOnly, [])
+        assert.deepEqual(reach.also, ['api:list', 'mcp:use'])
+    })
+
+    it('carries the folder and purpose a plugin declared', () => {
+        // The point of the registry: core cannot know where `documents` lives
+        // or what it is for, and an agent reasoning about the site needs both.
+        registerCapability('drive:brochures', {
+            plugin: 'drive',
+            grants: 'read',
+            resource: { kind: 'collection', name: 'brochures', folder: 'files/brochures',
+                        summary: 'PDFs offered for download' },
+        })
+        const [resource] = reachOf(['drive:brochures']).readOnly
+        assert.equal(resource.folder, 'files/brochures')
+        assert.equal(resource.summary, 'PDFs offered for download')
+    })
+
+    it('still understands the drive convention when nothing declared it', () => {
+        // A deployment whose plugins predate the registry must keep its
+        // answer rather than reporting every collection as an opaque string.
+        const reach = reachOf(['drive:undeclared', 'drive:undeclared:write'])
+        assert.deepEqual(reach.writable.map(r => r.name), ['undeclared'])
+        assert.deepEqual(reach.also, [])
     })
 })
 
@@ -72,9 +102,9 @@ describe('the role listing', () => {
             'only the acting one is marked, so the flag means something')
     })
 
-    it('says what each role can reach, in collection names', () => {
+    it('says what each role can reach', () => {
         const editors = rolesIn(CATALOGUE).find(r => r.name === 'editors')
-        assert.deepEqual(editors.writable, ['documents', 'media'])
+        assert.deepEqual(editors.writable.map(r => r.name), ['documents', 'media'])
     })
 
     it('keeps capabilities that name no collection, so a role is described in full', () => {
@@ -88,10 +118,10 @@ describe('what ping reports', () => {
     it('reports an editor as editors, writing documents and media', () => {
         const a = describeAuthority({ capabilities: CATALOGUE.editors, roles: ['editors'], catalogue: CATALOGUE, summaries: SUMMARIES })
         assert.equal(a.role, 'editors')
-        assert.deepEqual(a.writable, ['documents', 'media'])
+        assert.deepEqual(a.writable.map(r => r.name), ['documents', 'media'])
         assert.equal(a.roleSummary, SUMMARIES.editors)
         const developers = a.roles.find(r => r.name === 'developers')
-        assert.ok(developers.writable.includes('layouts'), 'and shows who carries the rest')
+        assert.ok(developers.writable.some(r => r.name === 'layouts'), 'and shows who carries the rest')
     })
 
     it('reports an admin with nothing it cannot write', () => {

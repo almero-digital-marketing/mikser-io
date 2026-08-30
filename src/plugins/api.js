@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto'
 import _ from 'lodash'
 import sift from 'sift'
 import { resolveAuth, requireAuth, hasCapability, reachabilityOf } from '../auth.js'
+import { registerCapability } from '../roles.js'
 import { explain } from '../explain.js'
 import { buildReport, requestReport } from '../report.js'
 import { useRenderer } from '../render.js'
@@ -316,6 +317,17 @@ function sseSend(res, eventName, payload) {
     } catch { /* connection dropped — cleanup runs via 'close' */ }
 }
 
+// What each operation is, in words. Read by the capability registry so a
+// session can be told what `api:render` means without knowing this plugin.
+const API_OPERATIONS = {
+    list:        'read entities from the catalogue over HTTP',
+    update:      'create or change entities over HTTP',
+    delete:      'remove entities over HTTP',
+    render:      'trigger a render',
+    subscribe:   'hold an open connection for live changes',
+    diagnostics: 'read the build report and engine diagnostics',
+}
+
 export function api(options = {}) {
     return ({
         runtime,
@@ -445,6 +457,23 @@ export function api(options = {}) {
                 ? ['list', 'update', 'delete', 'render', 'subscribe']
                 : ['list']
             const allowedOps = new Set(ep.operations ?? defaultOps)
+
+            // What each api capability lets a caller DO, in the vocabulary of
+            // the catalogue rather than of HTTP. Declared here because this is
+            // where they are enforced — core should not have to know one
+            // plugin's operation names to explain a credential that holds
+            // them.
+            for (const op of allowedOps) {
+                registerCapability(`api:${op}`, {
+                    plugin: 'api',
+                    grants: 'operate',
+                    resource: {
+                        kind: 'operation',
+                        name: `api:${op}`,
+                        summary: API_OPERATIONS[op] ?? `the api's ${op} operation`,
+                    },
+                })
+            }
             // Recording the build report costs one entry per entity per
             // cycle, so it is off unless something can read it. An endpoint
             // exposing /report is that something.

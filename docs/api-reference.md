@@ -856,6 +856,36 @@ indistinguishable from inside a session.
 | `reachOf(capabilities)` | `{ writable, readOnly }` as collection names |
 | `actingRole(held, catalogue)` | which role is in force |
 | `rolesIn(catalogue, { acting, summaries })` | every role and its reach, the acting one marked |
+| `registerCapability(capability, meaning)` | declare what a capability protects |
+| `capabilityMeaning(capability)` | what is known about one |
+
+### Capabilities describe themselves
+
+Core does not know what `drive:layouts` protects, where that folder is, or what
+it is for — the plugin enforcing it does. So the plugin declares it, the same
+way it declares a route or a schema:
+
+```js
+registerCapability('drive:documents', {
+    plugin: 'drive',
+    grants: 'read',                       // 'read' | 'write' | 'operate'
+    resource: {
+        kind: 'collection',
+        name: 'documents',
+        folder: 'documents',              // where it is on disk
+        summary: 'the words on the pages' // what it is FOR
+    },
+})
+```
+
+`reachOf` then describes a credential in terms of the SITE rather than of
+verbs — a collection, its folder and its purpose — which is what an agent needs
+to reason about where it is working, not merely whether a call will be refused.
+A capability nothing has declared lands in `also` rather than being dropped: a
+role described only by the part of it that maps to folders is not described.
+
+The `drive:<name>[:write]` convention is still recognised for deployments whose
+plugins predate the registry, so they keep their answer.
 | `explainRefusal({ capability, role, target, catalogue, summaries })` | the sentence an agent repeats |
 
 `readOnly` is the field that makes a refusal explainable, and it is more useful

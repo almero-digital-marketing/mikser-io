@@ -22,27 +22,81 @@
 // whoever configures the site, and an agent's part in it is to say what it
 // cannot do and stop.
 
-// Capabilities follow `drive:<name>` to read and `drive:<name>:write` to
-// write. That convention is the whole mapping — it needs no list of endpoints
-// to stay correct as collections are added.
-const DRIVE = /^drive:([^:]+)(?::write)?$/
+// What each capability MEANS, declared by whoever owns it.
+//
+// Core used to carry a regex for `drive:<name>[:write]` — one plugin's naming
+// convention, hardcoded in the engine. It answered for drive and nothing else:
+// `api:list` and `mcp:use` came back as bare strings, a plugin adding its own
+// capability got no explanation at all, and the FOLDER behind a collection —
+// the thing an agent actually needs to reason about the site — was knowledge
+// core never had.
+//
+// A registry instead, the same shape as routes and schemas: the plugin that
+// enforces a capability is the one that can say what it protects, where it
+// lives and what it is for.
+const capabilityMeanings = new Map()
+
+// Declare one capability. Called by the plugin that enforces it.
+//
+//   registerCapability('drive:documents', {
+//       plugin: 'drive',
+//       grants: 'read',                       // 'read' | 'write' | 'operate'
+//       resource: {
+//           kind: 'collection',
+//           name: 'documents',
+//           folder: 'documents',              // where it is on disk
+//           summary: 'the words on the pages' // what it is FOR
+//       },
+//   })
+export function registerCapability(capability, meaning = {}) {
+    if (!capability) return
+    capabilityMeanings.set(capability, { capability, ...meaning })
+}
+
+export function capabilityMeaning(capability) {
+    const known = capabilityMeanings.get(capability)
+    if (known) return known
+    // Nothing declared it. The drive convention is still recognised, so a
+    // deployment whose plugins predate the registry keeps its answer rather
+    // than reporting every collection as an unexplained string.
+    const m = /^drive:([^:]+?)(:write)?$/.exec(capability)
+    if (!m) return null
+    return {
+        capability,
+        plugin: 'drive',
+        grants: m[2] ? 'write' : 'read',
+        resource: { kind: 'collection', name: m[1] },
+    }
+}
 
 // Split a capability list into what it can change and what it can only look
-// at. `readOnly` is the field that makes a refusal explainable, and it is more
-// useful than the capabilities it is derived from because it is already in the
-// vocabulary the person asking uses: collection names, not verbs.
+// at, described rather than merely named.
+//
+// `readOnly` is the field that makes a refusal explainable, and it is more
+// useful than the capabilities it comes from because it is already in the
+// vocabulary the person asking uses — a collection, the folder it lives in and
+// what that folder is for, not a verb.
 export function reachOf(capabilities = []) {
-    const readable = new Set()
+    const readable = new Map()
     const writable = new Set()
+    const also = []
     for (const capability of capabilities ?? []) {
-        const m = DRIVE.exec(capability)
-        if (!m) continue
-        readable.add(m[1])
-        if (capability.endsWith(':write')) writable.add(m[1])
+        const meaning = capabilityMeaning(capability)
+        const resource = meaning?.resource
+        if (!resource?.name) { also.push(capability); continue }
+        readable.set(resource.name, {
+            name: resource.name,
+            ...(resource.folder ? { folder: resource.folder } : {}),
+            ...(resource.summary ? { summary: resource.summary } : {}),
+            ...(resource.kind && resource.kind !== 'collection' ? { kind: resource.kind } : {}),
+        })
+        if (meaning.grants === 'write') writable.add(resource.name)
     }
+    const byName = (a, b) => a.name.localeCompare(b.name)
     return {
-        writable: [...writable].sort(),
-        readOnly: [...readable].filter(name => !writable.has(name)).sort(),
+        writable: [...readable.values()].filter(r => writable.has(r.name)).sort(byName),
+        readOnly: [...readable.values()].filter(r => !writable.has(r.name)).sort(byName),
+        also: also.sort(),
     }
 }
 
@@ -76,11 +130,7 @@ export function actingRole(held = [], catalogue = {}) {
 // nothing about how to become one, and there is no way to ask for one.
 export function rolesIn(catalogue = {}, { acting = null, summaries = {} } = {}) {
     return Object.entries(catalogue).map(([name, capabilities]) => {
-        const { writable, readOnly } = reachOf(capabilities)
-        // Capabilities that name no collection — api verbs, mcp:use. Kept so
-        // a role is described completely rather than only in the part of it
-        // that happens to map to folders.
-        const also = (capabilities ?? []).filter(capability => !/^drive:/.test(capability)).sort()
+        const { writable, readOnly, also } = reachOf(capabilities)
         return {
             name,
             ...(name === acting ? { acting: true } : {}),
