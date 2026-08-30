@@ -16,13 +16,13 @@ import Database from 'better-sqlite3'
 import knexFactory from 'knex'
 
 import {
-    registerMigrations, runMigrations, durableConfig, adoptFromCache, ensureIgnored,
+    registerMigrations, runMigrations, durableConfig, ensureIgnored,
 } from '../../../src/database/durable.js'
 import { registerSchema, createSqliteDatabase } from '../../../src/database/index.js'
 
 let dir, db
-const quiet = { notice: () => {}, info: () => {}, error: () => {} }
-const loud = () => { const seen = []; return { notice: () => {}, info: () => {}, error: (o, ...a) => seen.push({ ...o, a }), seen } }
+const quiet = { notice() {}, info() {}, debug() {}, warn() {}, error() {} }
+const loud = () => { const seen = []; return { notice() {}, info() {}, debug() {}, warn() {}, error: (o, ...a) => seen.push({ ...o, a }), seen } }
 
 beforeEach(async () => {
     dir = await mkdtemp(path.join(tmpdir(), 'mikser-durable-'))
@@ -148,58 +148,6 @@ describe('a cache wipe cannot reach the durable store', () => {
     })
 })
 
-describe('carrying a pre-split database across', () => {
-    it('moves the tables the old design recorded, and clears the record', async () => {
-        const cachePath = path.join(dir, 'old-cache.sqlite')
-        const cache = new Database(cachePath)
-        cache.exec(`
-            CREATE TABLE mikser_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            CREATE TABLE mikser_auth_clients (client_id TEXT PRIMARY KEY, name TEXT NOT NULL);
-            CREATE TABLE cache_rows (id TEXT PRIMARY KEY);`)
-        cache.prepare('INSERT INTO mikser_auth_clients VALUES (?,?)').run('client-42', 'Claude')
-        cache.prepare('INSERT INTO cache_rows VALUES (?)').run('derived')
-        cache.prepare('INSERT INTO mikser_meta (key,value) VALUES (?,?)')
-            .run('durable_tables', JSON.stringify(['mikser_auth_clients']))
-        cache.close()
-
-        // No migration declares mikser_auth_clients here — the case of a
-        // config that does not load the owning plugin. It still has to come
-        // across, rebuilt from the DDL sqlite itself kept.
-        const handle = new Database(path.join(dir, 'mikser.data.sqlite'))
-        adoptFromCache(handle, cachePath, quiet)
-        assert.equal(handle.prepare('SELECT name FROM mikser_auth_clients').get()?.name, 'Claude')
-        handle.close()
-
-        const after = new Database(cachePath, { readonly: true })
-        assert.equal(after.prepare(
-            "SELECT count(*) c FROM sqlite_master WHERE name='mikser_auth_clients'").get().c, 0,
-            'the shadow copy must be dropped, or an unqualified query keeps finding the stale one')
-        assert.equal(after.prepare("SELECT count(*) c FROM cache_rows").get().c, 1,
-            'a table the record does not name is not touched')
-        assert.ok(!after.prepare('SELECT value FROM mikser_meta WHERE key=?').get('durable_tables'),
-            'the record is cleared, so this never runs twice')
-        after.close()
-    })
-
-    it('does nothing to a database that was never pre-split', async () => {
-        const cachePath = path.join(dir, 'fresh.sqlite')
-        const cache = new Database(cachePath)
-        cache.exec('CREATE TABLE mikser_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);'
-            + 'CREATE TABLE cache_rows (id TEXT PRIMARY KEY);')
-        cache.prepare('INSERT INTO cache_rows VALUES (?)').run('derived')
-        cache.close()
-
-        const handle = new Database(path.join(dir, 'mikser.data.sqlite'))
-        adoptFromCache(handle, cachePath, quiet)
-        handle.close()
-
-        const after = new Database(cachePath, { readonly: true })
-        assert.equal(after.prepare('SELECT count(*) c FROM cache_rows').get().c, 1)
-        after.close()
-        assert.ok(existsSync(cachePath))
-    })
-})
-
 describe('keeping credentials out of the repository', () => {
     // The durable file sits at the working-folder root, which is usually a git
     // repo that mikser-io-git runs `git add -A` over. A refresh token pushed
@@ -233,3 +181,4 @@ describe('keeping credentials out of the repository', () => {
         assert.equal(existsSync(ignore()), false)
     })
 })
+

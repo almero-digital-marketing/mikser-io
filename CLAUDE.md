@@ -142,10 +142,11 @@ brevity.
   schema_version). Nothing durable lives here any more.
 - `database/durable.js` — the durable store. `registerMigrations()`,
   `useDurableDatabase()` (a knex instance), `runMigrations()`,
-  `closeDurableDatabase()`. `adoptFromCache` carries tables out of a
-  pre-9.56 database, driven by the `durable_tables` record the old design
-  kept in `mikser_meta` — names alone would move any cache table that
-  happened to collide. `ensureIgnored` adds the file to `.gitignore`.
+  `closeDurableDatabase()`. `ensureIgnored` adds the file to `.gitignore`
+  (it holds credentials and the working folder is usually a repo).
+  **No upgrade path from the pre-split layout** — per the posture above,
+  a working folder from before 9.56 loses its grants and change-set log
+  to the ordinary cache wipe, and everyone signs in again once.
   `sift-to-sql.js` translates sift filters to SQL WHERE clauses
   against `INDEXED_COLUMNS`; un-pushed clauses fall through to
   JS-side sift. `query-context.js` is the AsyncLocalStorage that

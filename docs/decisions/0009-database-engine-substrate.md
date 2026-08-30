@@ -101,7 +101,13 @@ boot can never add a column, rename one, or backfill a value; that is invisible
 for a cache table and the permanent condition of a durable one.
 
 `registerSchema(name, sql, { durable: true })` now THROWS, pointing at
-`registerMigrations`. Accepting it would put the table in the file that gets
+`registerMigrations`.
+
+No upgrade path from the single-file layout, deliberately. Until v10 mikser
+carries no back-compat, and a one-shot migration for a shape that will never
+exist again is exactly the code that shape does not earn. A working folder
+written before 9.56 loses its grants and change-set log to the ordinary cache
+wipe: everyone signs in once more, and the change-set history starts empty. Accepting it would put the table in the file that gets
 deleted, and the first sign would be an operator asked to sign in again.
 
 For the cache: WAL mode + `synchronous=NORMAL` +

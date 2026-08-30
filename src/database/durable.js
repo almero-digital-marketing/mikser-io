@@ -28,8 +28,7 @@
 // ordered list of migrations instead, applied once and recorded.
 
 import path from 'node:path'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import Database from 'better-sqlite3'
+import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import knexFactory from 'knex'
 
 import runtime from '../runtime.js'
@@ -190,106 +189,6 @@ export async function runMigrations(knex, logger = useLogger()) {
     return applied
 }
 
-// Carry a durable table out of a cache file written before the split.
-//
-// UPGRADE PATH, and the one piece of this module that knows it is talking
-// to sqlite. It has to: moving rows between two files is ATTACH, and there
-// is no portable spelling of it. Gated on the durable store actually being
-// a local sqlite file, skipped otherwise, and deletable once no deployment
-// predates 9.56.
-//
-// Which tables those are is not guessed. The previous design recorded the
-// names in `mikser_meta.durable_tables` — it had to, so that a config which
-// never loaded the owning plugin would not unlink them — and that record is
-// exactly the upgrade instruction needed here. Matching on names alone would
-// be worse than useless: a cache table that happens to share a name with some
-// plugin's durable table would be moved and dropped, which is destroying data
-// on the strength of a coincidence.
-//
-// Runs on the DURABLE connection with the cache attached, rather than the
-// other way round, so a table the schemas did not create can be rebuilt by
-// replaying the CREATE sqlite itself stored — unqualified, landing in durable
-// because that is this connection's main. The alternative was rewriting the
-// stored DDL to insert a schema prefix, and parsing DDL is what produced
-// columns named `and`, `a` and `which` on a live deployment.
-//
-// The record is cleared once the move succeeds, so this is a one-way door
-// that runs once per working folder.
-export function adoptFromCache(durable, cachePath, logger) {
-    if (!cachePath || cachePath === ':memory:' || !existsSync(cachePath)) return
-
-    let recorded = []
-    try {
-        durable.exec(`ATTACH DATABASE '${cachePath.replace(/'/g, "''")}' AS cache`)
-        const row = durable.prepare('SELECT value FROM cache.mikser_meta WHERE key = ?').get('durable_tables')
-        const parsed = row?.value ? JSON.parse(row.value) : []
-        recorded = Array.isArray(parsed) ? parsed.filter(name => typeof name === 'string') : []
-    } catch {
-        try { durable.exec('DETACH DATABASE cache') } catch { /* never attached */ }
-        return  // no cache, or one that predates the record — nothing to carry
-    }
-
-    try {
-        const present = new Set(durable.prepare(
-            "SELECT name FROM cache.sqlite_master WHERE type='table'").all().map(r => r.name))
-        const mine = new Set(durable.prepare(
-            "SELECT name FROM main.sqlite_master WHERE type='table'").all().map(r => r.name))
-
-        for (const table of recorded) {
-            if (table === 'mikser_meta' || !present.has(table)) continue
-            try {
-                // A table no loaded plugin declares still has to come across —
-                // that is the case the record exists for. Rebuilt from the
-                // DDL sqlite kept, so no schema has to be reconstructed.
-                if (!mine.has(table)) {
-                    const { sql } = durable.prepare(
-                        "SELECT sql FROM cache.sqlite_master WHERE type='table' AND name = ?").get(table) ?? {}
-                    if (!sql) continue
-                    durable.exec(sql)
-                }
-
-                const columnsOf = (schema) =>
-                    durable.prepare(`PRAGMA ${schema}.table_info("${table}")`).all().map(c => c.name)
-                // Intersected rather than trusting `SELECT *`: the shape in
-                // the cache is by definition the OLD one, and lining the two
-                // up wrong would put values in the wrong columns.
-                const source = new Set(columnsOf('cache'))
-                const shared = columnsOf('main').filter(c => source.has(c))
-                const list = shared.map(c => `"${c}"`).join(', ')
-
-                const moved = durable.transaction(() => {
-                    const { n } = durable.prepare(`SELECT COUNT(*) AS n FROM cache."${table}"`).get()
-                    if (n && shared.length) {
-                        durable.exec(
-                            `INSERT OR IGNORE INTO main."${table}" (${list}) SELECT ${list} FROM cache."${table}"`)
-                    }
-                    durable.exec(`DROP TABLE cache."${table}"`)
-                    return n
-                })()
-
-                logger?.notice('Moved %s out of the cache and into %s (%d row%s)',
-                    table, DEFAULT_DURABLE_FILENAME, moved, moved === 1 ? '' : 's')
-            } catch (err) {
-                // Loud, and specifically not fatal: the rows are still in the
-                // cache, which means the next wipe takes them. That is a
-                // warning an operator can act on; silence is not.
-                logger?.error({ code: 'durable-adopt' },
-                    'Could not move %s into the durable database: %s. Its rows are still in the cache, so the '
-                    + 'next wipe will delete them.', table, err.message)
-            }
-        }
-
-        // Cleared last, and only here. While it is present this runs again,
-        // which is what makes a partial move recoverable on the next start.
-        durable.prepare('DELETE FROM cache.mikser_meta WHERE key = ?').run('durable_tables')
-    } catch (err) {
-        logger?.error({ code: 'durable-adopt' },
-            'Could not read the durable-table record out of the cache: %s', err.message)
-    } finally {
-        try { durable.exec('DETACH DATABASE cache') } catch { /* already detached */ }
-    }
-}
-
 // Keep the durable database out of the repository.
 //
 // It sits at the working-folder root — deliberately outside runtime/, which
@@ -324,26 +223,6 @@ export function ensureIgnored(folder, filename, logger) {
     }
 }
 
-// Carry pre-split tables across, on a connection of its own.
-//
-// Raw better-sqlite3 rather than the knex instance because the move is ATTACH,
-// which knex has no portable spelling for — and because this is an upgrade
-// path with an end date, not part of how the store works. After migrations, so
-// the tables it copies into exist with their current shape.
-function adoptPreSplitTables(durablePath, cachePath, logger) {
-    if (!existsSync(cachePath)) return
-    let handle = null
-    try {
-        handle = new Database(durablePath)
-        adoptFromCache(handle, cachePath, logger)
-    } catch (err) {
-        logger?.error({ code: 'durable-adopt' },
-            'Could not carry pre-split tables out of the cache: %s', err.message)
-    } finally {
-        try { handle?.close() } catch { /* already closed */ }
-    }
-}
-
 onLoaded(async () => {
     if (db) return  // watch mode keeps the connection across cycles
     if (!registry.size) return  // nothing durable is registered; open nothing
@@ -368,11 +247,6 @@ onLoaded(async () => {
             + 'sign-ins, the change-set log — has nowhere to go.', err.message)
         db = null
         return
-    }
-
-    // Only a local sqlite target can have a pre-split cache beside it.
-    if (filename && runtime.options.runtimeFolder) {
-        adoptPreSplitTables(filename, path.join(runtime.options.runtimeFolder, 'mikser.sqlite'), logger)
     }
 
     runtime.durable = db
