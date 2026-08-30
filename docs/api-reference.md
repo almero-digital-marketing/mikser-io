@@ -601,8 +601,21 @@ clearChangeSets(['req-42'])
 | `withChangeSet({ changeSet, summary, principal }, fn)` | run `fn` with a set in effect |
 | `currentChangeSet()` | the set in effect, or null |
 | `recordChangeSetWrite({ changeSet, summary, principal, uri, operation, undoOf })` | attach one path to a set |
-| `pendingChangeSets()` | sets with unconsumed writes, oldest first |
-| `clearChangeSets(ids)` | drop what a consumer has committed |
+| `listChangeSets({ limit })` | the log, newest first |
+| `findChangeSet(id)` | resolve one id |
+| `pendingChangeSets()` | sets no consumer has recorded yet, oldest first |
+| `markChangeSetsRecorded(ids, recordedAs)` | mark recorded, and say what as |
+
+The log is **durable** and survives a restart: nothing else can reconstruct
+which writes belonged to one request. Not the files, which show the result and
+not the grouping — and not a consumer's own history, which may not exist yet,
+or at all. It keeps the most recent 200 sets.
+
+`recordedAs` is what a consumer recorded the set as — a commit sha. Its absence
+is meaningful: the set is real and listable, but there is nothing to revert
+from yet. `mikser_undo` reports that as `not-yet-committed`, which is a
+different answer from `unknown-change-set` and sends a reader somewhere
+different.
 
 ### Ambient, not threaded
 

@@ -11,7 +11,6 @@ import yaml from 'yaml'
 import { contentType } from 'mime-types'
 import runtime from './runtime.js'
 import { trackedInfo, untrack, recordReads } from './track.js'
-import { recordChangeSetWrite } from './changeset.js'
 
 // Stable content fingerprint for entities — used by manifest snapshots,
 // engine mutation tracking, and the layouts dispatcher's hash-aware
@@ -794,7 +793,7 @@ export async function writeEntity(entity, patch = {}) {
     // The other file-writing primitive. A rename cascade rewrites every
     // referring file through here, which is the largest fan-out any single
     // request has and therefore the one most worth being able to take back.
-    recordChangeSetWrite({ uri: entity.uri })
+    runtime.recordChangeSetWrite?.({ uri: entity.uri })
 
     return entity.uri
 }
@@ -1114,14 +1113,14 @@ export function useCollection(runtime, name) {
             // of change sets still produces undoable work — the alternative is
             // every writer remembering, and the one that forgets is the one
             // whose edit cannot be taken back.
-            recordChangeSetWrite({ uri })
+            runtime.recordChangeSetWrite?.({ uri })
             return uri
         },
 
         async remove(relativePath) {
             const uri = resolveWithin(relativePath)
             await unlink(uri)
-            recordChangeSetWrite({ uri, operation: 'delete' })
+            runtime.recordChangeSetWrite?.({ uri, operation: 'delete' })
         },
     }
 }
