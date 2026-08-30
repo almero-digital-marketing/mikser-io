@@ -844,6 +844,35 @@ AsyncLocalStorage than the engine's, queries record no edges, and index pages,
 sitemaps and feeds silently stop rebuilding. Production consumers resolve both
 from their own tree, so the problem is local to the dev workspace.
 
+## Roles
+
+Enforcement needs only the flat capability list. Explaining a refusal needs the
+role — and without it, an admin token and a site with no roles configured are
+indistinguishable from inside a session.
+
+| Export | Does |
+| --- | --- |
+| `describeAuthority({ capabilities, roles, catalogue, summaries })` | everything a session can say about its own authority |
+| `reachOf(capabilities)` | `{ writable, readOnly }` as collection names |
+| `actingRole(held, catalogue)` | which role is in force |
+| `otherRoles(held, catalogue, summaries)` | who to ask, and what they add |
+| `explainRefusal({ capability, role, target, catalogue, summaries })` | the sentence an agent repeats |
+
+`readOnly` is the field that makes a refusal explainable, and it is more useful
+than the capabilities it comes from because it is already in the vocabulary the
+person asking uses.
+
+A principal can hold several roles. `actingRole` returns the one whose
+capabilities cover the others — roles are normally written as widening tiers —
+and `null` when none dominates, because the acting authority genuinely is the
+union and naming half of it would be a lie.
+
+> **Informational, permanently.** Naming the role that could do something is
+> what makes a handoff possible. There is no way to request one and none should
+> be added: a role is a decision about a person, taken by whoever configures the
+> site, and an agent's part is to say what it cannot do and stop. `explainRefusal`
+> deliberately suggests no retry, escalation or workaround — a test asserts it.
+
 ## Auth
 
 Building a token-gated or loopback-only route.
