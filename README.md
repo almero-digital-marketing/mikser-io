@@ -12,6 +12,8 @@
 
 **References merge sources into one call.** Mikser tracks how entities reference each other — an article's author, the marketing copy and ERP price behind a product page, the images a landing page uses. Fetch the product and pull its marketing copy, price, and hero image along with it in one round-trip. Change any of them and every page subscribed to a reference touching it re-renders live, without polling — and mikser invalidates *exactly* the pages that depend on it, nothing more.
 
+**And it can answer for what an agent did.** The reason to hesitate before pointing an AI at a live site isn't friction — it's *it'll break something and I won't find out until a client calls*. Mikser is built so the engine answers that: a shipped byte traces back to the file, field and line that produced it; a change reports its blast radius before it lands; a write is refused if the file moved underneath it. [What an agent can ask](#what-an-agent-can-ask) is the short version.
+
 **Your content stays yours.** Source files live on disk as `.md` / `.yml` — diffable, version-controllable, portable on day one and year ten. No database lock-in, no proprietary export. And it's the content layer, not your whole backend: business logic, accounts, and transactions stay in their own services; mikser handles the part that's actually content — rendered to HTML, PDF, email, and other formats from the same source.
 
 Built for Node.js around a strict lifecycle and a composable plugin system: every document, asset, and template flows through the same pipeline, and plugins hook in at any phase. MIT-licensed, runs on Node, zero hosted dependencies. **The portability promise is the architecture, not a feature.**
@@ -33,8 +35,6 @@ Mikser is a focused component, not a backend. Think of it like a database in you
 Build mikser into the parts of your application that are content-shaped. Keep the rest where it belongs.
 
 ## Why mikser
-
-**Your content stays yours.** Source files live on disk as `.md`, `.yml`, `.html` with YAML front-matter. The build output is plain static files. No database lock-in, no proprietary export format. The whole content tree is copyable, diffable, and version-controllable with git — your site is portable on day one and on year ten.
 
 **Static-first with a built-in live channel.** Most content engines pick one side: static-site generators (Hugo, Eleventy, Jekyll) are fast but rebuild-only; headless CMSes (Sanity, Contentful, Strapi) are live but every page is an API round-trip. Mikser composes both — content publishes as static files by default (fast first paint, no API on the happy path), and the live channel arrives on top, so edits show up in connected clients without a refresh and without losing the static advantage.
 
@@ -132,20 +132,45 @@ mikser --server                 # MCP mounts at /mcp on the same port
 
 What that feels like in practice: *"draft three hero-section variants and show me previews"* — three layouts written, three previews returned inline, one chat turn. *"Why did the build break?"* — the agent reads the rolling log buffer and answers from the same view your terminal sees. *"Update this article's tone and show me the preview"* — the agent edits the file and surfaces the rendered article inline; you click Approve or Reject, the agent acts on your choice. Operator, AI, and any observer dashboard share the same engine because mikser is single-tenant by design.
 
-### Editing is the easy part — verification is where it pays off
+### What an agent can ask
 
-When an AI agent edits ten files, the next question is: *did it do what I asked?* When it edits two hundred, you can't read them all yourself — and that's exactly the scale where AI editing starts being interesting. Most content systems leave verification to the human (read the diff, check the preview, hope you caught the issues). Mikser turns the questions a reviewer would ask into things the agent can answer for itself:
+Editing is the easy part. When an agent changes ten files you can read the diff; at two hundred you can't, and that is exactly the scale where AI editing gets interesting. Most systems leave verification to the human. Mikser turns the questions a reviewer would ask into calls the agent can make itself — and each answer comes from the engine's own records, not a re-scan that could disagree with what actually ran.
 
-- **"Did I update every article that needed it?"** — semantic search finds anything that still matches the old tone or phrasing the agent was supposed to change.
-- **"What else mentions this person, product, or topic?"** — mikser knows how content references content. "Show me every page that mentions Dick" returns the list instantly, no full-tree scan.
-- **"Did anything break?"** — if a reference points at something that no longer exists, mikser surfaces it as a warning. The build either completes cleanly or doesn't.
-- **"Can I see what this looks like before publishing?"** — render any single page or section on demand, no full rebuild, no staging deploy. With an `mcpUi` layout, the agent surfaces the rendered preview *inside the chat* with approve/reject controls; one click sends the result back as the tool response.
-- **"What changed since I last looked?"** — `git diff`. The catalog is plain files, so the audit trail is the same one your engineers already use for code.
-- **"Roll back this batch?"** — `git checkout`. Atomic. No database migration to undo, no version-history-feature to learn.
+**"What produced this?"** — `mikser_which` takes a built destination and returns the source files behind it. Where the value is a parsed field, the field path and its line and column are *recorded at parse time*, not searched for afterwards. Finding which file paints a button used to mean opening the site, reading a class out of the DOM and guessing at filenames.
 
-The shift this enables: AI review stops being *"read every change"* and becomes *"spot-check the agent's confidence."* The agent verifies its own work; the human samples and approves. That's the workflow that lets a content team actually use AI at scale — change the tone across the entire site in a morning, ship it after a coffee.
+**"What breaks if I remove it?"** — `mikser_refs_inbound` returns every entity that references it. A delete reports what it would leave pointing at nothing *before* it happens, so "safe to remove" stops being a guess.
+
+**"What will this change affect?"** — every write takes `dryRun`, and the answer is `wouldAffect`: the pages that would re-render, each with the reason. Blast radius before the write, from the same invalidation the build itself uses.
+
+**"Did what I intended actually happen?"** — `mikser_verify` compares the bytes on disk against what the engine believes it wrote. A build that reported success and a site that is actually current are different claims, and this is the one that checks.
+
+Alongside those: semantic search over the corpus for "anything that still reads the old way", `git diff` for what changed, and `git checkout` for rollback — the audit trail is the one your engineers already use, because the catalog is plain files.
+
+The shift this enables: AI review stops being *"read every change"* and becomes *"spot-check the agent's confidence."*
+
+### What stops an agent breaking your site
+
+Answers are half of it. The other half is refusals — the engine declining an operation it can tell is wrong:
+
+- **Writes carry a checksum precondition.** A rewrite built from a copy that has since changed on disk is refused, not applied. Two agents, or an agent and a human, cannot silently overwrite each other.
+- **Undo consults the reference graph, not just the patch.** Reverting a change set that something added since now depends on is refused — *even when git would apply the patch cleanly*. A clean revert that leaves a link dangling is the failure mode a diff cannot see.
+- **Deletes name their referrers first**, and in the drive plugin a removed file moves to a trash folder under `runtime/` rather than being unlinked.
+- **Roles are enforced per collection, and a refusal names who can.** An agent connected as an editor that tries to write the design system doesn't get a bare 403 — it gets the role it holds, the capability it lacks, and which role carries it. That is a sentence the end user can forward to the person who can actually do it, instead of an invitation to work around the block.
+- **A broken subsystem says so.** Search returning nothing because it is broken and search returning nothing because nothing matched are otherwise the same answer; `mikser_ping` reports the difference.
 
 Full tool reference and twelve worked scenarios in the [`mikser-io-mcp` plugin docs](https://github.com/almero-digital-marketing/mikser-io-mcp#readme).
+
+## The handoff
+
+The shape this is built for: a developer builds the site, hands it to the client, and the client points their own agent at it. From then on changes happen inside the structure that was designed, rather than the agent reinventing it.
+
+What makes that survivable is that the boundary is declared, not hoped for. Roles are capability sets over collections, and the plain-language summary of each one is yours to write — mikser carries it into the answer. A site might describe its editor role as:
+
+> Pages, text and images. Can read the templates and styles to see how a page is built, but not change them — so nothing edited here can break the site.
+
+An agent connecting as that role sees exactly that sentence, the folders it may write, the folders it may only read, and every other role on the site with the same detail. When it hits the boundary it reports which role could do the thing and stops — the listing names a person to ask, and there is no way to request a role and none will be added.
+
+So the developer's structure holds because the engine enforces it, the client gets an agent that can genuinely change content, and the failure mode is a refusal with a name on it rather than a broken page nobody noticed.
 
 ## Plugins on top of the engine
 
@@ -256,7 +281,7 @@ What you get from how this project is built:
 
 ## Mikser among static site generators
 
-**The only SSG that's both fast enough for daily use and deep enough for AI agents to drive.**
+Mikser is often evaluated against static site generators, so here is the honest placement. **It does not win on speed** — Hugo does, and that is worth knowing. What mikser has that none of them do is a build the engine can answer questions about afterwards.
 
 | SSG | Speed | Feature surface | The tradeoff |
 |---|---|---|---|
@@ -264,9 +289,11 @@ What you get from how this project is built:
 | Eleventy | OK | Broad, no introspection | Flexible but slow at corpus scale |
 | Astro | OK | Modern, framework-coupled | Tied to a frontend framework |
 | Next.js SSG | meh | Full framework | Framework first, content second |
-| **Mikser** | Incremental beats Hugo's full rebuild | Broad, deeply observable, AI-native | None of the speed-vs-features kind |
+| **Mikser** | Fast enough that watch-mode rebuilds feel instant | Broad, and queryable after the fact | Not the fastest cold build |
 
-Every other SSG asks you to trade something — raw speed for features (Hugo), features for framework lock-in (Astro, Next), introspection for any of the above (Eleventy). Mikser doesn't make that trade. Hugo still wins a full cold rebuild — and that's worth knowing — but most cycles aren't full cold rebuilds. CI deploys, watch-mode edits, "ran mikser, nothing changed" — these are the daily case, where Mikser's persistent manifest skips what's still current while Hugo rebuilds everything from scratch. The rest of the feature surface (MCP introspection on every lifecycle phase, files-as-source-of-truth, 20-phase composability, multi-format outputs from one corpus) is what no other "fast" SSG carries.
+Hugo wins a full cold rebuild. Most cycles aren't full cold rebuilds — CI deploys, watch-mode edits, "ran mikser, nothing changed" — and there the persistent manifest skips what is still current. But speed is not the axis worth choosing mikser on, and a reader who evaluates it as a faster SSG will miss what it is for.
+
+**The comparison that actually matters is different.** If you are handing a site to someone whose agent will edit it, the real alternative is a headless CMS with an MCP wrapper: structured content, and no way to check what the agent did to it. That is the gap [What an agent can ask](#what-an-agent-can-ask) describes, and it is not a speed question.
 
 ## Acknowledgments
 
