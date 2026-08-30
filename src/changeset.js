@@ -61,7 +61,13 @@ registerSchema('change_sets', `
         -- permanent failure and a pending commit look identical, and both
         -- read as a null commit forever.
         commit_error TEXT,
-        commit_attempts INTEGER NOT NULL DEFAULT 0
+        commit_attempts INTEGER NOT NULL DEFAULT 0,
+        -- How the set finished. A claimed set had exactly two exits,
+        -- committed or failed, and a set whose changes cancel out qualifies
+        -- for neither: there is genuinely nothing to write, which is not an
+        -- error. Without a third outcome it was re-claimed every pass forever
+        -- and reported a null commit that looked like a fault.
+        outcome TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_mikser_change_sets_created
         ON mikser_change_sets (created_at DESC);
@@ -222,6 +228,7 @@ function rowsToSets(handle, rows) {
             recordedAs: row.recorded_as ?? null,
             commitError: row.commit_error ?? null,
             commitAttempts: row.commit_attempts ?? 0,
+            outcome: row.outcome ?? null,
             paths: paths.map(p => p.path),
             deletions: paths.filter(p => p.operation === 'delete').map(p => p.path),
         }
@@ -241,6 +248,7 @@ function memorySets(filter = () => true) {
         recordedAs: set.recordedAs ?? null,
         commitError: set.commitError ?? null,
         commitAttempts: set.commitAttempts ?? 0,
+        outcome: set.outcome ?? null,
         paths: [...set.paths.keys()],
         deletions: [...set.paths.entries()].filter(([, op]) => op === 'delete').map(([p]) => p),
     }))
@@ -375,13 +383,20 @@ export function markChangeSetsRecorded(ids = [], recordedAs = null) {
     const at = Date.now()
     for (const id of ids) {
         const set = memory.get(id)
-        if (set) { set.recordedAt = at; set.recordedAs = recordedAs; set.commitError = null }
+        if (set) {
+            set.recordedAt = at
+            set.recordedAs = recordedAs
+            set.commitError = null
+            set.outcome = 'committed'
+        }
     }
     const handle = db()
     if (!handle) return
     try {
         const stmt = handle.prepare(
-            'UPDATE mikser_change_sets SET recorded_at = ?, recorded_as = ?, commit_error = NULL WHERE id = ?')
+            `UPDATE mikser_change_sets
+             SET recorded_at = ?, recorded_as = ?, commit_error = NULL, outcome = 'committed'
+             WHERE id = ?`)
         for (const id of ids) stmt.run(at, recordedAs, id)
     } catch { /* memory still holds it */ }
 }
@@ -411,6 +426,33 @@ export function markChangeSetFailed(id, error) {
             SET commit_error = ?, commit_attempts = commit_attempts + 1
             WHERE id = ?
         `).run(message, id)
+    } catch (err) {
+        reportChangeSetFailure(err)
+    }
+}
+
+// Finish a set that produced no commit, because there was nothing to write.
+//
+// The third outcome. A set whose adds and removals cancel out — an undo of a
+// create, a probe that added and then deleted its own files — leaves an empty
+// diff, and git correctly makes no commit for it. It is not pending and it did
+// not fail: it is DONE, and saying so is what stops it being re-claimed every
+// pass forever while a column of nulls suggests a broken pipeline.
+//
+// `outcome` keeps the distinction that matters to undo: reverting a set that
+// never produced a commit is not the same operation as reverting one that did.
+export function markChangeSetSettled(id, outcome = 'empty') {
+    const at = Date.now()
+    const set = memory.get(id)
+    if (set) { set.recordedAt = at; set.recordedAs = null; set.outcome = outcome }
+    const handle = db()
+    if (!handle) return
+    try {
+        handle.prepare(`
+            UPDATE mikser_change_sets
+            SET recorded_at = COALESCE(recorded_at, ?), outcome = COALESCE(outcome, ?)
+            WHERE id = ?
+        `).run(at, outcome, id)
     } catch (err) {
         reportChangeSetFailure(err)
     }
