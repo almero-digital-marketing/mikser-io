@@ -64,32 +64,32 @@ export function actingRole(held = [], catalogue = {}) {
     return names.find(candidate => names.every(other => covers(candidate, other))) ?? null
 }
 
-// The roles this principal does NOT hold, and what each would add.
+// Every role and what it may do, with the acting one marked.
 //
-// Named so an agent can say WHO to ask. Roles are not credentials — listing
-// them reveals that a `developers` role exists, which is exactly what makes a
-// handoff possible, and nothing about how to obtain it.
-export function otherRoles(held = [], catalogue = {}, summaries = {}) {
-    const mine = new Set(held ?? [])
-    const have = new Set((held ?? []).flatMap(name => catalogue[name] ?? []))
-    return Object.entries(catalogue)
-        .filter(([name]) => !mine.has(name))
-        .map(([name, capabilities]) => {
-            const adds = (capabilities ?? []).filter(capability => !have.has(capability))
-            // A role that adds nothing this principal already has is noise in
-            // a handoff — there is nobody to ask, because it can do no more.
-            if (!adds.length) return null
-            const reach = reachOf(adds)
-            return {
-                name,
-                // Expressed as collections where the capabilities allow it,
-                // because "layouts, styles, scripts" is what a person asking
-                // for help can act on and `drive:layouts:write` is not.
-                adds: reach.writable.length ? reach.writable : adds,
-                ...(summaries[name] ? { summary: summaries[name] } : {}),
-            }
-        })
-        .filter(Boolean)
+// One list rather than two. A "roles you do not have" field cannot describe
+// the site to whoever holds the widest one — an admin sees an empty array and
+// concludes no other roles exist — and a reader comparing their own reach
+// against someone else's needs both sides in the same shape anyway.
+//
+// Roles are not credentials. Naming them, and saying what each can reach, is
+// what makes a handoff possible: it tells an agent who to ask. It reveals
+// nothing about how to become one, and there is no way to ask for one.
+export function rolesIn(catalogue = {}, { acting = null, summaries = {} } = {}) {
+    return Object.entries(catalogue).map(([name, capabilities]) => {
+        const { writable, readOnly } = reachOf(capabilities)
+        // Capabilities that name no collection — api verbs, mcp:use. Kept so
+        // a role is described completely rather than only in the part of it
+        // that happens to map to folders.
+        const also = (capabilities ?? []).filter(capability => !/^drive:/.test(capability)).sort()
+        return {
+            name,
+            ...(name === acting ? { acting: true } : {}),
+            ...(summaries[name] ? { summary: summaries[name] } : {}),
+            writable,
+            readOnly,
+            ...(also.length ? { also } : {}),
+        }
+    })
 }
 
 // Everything a session should be able to say about its own authority.
@@ -105,18 +105,20 @@ export function describeAuthority({ capabilities, roles = [], catalogue = {}, su
             capabilities: null,
             writable: null,
             readOnly: null,
-            otherRoles: [],
+            roles: [],
         }
     }
     const role = actingRole(roles, catalogue)
     const { writable, readOnly } = reachOf(capabilities)
     return {
         role,
-        ...(roles?.length && !role ? { roles } : {}),
+        // Only when no single role covers the others: the acting authority is
+        // then the union, and naming one of them would be a lie.
+        ...(roles?.length && !role ? { heldRoles: roles } : {}),
         ...(summaries[role] ? { roleSummary: summaries[role] } : {}),
         writable,
         readOnly,
-        otherRoles: otherRoles(roles, catalogue, summaries),
+        roles: rolesIn(catalogue, { acting: role, summaries }),
     }
 }
 

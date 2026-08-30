@@ -855,7 +855,7 @@ indistinguishable from inside a session.
 | `describeAuthority({ capabilities, roles, catalogue, summaries })` | everything a session can say about its own authority |
 | `reachOf(capabilities)` | `{ writable, readOnly }` as collection names |
 | `actingRole(held, catalogue)` | which role is in force |
-| `otherRoles(held, catalogue, summaries)` | who to ask, and what they add |
+| `rolesIn(catalogue, { acting, summaries })` | every role and its reach, the acting one marked |
 | `explainRefusal({ capability, role, target, catalogue, summaries })` | the sentence an agent repeats |
 
 `readOnly` is the field that makes a refusal explainable, and it is more useful
@@ -866,6 +866,11 @@ A principal can hold several roles. `actingRole` returns the one whose
 capabilities cover the others — roles are normally written as widening tiers —
 and `null` when none dominates, because the acting authority genuinely is the
 union and naming half of it would be a lie.
+
+`roles` lists every role, not only the ones the session lacks. One field has to
+serve two readers: someone deciding who to ask, and someone holding the widest
+role trying to see what exists at all — and a "roles you do not have" field
+tells the second one nothing, since for an admin it is always empty.
 
 > **Informational, permanently.** Naming the role that could do something is
 > what makes a handoff possible. There is no way to request one and none should

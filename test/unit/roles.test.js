@@ -8,7 +8,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { reachOf, actingRole, otherRoles, describeAuthority, explainRefusal } from '../../src/roles.js'
+import { reachOf, actingRole, rolesIn, describeAuthority, explainRefusal } from '../../src/roles.js'
 
 // lmed's real shape: widening tiers built by readWrite(...).
 const rw = (...names) => names.flatMap(n => [`drive:${n}`, `drive:${n}:write`])
@@ -57,17 +57,30 @@ describe('which role is acting', () => {
     })
 })
 
-describe('who to ask', () => {
-    it('names the roles that add something, and what', () => {
-        const others = otherRoles(['editors'], CATALOGUE, SUMMARIES)
-        const developers = others.find(r => r.name === 'developers')
-        assert.deepEqual(developers.adds, ['files', 'layouts', 'scripts', 'styles'],
-            'expressed as collections, which is what a person asking can act on')
-        assert.equal(developers.summary, SUMMARIES.developers)
+describe('the role listing', () => {
+    it('describes every role, not only the ones that add something', () => {
+        // One field has to serve both readers: someone deciding who to ask,
+        // and someone with the widest role trying to see what exists at all.
+        const listed = rolesIn(CATALOGUE, { acting: 'admins', summaries: SUMMARIES })
+        assert.deepEqual(listed.map(r => r.name), ['editors', 'developers', 'admins'])
     })
 
-    it('omits a role that adds nothing — there is nobody to ask', () => {
-        assert.deepEqual(otherRoles(['admins'], CATALOGUE, SUMMARIES), [])
+    it('marks which one is acting', () => {
+        const listed = rolesIn(CATALOGUE, { acting: 'editors' })
+        assert.equal(listed.find(r => r.name === 'editors').acting, true)
+        assert.equal(listed.find(r => r.name === 'admins').acting, undefined,
+            'only the acting one is marked, so the flag means something')
+    })
+
+    it('says what each role can reach, in collection names', () => {
+        const editors = rolesIn(CATALOGUE).find(r => r.name === 'editors')
+        assert.deepEqual(editors.writable, ['documents', 'media'])
+    })
+
+    it('keeps capabilities that name no collection, so a role is described in full', () => {
+        const admins = rolesIn(CATALOGUE).find(r => r.name === 'admins')
+        assert.ok(admins.also.includes('mcp:use'), 'an api or mcp verb is part of what a role is')
+        assert.ok(!admins.also.some(c => c.startsWith('drive:')), 'and collections are not repeated there')
     })
 })
 
@@ -77,14 +90,18 @@ describe('what ping reports', () => {
         assert.equal(a.role, 'editors')
         assert.deepEqual(a.writable, ['documents', 'media'])
         assert.equal(a.roleSummary, SUMMARIES.editors)
-        assert.ok(a.otherRoles.some(r => r.name === 'developers'), 'and names who carries the rest')
+        const developers = a.roles.find(r => r.name === 'developers')
+        assert.ok(developers.writable.includes('layouts'), 'and shows who carries the rest')
     })
 
     it('reports an admin with nothing it cannot write', () => {
         const a = describeAuthority({ capabilities: CATALOGUE.admins, roles: ['admins'], catalogue: CATALOGUE, summaries: SUMMARIES })
         assert.equal(a.role, 'admins')
         assert.deepEqual(a.readOnly, [])
-        assert.deepEqual(a.otherRoles, [])
+        // The friction that prompted this: a "roles you lack" field is empty
+        // for an admin, who then cannot see that any other role exists.
+        assert.deepEqual(a.roles.map(r => r.name), ['editors', 'developers', 'admins'])
+        assert.equal(a.roles.find(r => r.name === 'admins').acting, true)
     })
 
     it('says so plainly when no roles are configured at all', () => {
@@ -93,6 +110,7 @@ describe('what ping reports', () => {
         const a = describeAuthority({ capabilities: null, roles: [], catalogue: {}, summaries: {} })
         assert.equal(a.role, null)
         assert.equal(a.writable, null)
+        assert.deepEqual(a.roles, [])
         assert.match(a.roleSummary, /no roles configured/)
     })
 })
