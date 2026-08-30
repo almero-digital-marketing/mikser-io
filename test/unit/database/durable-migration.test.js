@@ -101,3 +101,87 @@ describe('durable tables gain columns the schema has grown', () => {
         db.close()
     })
 })
+
+// The parser must read DDL, never prose.
+//
+// It split the CREATE TABLE body on commas and stripped `--` comments
+// afterwards, per clause. A comma inside a comment therefore ended a clause,
+// and the fragment after it no longer began with `--` so nothing stripped it:
+// its first word became a column name. A live deployment ended up with real
+// columns called `and`, `a` and `which`, taken from the prose of the schema's
+// own comments — while the columns those comments described were omitted, and
+// the first write naming one failed with "no such column".
+describe('comments are not DDL', () => {
+    const COMMENTED = `
+        CREATE TABLE IF NOT EXISTS commented_rows (
+            id TEXT PRIMARY KEY,
+            -- A set is one request, and a request is finished when it stops.
+            updated_at INTEGER,
+            /* Somewhere of its own — a commit, a snapshot. Until then, this
+               is null, which is a different answer from absent. */
+            outcome TEXT,
+            recorded_at INTEGER
+        );`
+
+    it('reads every declared column and invents none', () => {
+        let db = createSqliteDatabase({
+            runtimeFolder: dir, version: '1.0.0', config: { filename: 'commented.sqlite' },
+            schemas: new Map([['c', { sql: COMMENTED, durable: true }]]),
+        })
+        db.open()
+        const columns = db.handle.prepare('PRAGMA table_info(commented_rows)').all().map(c => c.name)
+        db.close()
+
+        assert.deepEqual(columns, ['id', 'updated_at', 'outcome', 'recorded_at'])
+        for (const invented of ['and', 'a', 'which', 'is']) {
+            assert.ok(!columns.includes(invented), `prose must not become a column (${invented})`)
+        }
+    })
+
+    it('adds a column declared after a comma-bearing comment', () => {
+        // The shipped failure exactly: `outcome` sits after a comment
+        // containing a comma, so the migration never saw it and could never
+        // add it — on the one kind of table nothing else can bring up to date.
+        const WITHOUT = `CREATE TABLE IF NOT EXISTS grown_rows (
+            id TEXT PRIMARY KEY, created_at INTEGER);`
+        const WITH = `CREATE TABLE IF NOT EXISTS grown_rows (
+            id TEXT PRIMARY KEY, created_at INTEGER,
+            -- How it finished: committed, empty, or failed.
+            outcome TEXT);`
+
+        let db = createSqliteDatabase({
+            runtimeFolder: dir, version: '1.0.0', config: { filename: 'grown.sqlite' },
+            schemas: new Map([['g', { sql: WITHOUT, durable: true }]]),
+        })
+        db.open()
+        db.handle.prepare('INSERT INTO grown_rows (id, created_at) VALUES (?,?)').run('a', 1)
+        db.close()
+
+        db = createSqliteDatabase({
+            runtimeFolder: dir, version: '1.0.0', config: { filename: 'grown.sqlite' },
+            schemas: new Map([['g', { sql: WITH, durable: true }]]),
+        })
+        db.open()
+        // The write that failed in production.
+        db.handle.prepare('UPDATE grown_rows SET outcome = ? WHERE id = ?').run('empty', 'a')
+        assert.equal(db.handle.prepare('SELECT outcome FROM grown_rows WHERE id = ?').get('a').outcome, 'empty')
+        db.close()
+    })
+
+    it('does not read a table name out of a comment', () => {
+        const sql = `
+            -- Superseded: CREATE TABLE old_rows was dropped in 2.0.
+            CREATE TABLE IF NOT EXISTS real_rows (id TEXT PRIMARY KEY);`
+        const db = createSqliteDatabase({
+            runtimeFolder: dir, version: '1.0.0', config: { filename: 'named.sqlite' },
+            schemas: new Map([['n', { sql, durable: true }]]),
+        })
+        db.open()
+        const tables = db.handle
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+            .all().map(t => t.name)
+        db.close()
+        assert.ok(tables.includes('real_rows'))
+        assert.ok(!tables.includes('old_rows'), 'a comment must not register a table')
+    })
+})

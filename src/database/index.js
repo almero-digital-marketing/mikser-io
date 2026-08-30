@@ -104,26 +104,45 @@ let db = null
 // duplicate detection. Same name twice = the later registration wins
 // (with a warning). Convention: `<owner>` matching the table prefix
 // (`catalog`, `manifest`, `vector`, etc.).
+// Comments removed, so nothing downstream ever parses prose as DDL.
+//
+// Done to the WHOLE script before anything splits or counts, because both
+// operations are wrong on a comment: a comma inside one ends a clause, and a
+// bracket inside one unbalances the walk that finds a table body. Stripping
+// per-clause after the split cannot work — by then the damage is done, and the
+// fragment after the comma no longer starts with `--` so it never gets
+// stripped at all. That produced real columns named `and`, `a` and `which` on
+// a live deployment, from the prose of the schema's own comments, while the
+// columns that comment described were silently omitted.
+function stripSqlComments(sqlScript) {
+    return String(sqlScript ?? '')
+        // Block comments first: one may span the `--` of a line comment.
+        .replace(/\/\*[\s\S]*?\*\//g, ' ')
+        // To end of line, while the newlines are still there to end at.
+        .replace(/--[^\n]*/g, '')
+}
+
 // Column names a CREATE TABLE body declares, in order.
 //
 // Only the leading identifier of each top-level comma-separated clause, and
 // only when it is not a table constraint. Good enough for the schemas this
 // engine registers, and deliberately not a SQL parser.
 function columnsFrom(sqlScript, table) {
+    const clean = stripSqlComments(sqlScript)
     const re = new RegExp(
         `CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?[\`"'\\[]?${table}[\`"'\\]]?\\s*\\(`, 'i')
-    const m = re.exec(sqlScript)
+    const m = re.exec(clean)
     if (!m) return []
     // Walk to the matching close paren so nested types and CHECK(...) do not
     // end the body early.
     let depth = 1
     let i = m.index + m[0].length
     const start = i
-    for (; i < sqlScript.length && depth > 0; i++) {
-        if (sqlScript[i] === '(') depth++
-        else if (sqlScript[i] === ')') depth--
+    for (; i < clean.length && depth > 0; i++) {
+        if (clean[i] === '(') depth++
+        else if (clean[i] === ')') depth--
     }
-    const body = sqlScript.slice(start, i - 1)
+    const body = clean.slice(start, i - 1)
 
     const clauses = []
     let current = ''
@@ -137,9 +156,9 @@ function columnsFrom(sqlScript, table) {
 
     const CONSTRAINTS = new Set(['primary', 'unique', 'foreign', 'check', 'constraint'])
     return clauses
-        .map(clause => clause.replace(/--[^\n]*/g, '').trim())
+        .map(clause => clause.trim())
         .filter(Boolean)
-        .map(clause => clause.split(/\s+/)[0].replace(/["`\[\]]/g, ''))
+        .map(clause => clause.split(/\s+/)[0].replace(/["\`\[\]]/g, ''))
         .filter(name => name && !CONSTRAINTS.has(name.toLowerCase()))
 }
 
@@ -161,7 +180,8 @@ function migrateDurableColumns(handle, schemas, logger) {
                 existing = new Set(handle.prepare(`PRAGMA table_info("${table}")`).all().map(c => c.name))
             } catch { continue }
             if (!existing.size) continue
-            for (const column of columnsFrom(sql, table)) {
+            const declared = columnsFrom(sql, table)
+            for (const column of declared) {
                 if (existing.has(column)) continue
                 // Only ever ADD. Dropping or retyping a column in a durable
                 // table would discard data the whole flag exists to keep.
@@ -169,8 +189,27 @@ function migrateDurableColumns(handle, schemas, logger) {
                     handle.exec(`ALTER TABLE "${table}" ADD COLUMN "${column}"`)
                     logger?.info('Durable table %s gained column %s', table, column)
                 } catch (err) {
-                    logger?.warn('Could not add column %s to %s: %s', column, table, err.message)
+                    logger?.error('Could not add column %s to %s: %s', column, table, err.message)
                 }
+            }
+
+            // Verify, rather than assume the loop above was enough.
+            //
+            // Silence was the dangerous half of the last bug here: the
+            // migration logged what it ADDED and never what it failed to find,
+            // so a parser that quietly omitted a column produced a clean-
+            // looking upgrade and a write that failed days later on a
+            // deployment. A declared column that is still missing after this
+            // runs is a fault in the migration itself, and has to say so here
+            // rather than surface as "no such column" at the first write.
+            const after = new Set(
+                handle.prepare(`PRAGMA table_info("${table}")`).all().map(c => c.name))
+            const missing = declared.filter(column => !after.has(column))
+            if (missing.length) {
+                logger?.error(
+                    'Durable table %s is missing declared column(s): %s. Writes naming them will fail — this is a '
+                    + 'fault in the schema migration, not in the caller.',
+                    table, missing.join(', '))
             }
         }
     }
@@ -189,9 +228,12 @@ function schemaEntry(value) {
 
 function tableNamesFrom(sqlScript) {
     const names = []
+    // Comments stripped for the same reason columnsFrom strips them: a
+    // comment that happens to mention CREATE TABLE would otherwise register a
+    // table that does not exist.
     const re = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`"'\[]?([A-Za-z_][\w$]*)/gi
     let m
-    while ((m = re.exec(sqlScript))) names.push(m[1])
+    while ((m = re.exec(stripSqlComments(sqlScript)))) names.push(m[1])
     return names
 }
 
