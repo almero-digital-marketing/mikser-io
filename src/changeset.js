@@ -55,7 +55,13 @@ registerSchema('change_sets', `
         -- but there is nothing to revert FROM, which is a different answer
         -- from "no such change set".
         recorded_at INTEGER,
-        recorded_as TEXT
+        recorded_as TEXT,
+        -- Why a consumer could not record this set. A set that failed is not
+        -- a set that is waiting: without somewhere to put the reason, a
+        -- permanent failure and a pending commit look identical, and both
+        -- read as a null commit forever.
+        commit_error TEXT,
+        commit_attempts INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_mikser_change_sets_created
         ON mikser_change_sets (created_at DESC);
@@ -214,6 +220,8 @@ function rowsToSets(handle, rows) {
             closed: row.closed_at != null,
             recordedAt: row.recorded_at ?? null,
             recordedAs: row.recorded_as ?? null,
+            commitError: row.commit_error ?? null,
+            commitAttempts: row.commit_attempts ?? 0,
             paths: paths.map(p => p.path),
             deletions: paths.filter(p => p.operation === 'delete').map(p => p.path),
         }
@@ -231,6 +239,8 @@ function memorySets(filter = () => true) {
         closed: Boolean(set.closedAt),
         recordedAt: set.recordedAt ?? null,
         recordedAs: set.recordedAs ?? null,
+        commitError: set.commitError ?? null,
+        commitAttempts: set.commitAttempts ?? 0,
         paths: [...set.paths.keys()],
         deletions: [...set.paths.entries()].filter(([, op]) => op === 'delete').map(([p]) => p),
     }))
@@ -365,13 +375,13 @@ export function markChangeSetsRecorded(ids = [], recordedAs = null) {
     const at = Date.now()
     for (const id of ids) {
         const set = memory.get(id)
-        if (set) { set.recordedAt = at; set.recordedAs = recordedAs }
+        if (set) { set.recordedAt = at; set.recordedAs = recordedAs; set.commitError = null }
     }
     const handle = db()
     if (!handle) return
     try {
         const stmt = handle.prepare(
-            'UPDATE mikser_change_sets SET recorded_at = ?, recorded_as = ? WHERE id = ?')
+            'UPDATE mikser_change_sets SET recorded_at = ?, recorded_as = ?, commit_error = NULL WHERE id = ?')
         for (const id of ids) stmt.run(at, recordedAs, id)
     } catch { /* memory still holds it */ }
 }
@@ -380,6 +390,30 @@ export function markChangeSetsRecorded(ids = [], recordedAs = null) {
 // with it" means now — the set stays in the log so it can still be undone.
 export function clearChangeSets(ids = [], recordedAs = null) {
     markChangeSetsRecorded(ids, recordedAs)
+}
+
+// Record that a consumer tried and failed. The set stays pending — a failure
+// is worth retrying, and a transient one usually succeeds next pass — but the
+// reason is now visible instead of the set sitting at `committed: null` with
+// nothing to say why.
+export function markChangeSetFailed(id, error) {
+    const message = String(error?.stderr || error?.message || error || 'unknown error').slice(0, 500)
+    const set = memory.get(id)
+    if (set) {
+        set.commitError = message
+        set.commitAttempts = (set.commitAttempts ?? 0) + 1
+    }
+    const handle = db()
+    if (!handle) return
+    try {
+        handle.prepare(`
+            UPDATE mikser_change_sets
+            SET commit_error = ?, commit_attempts = commit_attempts + 1
+            WHERE id = ?
+        `).run(message, id)
+    } catch (err) {
+        reportChangeSetFailure(err)
+    }
 }
 
 export function forgetAllChangeSets() {
