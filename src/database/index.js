@@ -123,6 +123,57 @@ function tableNamesFrom(sqlScript) {
     return names
 }
 
+// What the given schema map says about each table it names: durable, or not.
+//
+// Takes the map rather than reading the module registry: createSqliteDatabase
+// receives its schemas as an option, and a caller that passes its own — every
+// test, and any embedder — has a registry the module never sees.
+function declaredTables(schemas) {
+    const durable = new Set()
+    const transient = new Set()
+    for (const value of schemas?.values?.() ?? []) {
+        const entry = schemaEntry(value)
+        for (const t of tableNamesFrom(entry.sql)) (entry.durable ? durable : transient).add(t)
+    }
+    return { durable, transient }
+}
+
+// The tables a wipe must keep.
+//
+// A declaration by THIS process wins, in both directions — marking a table
+// non-durable has to be able to take effect, or the flag is one-way forever
+// and a plugin can never undo it. The record only answers for tables this
+// process says nothing about, which is exactly the case it exists for: a
+// config that never loaded the plugin owning the data.
+function durableSet(schemas, handle) {
+    const { durable, transient } = declaredTables(schemas)
+    const keep = new Set(durable)
+    for (const t of recordedDurableTables(handle)) {
+        if (!transient.has(t)) keep.add(t)
+    }
+    return keep
+}
+
+// Table names any earlier open recorded as durable. Read defensively: a
+// database written before this was introduced simply has no row.
+function recordedDurableTables(handle) {
+    try {
+        const row = handle.prepare('SELECT value FROM mikser_meta WHERE key = ?').get('durable_tables')
+        const parsed = row?.value ? JSON.parse(row.value) : []
+        return Array.isArray(parsed) ? parsed.filter(t => typeof t === 'string') : []
+    } catch {
+        return []
+    }
+}
+
+// Write back what the next process should assume. Already reconciled by
+// durableSet, so a table this process demoted is genuinely dropped.
+function rememberDurableTables(handle, stmtStamp, keep) {
+    try {
+        stmtStamp.run('durable_tables', JSON.stringify([...keep].sort()))
+    } catch { /* a read-only run cannot record, and does not need to */ }
+}
+
 export function registerSchema(name, sqlScript, { durable = false } = {}) {
     if (typeof name !== 'string' || !name.length) {
         throw new Error('registerSchema: name must be a non-empty string')
@@ -218,6 +269,11 @@ export function useDatabase() {
 // onLoaded below.
 export function createSqliteDatabase({
     runtimeFolder, version, logger, config = {}, schemas, provisioners: provisionersArg,
+    // Clear the cache on this open even though nothing changed — what
+    // `--clear` asks for. Routed through the same wipe as a version change so
+    // it honours `durable`, rather than removing the file and taking the
+    // credentials with it.
+    forceWipe = false,
 }) {
     // Tests inject their own provisioners; the runtime path falls
     // through to the module-level `provisioners` array that plugins
@@ -300,7 +356,7 @@ export function createSqliteDatabase({
         const reportOnly = isReportOnlyRun()
 
         let upgradedFromVersion = null
-        if (reportOnly && ((recorded && recorded !== version) || configChanged)) {
+        if (reportOnly && !forceWipe && ((recorded && recorded !== version) || configChanged)) {
             logger?.warn(
                 'The cache is stale (%s changed since it was written) and this is a read-only run, '
                 + 'so it was NOT wiped — the answer below describes the last build, which may not '
@@ -314,7 +370,7 @@ export function createSqliteDatabase({
                 runtime.options.config,
             )
         }
-        if (!reportOnly && ((recorded && recorded !== version) || configChanged)) {
+        if (!reportOnly && (forceWipe || (recorded && recorded !== version) || configChanged)) {
             // Schema mismatch on upgrade or downgrade. Per ADR-0002 the
             // files on disk are the source of truth and this database
             // is a derived cache, so the right behavior is to wipe the
@@ -330,6 +386,8 @@ export function createSqliteDatabase({
                     'Database schema mismatch: stored=%s, current=%s. Wiping the cache and rebuilding from sources (files are the source of truth — no source data is affected).',
                     recorded, version,
                 )
+            } else if (forceWipe) {
+                logger?.info('Clearing the cache and rebuilding from sources (durable data is kept).')
             }
             // What must survive. A wipe exists because the cache is
             // DERIVED — ADR-0002, the files are the source of truth, so
@@ -343,11 +401,10 @@ export function createSqliteDatabase({
             // So a schema registered `durable` is kept and everything else
             // goes. mikser_meta stays too — its stamps are rewritten a few
             // lines down, and dropping it would only mean recreating it.
-            const durableTables = new Set(['mikser_meta'])
-            for (const value of schemas.values()) {
-                const { sql, durable } = schemaEntry(value)
-                if (durable) for (const t of tableNamesFrom(sql)) durableTables.add(t)
-            }
+            // What this process declares, plus what any earlier process
+            // recorded. The second half is what makes a wipe safe from a
+            // config that does not load the plugin owning the data.
+            const durableTables = new Set(['mikser_meta', ...durableSet(schemas, handle)])
 
             if (durableTables.size > 1 && dbPath !== ':memory:') {
                 // Drop table by table rather than unlinking, so the durable
@@ -390,6 +447,21 @@ export function createSqliteDatabase({
         const stmtStamp = handle.prepare('INSERT OR REPLACE INTO mikser_meta (key, value) VALUES (?, ?)')
         stmtStamp.run('schema_version', version)
         if (currentConfig) stmtStamp.run('config_checksum', currentConfig)
+
+        // Remember which tables are durable, IN the database.
+        //
+        // Durability was otherwise a property of what happened to be loaded:
+        // the wipe asked the schema registry, so a run whose config does not
+        // include the plugin that owns a durable table saw no durable tables
+        // at all, took the unlink branch, and destroyed it. A dev config
+        // without the auth plugin, opening the same working folder, signed
+        // every connected agent out — and nothing in that run mentioned auth.
+        //
+        // Recorded here and unioned at wipe time, so the answer survives a
+        // process that has never heard of the plugin. Additive: a table stays
+        // on the list once recorded, because forgetting one costs data nothing
+        // can reproduce while keeping a stale name costs an empty table.
+        rememberDurableTables(handle, stmtStamp, durableSet(schemas, handle))
 
         // Build provisioning context. firstRun is true when the file
         // didn't exist before this open OR when the schema mismatch
@@ -499,6 +571,9 @@ onLoaded(async () => {
         logger,
         config,
         schemas,
+        // `--clear` asks for the cache to go. It is honoured here rather than
+        // by deleting the file, so the tables registered `durable` survive it.
+        forceWipe: Boolean(runtime.options.clear),
     })
 
     db.open()

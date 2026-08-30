@@ -1,6 +1,6 @@
 import path from 'node:path'
 import { Command } from 'commander'
-import { rm, lstat, realpath, mkdir, unlink } from 'fs/promises'
+import { rm, lstat, realpath, mkdir, unlink, readdir } from 'fs/promises'
 import { existsSync } from 'fs'
 import _ from 'lodash'
 import Piscina from 'piscina'
@@ -186,11 +186,31 @@ export async function setup(options) {
         // and never appears in outputFolder.
         runtime.options.previewFolder = path.join(runtime.options.runtimeFolder, 'preview')
 
+        // The sqlite file and the WAL sidecars it leaves beside it.
+        const isDatabaseArtifact = (name) =>
+            name.endsWith('.sqlite') || name.endsWith('.sqlite-wal') || name.endsWith('.sqlite-shm')
+
         if (runtime.options.clear) {
             try {
                 runtime.engine.logger.info('Clearing folders')
                 await rm(runtime.options.outputFolder, { recursive: true })
-                await rm(runtime.options.runtimeFolder, { recursive: true })
+                // Everything in the runtime folder EXCEPT the database.
+                //
+                // Removing the folder wholesale took the database with it, and
+                // with it every table registered `durable` — an OAuth client
+                // registration, a refresh token, a form submission: data no
+                // file can reproduce, which is the whole reason that flag
+                // exists. `--clear` promising a rebuild and delivering a
+                // sign-out is the same bug the durable flag was added to fix,
+                // reached by a different route.
+                //
+                // The database is cleared too, but through its own wipe, which
+                // drops the derived tables and keeps the durable ones.
+                for (const entry of await readdir(runtime.options.runtimeFolder, { withFileTypes: true })
+                    .catch(() => [])) {
+                    if (isDatabaseArtifact(entry.name)) continue
+                    await rm(path.join(runtime.options.runtimeFolder, entry.name), { recursive: true, force: true })
+                }
             } catch (err) {
                 if (err.code != 'ENOENT')
                     throw err

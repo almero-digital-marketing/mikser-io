@@ -74,3 +74,62 @@ describe('cache wipe with a durable schema', () => {
         db.close()
     })
 })
+
+// Two ways durable data was destroyed anyway, both reached without any
+// version change at all.
+describe('durability is a property of the database, not of what is loaded', () => {
+    let dir2
+    before(async () => { dir2 = await mkdtemp(path.join(tmpdir(), 'mikser-durable2-')) })
+    after(async () => { await rm(dir2, { recursive: true, force: true }) })
+
+    const CACHE = 'CREATE TABLE IF NOT EXISTS derived_rows (id TEXT PRIMARY KEY)'
+    const GRANTS = 'CREATE TABLE IF NOT EXISTS grant_rows (id TEXT PRIMARY KEY)'
+
+    const open = (version, { withGrants, forceWipe = false } = {}) => {
+        const schemas = new Map([['cache', CACHE]])
+        if (withGrants) schemas.set('grants', { sql: GRANTS, durable: true })
+        const db = createSqliteDatabase({
+            runtimeFolder: dir2, version, config: { filename: 'durable2.sqlite' }, schemas, forceWipe,
+        })
+        db.open()
+        return db
+    }
+    const count = (db, t) => { try { return db.handle.prepare(`SELECT COUNT(*) n FROM ${t}`).get().n } catch { return 'GONE' } }
+
+    it('survives a run whose config never loaded the owning plugin', () => {
+        // The real shape: a prod config mounts auth, a dev config does not,
+        // and both open the same working folder. The wipe used to ask only
+        // the schemas THIS process registered, find none durable, and unlink
+        // the file — signing every connected agent out from a run that never
+        // mentioned auth.
+        let db = open('1.0.0', { withGrants: true })
+        db.handle.prepare('INSERT INTO grant_rows (id) VALUES (?)').run('refresh-token')
+        db.close()
+
+        db = open('2.0.0', { withGrants: false })   // the dev run
+        db.close()
+
+        db = open('2.0.0', { withGrants: true })    // back to prod
+        assert.equal(count(db, 'grant_rows'), 1, 'a config that never heard of the plugin must not destroy its data')
+        db.close()
+    })
+
+    it('--clear empties the cache and keeps the credentials', () => {
+        // --clear removed the whole runtime folder, which took the database
+        // and every durable table with it. It promises a rebuild; a sign-out
+        // is not a rebuild.
+        let db = open('2.0.0', { withGrants: true })
+        db.handle.prepare('INSERT INTO grant_rows (id) VALUES (?)').run('client-registration')
+        db.handle.prepare('INSERT INTO derived_rows (id) VALUES (?)').run('cached')
+        db.close()
+
+        db = open('2.0.0', { withGrants: true, forceWipe: true })
+        assert.equal(count(db, 'derived_rows'), 0, 'the cache really is cleared')
+        // By id, not by count: the previous test shares this database and
+        // left a row in it, so a count asserts the fixture rather than the
+        // behaviour.
+        const kept = db.handle.prepare('SELECT id FROM grant_rows WHERE id = ?').get('client-registration')
+        assert.equal(kept?.id, 'client-registration', 'the credentials really do survive')
+        db.close()
+    })
+})
