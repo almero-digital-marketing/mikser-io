@@ -8,8 +8,12 @@
 // second are indistinguishable, so removing one removes the other.
 //
 // A change set is the missing grain. The caller names it, the writes
-// accumulate under it, and a consumer — mikser-io-git today — can commit
-// exactly those paths and later remove exactly that contribution.
+// accumulate under it, and a consumer can act on exactly those paths.
+//
+// The engine records the grouping and takes no position on what is done with
+// it. Versioning the paths together is one use — mikser-io-git's — but a
+// snapshot, an audit trail, a draft-then-publish gate or a filesystem-level
+// rollback all want the same fact, and none of them is a commit.
 //
 // Deliberately NOT a transaction. Nothing is held back, nothing rolls back on
 // failure, and a half-finished set is a real set containing what actually
@@ -55,8 +59,11 @@ function store() {
     return runtime.changeSets
 }
 
-// Repo-relative, POSIX-separated: these end up in a git pathspec, and a
-// consumer should not have to redo that conversion or guess the root.
+// Relative to the working folder, POSIX-separated.
+//
+// The working folder is the root every consumer already reasons in, and
+// forward slashes are the separator entity ids use — so a path here matches
+// the vocabulary of the rest of the engine rather than the host's.
 function relativeToWorkingFolder(uri) {
     const root = runtime.options?.workingFolder
     if (!root || !uri) return null
@@ -82,9 +89,9 @@ export function recordChangeSetWrite({ changeSet, summary, principal, uri, opera
     undoOf ??= ambient?.undoOf
     if (!changeSet || !uri) return null
     const rel = relativeToWorkingFolder(uri)
-    // Outside the working folder there is nothing a repo-scoped consumer can
-    // do with the path, and silently keeping an absolute one would produce a
-    // pathspec that matches nothing.
+    // Outside the working folder there is nothing a consumer scoped to the
+    // project can do with the path, and silently keeping an absolute one would
+    // produce a selector that quietly matches nothing.
     if (!rel) return null
 
     const sets = store()
@@ -94,9 +101,9 @@ export function recordChangeSetWrite({ changeSet, summary, principal, uri, opera
             id: changeSet,
             summary: summary ?? null,
             principal: principal ?? null,
-            // Set when this change set exists to take another one back, so
-            // the undo is itself an ordinary, undoable change rather than a
-            // special history-rewriting operation.
+            // Set when this change set exists to take another one back, so an
+            // undo is itself an ordinary, undoable change rather than a
+            // privileged operation that rewrites the record.
             undoOf: undoOf ?? null,
             startedAt: Date.now(),
             paths: new Map(),
@@ -110,8 +117,8 @@ export function recordChangeSetWrite({ changeSet, summary, principal, uri, opera
     return set.id
 }
 
-// Every set with writes not yet consumed, oldest first — the order a consumer
-// should commit them in, so history reads the way the work happened.
+// Every set with writes not yet consumed, oldest first — the order the work
+// actually happened in, which is the order a consumer should record it in.
 export function pendingChangeSets() {
     return [...store().values()]
         .filter(set => set.paths.size)
@@ -129,10 +136,10 @@ export function pendingChangeSets() {
 
 // Drop sets a consumer has dealt with.
 //
-// Called after the paths are committed, not after they are written: a crash in
-// between loses the attribution but not the work, which then reaches the
-// consumer as an unclaimed write. That is the right way round — attribution is
-// a convenience, the bytes are not.
+// Called after a consumer has durably recorded the paths, not after they are
+// written: a crash in between loses the attribution but not the work, which
+// then reaches the consumer as an unclaimed write. That is the right way
+// round — attribution is a convenience, the bytes are not.
 export function clearChangeSets(ids = []) {
     const sets = store()
     for (const id of ids) sets.delete(id)

@@ -646,6 +646,12 @@ happened, and losing them would be worse than not attributing them.
 rest into unattributed ones, which is what lets it offer undo for the first and
 not the second.
 
+The engine records the grouping and takes no position on what is done with it —
+it knows nothing about commits, branches or reverts. Versioning the paths
+together is one use; a snapshot, an audit trail, a draft-then-publish gate or a
+filesystem-level rollback all want the same fact. That is why change sets live
+in core and git does not.
+
 ## Search
 
 `queryEntities` sifts **meta**. `searchEntities` answers the other question —
