@@ -77,19 +77,32 @@ Two files delete the list: a wipe is `unlink` again, and what must survive it
 is not in the file being unlinked. The durable file lives outside `runtime/`
 because that folder exists to be thrown away.
 
-`registerSchema(name, sql, { durable: true })` is unchanged as an API. A
-durable schema is applied on a short-lived connection whose own `main` is the
-durable file, so its unqualified `CREATE TABLE` lands there; the engine's
-connection then ATTACHes that file, so queries need no qualifier either.
-Requiring plugins to write `durable.` in their DDL was rejected: the decision
-would then be expressed twice, in the flag and in the SQL, and a plugin that
-set the flag and forgot the prefix would silently store its data in the file
-that gets deleted.
+The two are DIFFERENT ENGINES, not two files behind one API.
 
-The sync constraint below is a property of the CACHE only — render workers
-need a sync handle for template helpers. The durable store is read and
-written on the main thread alone, which is what leaves it free to move to
-another engine later.
+The cache is locked to sqlite and a SYNCHRONOUS driver: render workers open
+their own read-only handle so template helpers like `lookupHref` can resolve a
+reference inline, and a promise cannot be awaited inside a Handlebars helper.
+That constraint is what killed the earlier pluggable-driver attempt.
+
+None of it reaches the durable store, which is read and written on the main
+thread only, by HTTP handlers and lifecycle hooks that are already async. So it
+sits behind **knex** and can point at Postgres instead of a local file — which
+is what several mikser processes sharing one sign-in and one change-set log
+would need. Splitting the files is what split that constraint apart.
+
+Durable tables are built by MIGRATIONS, not by an idempotent CREATE:
+`registerMigrations(owner, [{ name, up }])`, per owner, recorded in
+`mikser_migrations (owner, name, applied_at)`. Per owner because the tables
+belong to independently versioned npm packages, and installing a plugin next
+month must not reorder migrations that ran last year — which every
+directory-based migration runner assumes it can do. `CREATE TABLE IF NOT
+EXISTS` does nothing to a table that already exists, so a schema replayed every
+boot can never add a column, rename one, or backfill a value; that is invisible
+for a cache table and the permanent condition of a durable one.
+
+`registerSchema(name, sql, { durable: true })` now THROWS, pointing at
+`registerMigrations`. Accepting it would put the table in the file that gets
+deleted, and the first sign would be an operator asked to sign in again.
 
 For the cache: WAL mode + `synchronous=NORMAL` +
 `foreign_keys=ON`. Every persistent subsystem registers its schema via

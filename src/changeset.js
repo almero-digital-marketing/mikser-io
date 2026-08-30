@@ -27,59 +27,64 @@
 import path from 'node:path'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import runtime from './runtime.js'
-import { registerSchema } from './database/index.js'
+import { registerMigrations, useDurableDatabase } from './database/durable.js'
 
 // The log is DURABLE. It records which writes belonged to which request, and
 // nothing can reconstruct that: not the files, which show the result and not
 // the grouping, and not a consumer's own history, which may not exist yet or
 // at all. Losing it turns every id already handed to an agent into a dangling
 // handle.
-registerSchema('change_sets', `
-    CREATE TABLE IF NOT EXISTS mikser_change_sets (
-        id          TEXT PRIMARY KEY,
-        summary     TEXT,
-        principal   TEXT,
-        undo_of     TEXT,
-        created_at  INTEGER NOT NULL,
-        -- Set when the writer said it was finished. A set that closed is
-        -- committable now; one still open is waiting to see whether more
-        -- writes join it.
-        closed_at   INTEGER,
-        -- When the set last grew. A set is one request, and a request is
-        -- finished when it stops writing — which is the only signal available,
-        -- since a caller grouping several tool calls under one id has not said
-        -- which call is the last.
-        updated_at  INTEGER,
-        -- Set when a consumer has durably recorded the set somewhere of its
-        -- own — a commit, a snapshot. Until then the set is real and listable
-        -- but there is nothing to revert FROM, which is a different answer
-        -- from "no such change set".
-        recorded_at INTEGER,
-        recorded_as TEXT,
-        -- Why a consumer could not record this set. A set that failed is not
-        -- a set that is waiting: without somewhere to put the reason, a
-        -- permanent failure and a pending commit look identical, and both
-        -- read as a null commit forever.
-        commit_error TEXT,
-        commit_attempts INTEGER NOT NULL DEFAULT 0,
-        -- How the set finished. A claimed set had exactly two exits,
-        -- committed or failed, and a set whose changes cancel out qualifies
-        -- for neither: there is genuinely nothing to write, which is not an
-        -- error. Without a third outcome it was re-claimed every pass forever
-        -- and reported a null commit that looked like a fault.
-        outcome TEXT
-    );
-    CREATE INDEX IF NOT EXISTS idx_mikser_change_sets_created
-        ON mikser_change_sets (created_at DESC);
+registerMigrations('change-sets', [
+    {
+        name: '001-change-sets',
+        up: async (knex) => {
+            await knex.schema.createTable('mikser_change_sets', (table) => {
+                table.string('id').primary()
+                table.text('summary')
+                table.text('principal')
+                table.text('undo_of')
+                table.bigInteger('created_at').notNullable()
+                // Set when the writer said it was finished. A set that closed
+                // is committable now; one still open is waiting to see whether
+                // more writes join it.
+                table.bigInteger('closed_at')
+                // When the set last grew. A set is one request, and a request
+                // is finished when it stops writing — which is the only signal
+                // available, since a caller grouping several tool calls under
+                // one id has not said which call is the last.
+                table.bigInteger('updated_at')
+                // Set when a consumer has durably recorded the set somewhere
+                // of its own — a commit, a snapshot. Until then the set is
+                // real and listable but there is nothing to revert FROM, which
+                // is a different answer from "no such change set".
+                table.bigInteger('recorded_at')
+                table.text('recorded_as')
+                // Why a consumer could not record this set. A set that FAILED
+                // is not a set that is waiting: without somewhere to put the
+                // reason, a permanent failure and a pending commit look
+                // identical, and both read as a null commit forever.
+                table.text('commit_error')
+                table.integer('commit_attempts').notNullable().defaultTo(0)
+                // How the set finished. A claimed set had exactly two exits,
+                // committed or failed, and a set whose changes cancel out
+                // qualifies for neither: there is genuinely nothing to write,
+                // which is not an error. Without a third outcome it was
+                // re-claimed every pass forever and reported a null commit
+                // that looked like a fault.
+                table.text('outcome')
+                table.index(['created_at'], 'idx_mikser_change_sets_created')
+            })
 
-    CREATE TABLE IF NOT EXISTS mikser_change_set_paths (
-        change_set TEXT NOT NULL,
-        path       TEXT NOT NULL,
-        operation  TEXT NOT NULL,
-        entity_id  TEXT,
-        PRIMARY KEY (change_set, path)
-    );
-`, { durable: true })
+            await knex.schema.createTable('mikser_change_set_paths', (table) => {
+                table.string('change_set').notNullable()
+                table.string('path').notNullable()
+                table.string('operation').notNullable()
+                table.string('entity_id')
+                table.primary(['change_set', 'path'])
+            })
+        },
+    },
+])
 
 // How many sets to keep. An undo log is only useful while the change is
 // recent enough to be worth taking back, and unbounded growth in a durable
@@ -135,11 +140,15 @@ export function closeChangeSet(id) {
     const at = Date.now()
     const set = memory.get(id)
     if (set) set.closedAt = at
-    const handle = db()
-    if (!handle) return
-    try {
-        handle.prepare('UPDATE mikser_change_sets SET closed_at = COALESCE(closed_at, ?) WHERE id = ?').run(at, id)
-    } catch { /* memory still holds it */ }
+    // Queued, not awaited, so closeChangeSet stays callable from a sync
+    // caller. The memory copy above is already closed, and every reader
+    // awaits the queue before it looks.
+    enqueue(async () => {
+        const knex = db()
+        if (!knex) return
+        await knex('mikser_change_sets').where({ id })
+            .update({ closed_at: knex.raw('COALESCE(closed_at, ?)', [at]) })
+    })
 }
 
 export function currentChangeSet() {
@@ -155,46 +164,81 @@ export function currentChangeSet() {
 const memory = new Map()
 
 function db() {
-    // Read off the runtime rather than calling useDatabase(): this module is
-    // reached from utils.js, which loads before the database module can be
-    // imported without closing a cycle.
-    const handle = runtime.database?.handle
-    return handle?.prepare ? handle : null
+    return useDurableDatabase()
 }
 
-function persist(handle, set, rel, operation, entityId) {
-    handle.prepare(`
-        INSERT INTO mikser_change_sets (id, summary, principal, undo_of, created_at, updated_at)
-        VALUES (@id, @summary, @principal, @undoOf, @createdAt, @updatedAt)
-        ON CONFLICT(id) DO UPDATE SET
-            summary    = COALESCE(mikser_change_sets.summary, excluded.summary),
-            principal  = COALESCE(mikser_change_sets.principal, excluded.principal),
-            undo_of    = COALESCE(mikser_change_sets.undo_of, excluded.undo_of),
-            updated_at = excluded.updated_at
-    `).run({
-        id: set.id, summary: set.summary, principal: set.principal,
-        undoOf: set.undoOf, createdAt: set.startedAt, updatedAt: set.updatedAt,
-    })
-    handle.prepare(`
-        INSERT INTO mikser_change_set_paths (change_set, path, operation, entity_id)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(change_set, path) DO UPDATE SET operation = excluded.operation
-    `).run(set.id, rel, operation, entityId ?? null)
-    prune(handle)
+// Writes are queued, not awaited.
+//
+// recordChangeSetWrite is called from writeEntity, which is synchronous, and
+// making it async would push a promise into every write path in the engine for
+// a log that is not on the critical path. So the in-memory map is updated
+// synchronously — it is what the current process reads — and the durable write
+// is chained onto this.
+//
+// Every reader awaits it first. Without that, listing change sets immediately
+// after making one is a race: the row is queued and the query has already run.
+let queue = Promise.resolve()
+
+// Loud on failure. A swallowed one here is invisible in exactly the way that
+// matters: the write succeeds, an id comes back, and the log it points at
+// never gains a row — which is how a stale column shape turned the whole
+// feature into a no-op that looked like it was working.
+//
+// The chain is repaired rather than left rejected, so one failed write does
+// not poison every write after it.
+function enqueue(work) {
+    queue = queue.then(work).catch((err) => { reportChangeSetFailure(err) })
+    return queue
 }
 
-function prune(handle) {
-    handle.prepare(`
-        DELETE FROM mikser_change_set_paths WHERE change_set IN (
-            SELECT id FROM mikser_change_sets
-            ORDER BY created_at DESC LIMIT -1 OFFSET ?
-        )
-    `).run(KEEP_SETS)
-    handle.prepare(`
-        DELETE FROM mikser_change_sets WHERE id IN (
-            SELECT id FROM mikser_change_sets ORDER BY created_at DESC LIMIT -1 OFFSET ?
-        )
-    `).run(KEEP_SETS)
+// Readers call this before querying. Failures were already reported by the
+// writer that caused them, so this only ever waits.
+async function settled() {
+    try { await queue } catch { /* reported at the point of failure */ }
+}
+
+async function persist(knex, set, rel, operation, entityId) {
+    // COALESCE rather than a plain merge: the first write's summary is the
+    // request's own description of itself, and a later write in the same set
+    // must not overwrite it with its own. `excluded` is the pseudo-table on
+    // both sqlite and postgres.
+    await knex('mikser_change_sets')
+        .insert({
+            id: set.id,
+            summary: set.summary ?? null,
+            principal: set.principal ?? null,
+            undo_of: set.undoOf ?? null,
+            created_at: set.startedAt,
+            updated_at: set.updatedAt,
+        })
+        .onConflict('id')
+        .merge({
+            summary:    knex.raw('COALESCE(mikser_change_sets.summary, excluded.summary)'),
+            principal:  knex.raw('COALESCE(mikser_change_sets.principal, excluded.principal)'),
+            undo_of:    knex.raw('COALESCE(mikser_change_sets.undo_of, excluded.undo_of)'),
+            updated_at: knex.raw('excluded.updated_at'),
+        })
+
+    await knex('mikser_change_set_paths')
+        .insert({ change_set: set.id, path: rel, operation, entity_id: entityId ?? null })
+        .onConflict(['change_set', 'path'])
+        .merge({ operation: knex.raw('excluded.operation') })
+
+    await prune(knex)
+}
+
+// Oldest sets past the cap, by id rather than by a dialect-specific
+// LIMIT -1 OFFSET. The table is capped at KEEP_SETS, so this reads a list
+// whose length is bounded by the cap itself.
+async function prune(knex) {
+    const stale = (await knex('mikser_change_sets')
+        .orderBy('created_at', 'desc')
+        .select('id'))
+        .slice(KEEP_SETS)
+        .map(row => row.id)
+    if (!stale.length) return
+    await knex('mikser_change_set_paths').whereIn('change_set', stale).delete()
+    await knex('mikser_change_sets').whereIn('id', stale).delete()
 }
 
 // Said once per process, not once per write: a broken log is one condition,
@@ -218,11 +262,21 @@ function reportChangeSetFailure(err) {
     if (!runtime.engine?.logger) console.error(message.replace('%s', err.message))
 }
 
-function rowsToSets(handle, rows) {
-    const stmt = handle.prepare(
-        'SELECT path, operation FROM mikser_change_set_paths WHERE change_set = ? ORDER BY path')
+async function rowsToSets(knex, rows) {
+    if (!rows.length) return []
+    const paths = await knex('mikser_change_set_paths')
+        .whereIn('change_set', rows.map(row => row.id))
+        .orderBy('path')
+        .select('change_set', 'path', 'operation')
+
+    const bySet = new Map()
+    for (const row of paths) {
+        if (!bySet.has(row.change_set)) bySet.set(row.change_set, [])
+        bySet.get(row.change_set).push(row)
+    }
+
     return rows.map(row => {
-        const paths = stmt.all(row.id)
+        const mine = bySet.get(row.id) ?? []
         return {
             id: row.id,
             summary: row.summary,
@@ -236,8 +290,8 @@ function rowsToSets(handle, rows) {
             commitError: row.commit_error ?? null,
             commitAttempts: row.commit_attempts ?? 0,
             outcome: row.outcome ?? null,
-            paths: paths.map(p => p.path),
-            deletions: paths.filter(p => p.operation === 'delete').map(p => p.path),
+            paths: mine.map(p => p.path),
+            deletions: mine.filter(p => p.operation === 'delete').map(p => p.path),
         }
     })
 }
@@ -320,32 +374,29 @@ export function recordChangeSetWrite({
     set.updatedAt = Date.now()
     set.paths.set(rel, operation)
 
-    const handle = db()
-    if (handle) {
-        try {
-            persist(handle, set, rel, operation, entityId)
-        } catch (err) {
-            // Loud. A swallowed failure here is invisible in exactly the way
-            // that matters: the write succeeds, an id comes back, and the log
-            // it points at silently never gains a row — which is how a stale
-            // column shape turned the whole feature into a no-op that looked
-            // like it was working.
-            reportChangeSetFailure(err)
-        }
+    if (db()) {
+        // Snapshotted, because the queued write runs later and the set keeps
+        // growing in the meantime — passing the live object would record
+        // whatever it looked like when the queue got to it.
+        const snapshot = { ...set }
+        enqueue(async () => {
+            const knex = db()
+            if (knex) await persist(knex, snapshot, rel, operation, entityId)
+        })
     }
     return set.id
 }
 
 // Sets a consumer has not yet durably recorded, oldest first — the order the
 // work actually happened in, which is the order it should be recorded in.
-export function pendingChangeSets() {
-    const handle = db()
-    if (handle) {
+export async function pendingChangeSets() {
+    await settled()
+    const knex = db()
+    if (knex) {
         try {
-            const rows = handle.prepare(`
-                SELECT * FROM mikser_change_sets WHERE recorded_at IS NULL ORDER BY created_at ASC
-            `).all()
-            return rowsToSets(handle, rows).filter(set => set.paths.length)
+            const rows = await knex('mikser_change_sets')
+                .whereNull('recorded_at').orderBy('created_at', 'asc').select('*')
+            return (await rowsToSets(knex, rows)).filter(set => set.paths.length)
         } catch (err) {
             reportChangeSetFailure(err)
         }
@@ -355,14 +406,14 @@ export function pendingChangeSets() {
 
 // The log an agent reads: every set, newest first, whether or not a consumer
 // has recorded it anywhere.
-export function listChangeSets({ limit = 20 } = {}) {
-    const handle = db()
-    if (handle) {
+export async function listChangeSets({ limit = 20 } = {}) {
+    await settled()
+    const knex = db()
+    if (knex) {
         try {
-            const rows = handle.prepare(`
-                SELECT * FROM mikser_change_sets ORDER BY created_at DESC LIMIT ?
-            `).all(Math.max(1, Math.min(limit, 200)))
-            return rowsToSets(handle, rows)
+            const rows = await knex('mikser_change_sets')
+                .orderBy('created_at', 'desc').limit(Math.max(1, Math.min(limit, 200))).select('*')
+            return await rowsToSets(knex, rows)
         } catch (err) {
             reportChangeSetFailure(err)
         }
@@ -370,14 +421,20 @@ export function listChangeSets({ limit = 20 } = {}) {
     return memorySets().sort((a, b) => b.startedAt - a.startedAt).slice(0, limit)
 }
 
-export function findChangeSet(id) {
+export async function findChangeSet(id) {
     if (!id) return null
-    const handle = db()
-    if (handle) {
+    await settled()
+    const knex = db()
+    if (knex) {
         try {
-            const row = handle.prepare('SELECT * FROM mikser_change_sets WHERE id = ?').get(id)
-            return row ? rowsToSets(handle, [row])[0] : null
-        } catch { /* fall through to memory */ }
+            const row = await knex('mikser_change_sets').where({ id }).first()
+            return row ? (await rowsToSets(knex, [row]))[0] : null
+        } catch (err) {
+            // Reported rather than silently falling through. Memory holds only
+            // this process's sets, so a caller that asked about an older id
+            // would otherwise get "no such change set" for one that exists.
+            reportChangeSetFailure(err)
+        }
     }
     return memorySets(set => set.id === id)[0] ?? null
 }
@@ -386,7 +443,7 @@ export function findChangeSet(id) {
 // — a commit sha, a snapshot id. That reference is what an undo reverts from,
 // and its absence is why "recorded but not yet committed" is a different
 // answer from "no such change set".
-export function markChangeSetsRecorded(ids = [], recordedAs = null) {
+export async function markChangeSetsRecorded(ids = [], recordedAs = null) {
     const at = Date.now()
     for (const id of ids) {
         const set = memory.get(id)
@@ -397,42 +454,47 @@ export function markChangeSetsRecorded(ids = [], recordedAs = null) {
             set.outcome = 'committed'
         }
     }
-    const handle = db()
-    if (!handle) return
+    await settled()
+    const knex = db()
+    if (!knex) return
     try {
-        const stmt = handle.prepare(
-            `UPDATE mikser_change_sets
-             SET recorded_at = ?, recorded_as = ?, commit_error = NULL, outcome = 'committed'
-             WHERE id = ?`)
-        for (const id of ids) stmt.run(at, recordedAs, id)
-    } catch { /* memory still holds it */ }
+        await knex('mikser_change_sets').whereIn('id', ids).update({
+            recorded_at: at, recorded_as: recordedAs, commit_error: null, outcome: 'committed',
+        })
+    } catch (err) {
+        // This used to be a bare `catch { /* memory still holds it */ }`, and
+        // memory holding it is true only until the process ends. A set that
+        // was committed but never recorded as committed is re-committed on
+        // every pass after a restart.
+        reportChangeSetFailure(err)
+    }
 }
 
 // Kept as the name consumers already call. Marking recorded is what "done
 // with it" means now — the set stays in the log so it can still be undone.
-export function clearChangeSets(ids = [], recordedAs = null) {
-    markChangeSetsRecorded(ids, recordedAs)
+export async function clearChangeSets(ids = [], recordedAs = null) {
+    await markChangeSetsRecorded(ids, recordedAs)
 }
 
 // Record that a consumer tried and failed. The set stays pending — a failure
 // is worth retrying, and a transient one usually succeeds next pass — but the
 // reason is now visible instead of the set sitting at `committed: null` with
 // nothing to say why.
-export function markChangeSetFailed(id, error) {
+export async function markChangeSetFailed(id, error) {
     const message = String(error?.stderr || error?.message || error || 'unknown error').slice(0, 500)
     const set = memory.get(id)
     if (set) {
         set.commitError = message
         set.commitAttempts = (set.commitAttempts ?? 0) + 1
     }
-    const handle = db()
-    if (!handle) return
+    await settled()
+    const knex = db()
+    if (!knex) return
     try {
-        handle.prepare(`
-            UPDATE mikser_change_sets
-            SET commit_error = ?, commit_attempts = commit_attempts + 1
-            WHERE id = ?
-        `).run(message, id)
+        await knex('mikser_change_sets').where({ id }).update({
+            commit_error: message,
+            commit_attempts: knex.raw('commit_attempts + 1'),
+        })
     } catch (err) {
         reportChangeSetFailure(err)
     }
@@ -448,29 +510,31 @@ export function markChangeSetFailed(id, error) {
 //
 // `outcome` keeps the distinction that matters to undo: reverting a set that
 // never produced a commit is not the same operation as reverting one that did.
-export function markChangeSetSettled(id, outcome = 'empty') {
+export async function markChangeSetSettled(id, outcome = 'empty') {
     const at = Date.now()
     const set = memory.get(id)
     if (set) { set.recordedAt = at; set.recordedAs = null; set.outcome = outcome }
-    const handle = db()
-    if (!handle) return
+    await settled()
+    const knex = db()
+    if (!knex) return
     try {
-        handle.prepare(`
-            UPDATE mikser_change_sets
-            SET recorded_at = COALESCE(recorded_at, ?), outcome = COALESCE(outcome, ?)
-            WHERE id = ?
-        `).run(at, outcome, id)
+        await knex('mikser_change_sets').where({ id }).update({
+            recorded_at: knex.raw('COALESCE(recorded_at, ?)', [at]),
+            outcome: knex.raw('COALESCE(outcome, ?)', [outcome]),
+        })
     } catch (err) {
         reportChangeSetFailure(err)
     }
 }
 
-export function forgetAllChangeSets() {
+export async function forgetAllChangeSets() {
     memory.clear()
-    const handle = db()
-    if (!handle) return
+    await settled()
+    const knex = db()
+    if (!knex) return
     try {
-        handle.exec('DELETE FROM mikser_change_set_paths; DELETE FROM mikser_change_sets;')
+        await knex('mikser_change_set_paths').delete()
+        await knex('mikser_change_sets').delete()
     } catch { /* nothing to clear */ }
 }
 

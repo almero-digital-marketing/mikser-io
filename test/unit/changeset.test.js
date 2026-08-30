@@ -22,65 +22,65 @@ beforeEach(async () => {
     await mkdir(docs, { recursive: true })
     runtime.options = { ...runtime.options, workingFolder: root, documentsFolder: docs }
     runtime.catalog = { byId: new Map() }
-    forgetAllChangeSets()
+    await forgetAllChangeSets()
 })
 afterEach(async () => { if (root) await rm(root, { recursive: true, force: true }) })
 
-describe('recording', () => {
-    it('accumulates several writes under one set', () => {
+describe('recording', async () => {
+    it('accumulates several writes under one set', async () => {
         recordChangeSetWrite({ changeSet: 'a', summary: 'Update the devices page', uri: path.join(docs, 'x.md') })
         recordChangeSetWrite({ changeSet: 'a', uri: path.join(docs, 'y.md') })
-        const [set] = pendingChangeSets()
+        const [set] = await pendingChangeSets()
         assert.equal(set.id, 'a')
         assert.equal(set.summary, 'Update the devices page')
         assert.deepEqual(set.paths.sort(), ['documents/x.md', 'documents/y.md'])
     })
 
-    it('reports paths relative to the working folder, POSIX-separated', () => {
+    it('reports paths relative to the working folder, POSIX-separated', async () => {
         // These become a git pathspec; an absolute path matches nothing.
         recordChangeSetWrite({ changeSet: 'a', uri: path.join(docs, 'deep', 'z.md') })
-        assert.deepEqual(pendingChangeSets()[0].paths, ['documents/deep/z.md'])
+        assert.deepEqual((await pendingChangeSets())[0].paths, ['documents/deep/z.md'])
     })
 
-    it('keeps the first summary rather than the last write\'s', () => {
+    it('keeps the first summary rather than the last write\'s', async () => {
         recordChangeSetWrite({ changeSet: 'a', summary: 'the request', uri: path.join(docs, 'x.md') })
         recordChangeSetWrite({ changeSet: 'a', summary: 'a later write', uri: path.join(docs, 'y.md') })
-        assert.equal(pendingChangeSets()[0].summary, 'the request')
+        assert.equal((await pendingChangeSets())[0].summary, 'the request')
     })
 
-    it('dedupes a file written twice', () => {
+    it('dedupes a file written twice', async () => {
         recordChangeSetWrite({ changeSet: 'a', uri: path.join(docs, 'x.md') })
         recordChangeSetWrite({ changeSet: 'a', uri: path.join(docs, 'x.md') })
-        assert.deepEqual(pendingChangeSets()[0].paths, ['documents/x.md'])
+        assert.deepEqual((await pendingChangeSets())[0].paths, ['documents/x.md'])
     })
 
-    it('ignores a path outside the working folder', () => {
+    it('ignores a path outside the working folder', async () => {
         // A pathspec built from it would match nothing, and keeping it would
         // put an absolute path into a commit scope.
         assert.equal(recordChangeSetWrite({ changeSet: 'a', uri: '/etc/passwd' }), null)
-        assert.deepEqual(pendingChangeSets(), [])
+        assert.deepEqual(await pendingChangeSets(), [])
     })
 
-    it('ignores a write with no change set — unclaimed stays unclaimed', () => {
+    it('ignores a write with no change set — unclaimed stays unclaimed', async () => {
         assert.equal(recordChangeSetWrite({ uri: path.join(docs, 'x.md') }), null)
-        assert.deepEqual(pendingChangeSets(), [])
+        assert.deepEqual(await pendingChangeSets(), [])
     })
 
-    it('orders sets oldest first, so history reads the way work happened', () => {
+    it('orders sets oldest first, so history reads the way work happened', async () => {
         recordChangeSetWrite({ changeSet: 'first', uri: path.join(docs, 'a.md') })
         recordChangeSetWrite({ changeSet: 'second', uri: path.join(docs, 'b.md') })
-        assert.deepEqual(pendingChangeSets().map(s => s.id), ['first', 'second'])
+        assert.deepEqual((await pendingChangeSets()).map(s => s.id), ['first', 'second'])
     })
 
-    it('drops only the sets a consumer dealt with', () => {
+    it('drops only the sets a consumer dealt with', async () => {
         recordChangeSetWrite({ changeSet: 'a', uri: path.join(docs, 'a.md') })
         recordChangeSetWrite({ changeSet: 'b', uri: path.join(docs, 'b.md') })
-        clearChangeSets(['a'])
-        assert.deepEqual(pendingChangeSets().map(s => s.id), ['b'])
+        await clearChangeSets(['a'])
+        assert.deepEqual((await pendingChangeSets()).map(s => s.id), ['b'])
     })
 })
 
-describe('writeEntitySource', () => {
+describe('writeEntitySource', async () => {
     it('claims the file it wrote', async () => {
         const result = await writeEntitySource({
             collection: 'documents', relativePath: 'news/hello.md', content: '# Hi\n',
@@ -88,7 +88,7 @@ describe('writeEntitySource', () => {
         })
         assert.equal(result.ok, true)
         assert.equal(result.changeSet, 'req-1')
-        const [set] = pendingChangeSets()
+        const [set] = await pendingChangeSets()
         assert.deepEqual(set.paths, ['documents/news/hello.md'])
         assert.equal(set.summary, 'Add a news item')
     })
@@ -101,7 +101,7 @@ describe('writeEntitySource', () => {
             ifChecksum: 'a-stale-value', changeSet: 'req-2',
         })
         assert.equal(result.ok, false)
-        assert.deepEqual(pendingChangeSets(), [])
+        assert.deepEqual(await pendingChangeSets(), [])
     })
 
     it('claims nothing for a path that escapes the collection', async () => {
@@ -109,7 +109,7 @@ describe('writeEntitySource', () => {
             collection: 'documents', relativePath: '../../escape.md', content: 'x', changeSet: 'req-3',
         })
         assert.equal(result.refused, 'invalid-target')
-        assert.deepEqual(pendingChangeSets(), [])
+        assert.deepEqual(await pendingChangeSets(), [])
     })
 
     it('writes normally when no change set is given', async () => {
@@ -119,18 +119,18 @@ describe('writeEntitySource', () => {
         assert.equal(result.ok, true)
         assert.equal(result.changeSet, undefined)
         assert.equal(await readFile(path.join(docs, 'plain.md'), 'utf8'), 'body\n')
-        assert.deepEqual(pendingChangeSets(), [])
+        assert.deepEqual(await pendingChangeSets(), [])
     })
 })
 
-describe('the ambient change set', () => {
+describe('the ambient change set', async () => {
     it('attributes a write that never names a set', async () => {
         // The point of the design: a plugin that has never heard of change
         // sets still produces undoable work.
         await withChangeSet({ changeSet: 'req-9', summary: 'One request' }, async () => {
             recordChangeSetWrite({ uri: path.join(docs, 'x.md') })
         })
-        const [set] = pendingChangeSets()
+        const [set] = await pendingChangeSets()
         assert.equal(set.id, 'req-9')
         assert.equal(set.summary, 'One request')
         assert.deepEqual(set.paths, ['documents/x.md'])
@@ -140,21 +140,21 @@ describe('the ambient change set', () => {
         await withChangeSet({ changeSet: 'ambient' }, async () => {
             recordChangeSetWrite({ changeSet: 'explicit', uri: path.join(docs, 'x.md') })
         })
-        assert.deepEqual(pendingChangeSets().map(s => s.id), ['explicit'])
+        assert.deepEqual((await pendingChangeSets()).map(s => s.id), ['explicit'])
     })
 
-    it('claims nothing outside a context', () => {
+    it('claims nothing outside a context', async () => {
         // An API or human write owned by no request stays unclaimed, which is
         // what keeps it out of an agent's undo.
         recordChangeSetWrite({ uri: path.join(docs, 'x.md') })
-        assert.deepEqual(pendingChangeSets(), [])
+        assert.deepEqual(await pendingChangeSets(), [])
         assert.equal(currentChangeSet(), null)
     })
 
     it('does not leak out of its own call', async () => {
         await withChangeSet({ changeSet: 'inside' }, async () => {})
         recordChangeSetWrite({ uri: path.join(docs, 'after.md') })
-        assert.deepEqual(pendingChangeSets(), [])
+        assert.deepEqual(await pendingChangeSets(), [])
     })
 
     it('survives an await inside the context', async () => {
@@ -164,7 +164,7 @@ describe('the ambient change set', () => {
             await new Promise(resolve => setTimeout(resolve, 5))
             recordChangeSetWrite({ uri: path.join(docs, 'late.md') })
         })
-        assert.deepEqual(pendingChangeSets().map(s => s.id), ['req-async'])
+        assert.deepEqual((await pendingChangeSets()).map(s => s.id), ['req-async'])
     })
 
     it('catches a collection write with no change set argument anywhere', async () => {
@@ -173,16 +173,16 @@ describe('the ambient change set', () => {
         await withChangeSet({ changeSet: 'req-coll' }, async () => {
             await useCollection(runtime, 'documents').write('via-handle.md', 'body\n')
         })
-        assert.deepEqual(pendingChangeSets()[0].paths, ['documents/via-handle.md'])
+        assert.deepEqual((await pendingChangeSets())[0].paths, ['documents/via-handle.md'])
     })
 
     it('catches a collection remove as a deletion', async () => {
         await useCollection(runtime, 'documents').write('doomed.md', 'x\n')
-        forgetAllChangeSets()
+        await forgetAllChangeSets()
         await withChangeSet({ changeSet: 'req-del' }, async () => {
             await useCollection(runtime, 'documents').remove('doomed.md')
         })
-        const [set] = pendingChangeSets()
+        const [set] = await pendingChangeSets()
         assert.deepEqual(set.deletions, ['documents/doomed.md'])
     })
 
@@ -191,25 +191,25 @@ describe('the ambient change set', () => {
         await withChangeSet({ changeSet: 'req-rename' }, async () => {
             await writeEntity({ uri }, { title: 'renamed' })
         })
-        assert.deepEqual(pendingChangeSets()[0].paths, ['documents/ref.md'])
+        assert.deepEqual((await pendingChangeSets())[0].paths, ['documents/ref.md'])
     })
 })
 
-describe('closing a set', () => {
+describe('closing a set', async () => {
     it('closes what it minted, so one tool call is committable at once', async () => {
         // The precise signal: an id nobody else can name cannot grow after the
         // call that owns it returns.
         await withChangeSet({ changeSet: 'auto-1', summary: 'One call', closeOnReturn: true }, async () => {
             recordChangeSetWrite({ uri: path.join(docs, 'a.md') })
         })
-        assert.equal(pendingChangeSets()[0].closed, true)
+        assert.equal((await pendingChangeSets())[0].closed, true)
     })
 
     it('leaves a caller-supplied set open, because more calls may join it', async () => {
         await withChangeSet({ changeSet: 'explicit-1', summary: 'Call one' }, async () => {
             recordChangeSetWrite({ uri: path.join(docs, 'b.md') })
         })
-        assert.equal(pendingChangeSets()[0].closed, false,
+        assert.equal((await pendingChangeSets())[0].closed, false,
             'grouping across calls is the whole point of passing an id')
     })
 
@@ -222,15 +222,15 @@ describe('closing a set', () => {
                 recordChangeSetWrite({ uri: path.join(docs, 'c.md') })
                 throw new Error('handler failed')
             }))
-        assert.equal(pendingChangeSets().find(s => s.id === 'boom')?.closed, true)
+        assert.equal((await pendingChangeSets()).find(s => s.id === 'boom')?.closed, true)
     })
 
     it('tracks when a set last grew, so an open one can go quiet', async () => {
         recordChangeSetWrite({ changeSet: 'idle-1', uri: path.join(docs, 'd.md') })
-        const first = pendingChangeSets().find(s => s.id === 'idle-1').updatedAt
+        const first = (await pendingChangeSets()).find(s => s.id === 'idle-1').updatedAt
         await new Promise(resolve => setTimeout(resolve, 12))
         recordChangeSetWrite({ changeSet: 'idle-1', uri: path.join(docs, 'e.md') })
-        const second = pendingChangeSets().find(s => s.id === 'idle-1').updatedAt
+        const second = (await pendingChangeSets()).find(s => s.id === 'idle-1').updatedAt
         assert.ok(second > first, 'a set that is still growing must not look idle')
     })
 })

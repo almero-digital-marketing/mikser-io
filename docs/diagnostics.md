@@ -478,14 +478,33 @@ The cache holds five tables:
 | `mikser_snapshots` | what was rendered, where, and from which inputs |
 | `mikser_meta` | schema version and config checksum, for cache invalidation |
 
-A plugin puts a table in the durable file by passing `durable: true` to
-`registerSchema` — the SQL is written exactly as it would be otherwise, and
-queries need no qualifier either, because the durable file is attached to the
-same connection and sqlite resolves an unqualified name across both.
+The durable store is behind **knex**, so it is the one part of mikser that can
+point at another engine — `config.database.durable` takes a path or a
+connection string. The cache cannot: render workers need a synchronous handle
+for template helpers, and nothing about that applies to a store only the main
+thread touches.
+
+Durable tables are built by migrations, per owning package:
 
 ```js
-registerSchema('grants', 'CREATE TABLE IF NOT EXISTS my_grants (...)', { durable: true })
+registerMigrations('grants', [
+    { name: '001-initial', up: (knex) => knex.schema.createTable('my_grants', (t) => {
+        t.string('id').primary()
+    }) },
+    { name: '002-last-used', up: (knex) => knex.schema.alterTable('my_grants', (t) => {
+        t.bigInteger('last_used_at')
+    }) },
+])
 ```
+
+Applied once each and recorded in `mikser_migrations (owner, name, applied_at)`.
+Per owner because the tables belong to independently versioned packages —
+installing a plugin next month must not reorder migrations that ran last year.
+Names are permanent: renaming one makes it run again against a database that
+already has its effect. Append, never edit. There is no `down` — a durable
+store's rollback is a restore from backup.
+
+`registerSchema(..., { durable: true })` throws now and says so.
 
 ### `mikser_journal`
 

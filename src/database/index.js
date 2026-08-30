@@ -24,40 +24,23 @@
 // incompatibility — if the recorded version doesn't match this engine
 // version, open() throws with a clear "run mikser --clear" message.
 //
-// TWO FILES, one connection. `runtime/mikser.sqlite` is the derived cache:
-// ADR-0002 says the files on disk are the source of truth, so this one can be
-// deleted at any moment and costs a rebuild. `mikser.data.sqlite` at the
-// working-folder root is everything that is NOT derived — an OAuth client
-// registration, a refresh token, the change-set log — which no file can
-// reproduce and deleting is data loss.
+// THE CACHE, and only the cache. Everything in this file is DERIVED: the
+// catalog, the refs graph, the render manifest, the journal. Per ADR-0002 the
+// files in the working folder are the source of truth, so this database can be
+// deleted at any moment and the cost is a rebuild.
 //
-// They were one file, with a `durable: true` flag exempting tables from the
-// wipe. That needed a LIST of which tables were which, and the list is where
-// the bugs lived: a config that did not load the owning plugin saw no durable
-// tables and unlinked them; `--clear` had to be routed through the wipe
-// instead of removing the file; the table names had to be parsed back out of
-// DDL. Two files delete the list. A wipe is `unlink` again, and the state that
-// must survive it is not in the file being unlinked.
+// That is what makes the wipe below safe, and it is only true because the data
+// that is NOT derived — sign-ins, the change-set log — lives somewhere else
+// entirely: see `durable.js`, which is a separate engine behind knex precisely
+// because none of this file's constraints apply to it.
 //
-// The durable file lives OUTSIDE runtime/ on purpose. That folder exists to be
-// deleted — it is gitignored and `rm -rf runtime` is a line in real deploy
-// scripts — so non-derived state kept inside it was a standing accident.
-//
-// `registerSchema(name, sql, { durable: true })` is the whole plugin-facing
-// change, and the SQL is written exactly as it always was. A durable schema is
-// applied on a short-lived connection whose OWN main is the durable file, so
-// its unqualified `CREATE TABLE` lands there; the engine's connection then
-// ATTACHes that file as `durable` for everything afterwards.
-//
-// Requiring the plugin to write `durable.` in its DDL was the other option and
-// is worse: the decision would then be expressed twice, in the flag and in the
-// SQL, and two expressions of one decision can disagree. A plugin that set the
-// flag and forgot the prefix would put its data in the file that gets deleted,
-// and nothing would say so.
-//
-// Queries need no qualifier either way. sqlite resolves an unqualified name
-// against main first and then each attached database, so every existing
-// `SELECT ... FROM mikser_change_sets` keeps working unchanged.
+// They used to share one file, with a `durable: true` flag exempting some
+// tables from the wipe. That needed a LIST of which tables were which, and the
+// list is where the bugs were: a config that never loaded the owning plugin
+// saw no durable tables and unlinked them; `--clear` had to be routed through
+// the wipe rather than removing the file; the names had to be parsed back out
+// of DDL, which created real columns called `and`, `a` and `which` on a live
+// deployment. None of that machinery exists any more. A wipe is `unlink`.
 
 import path from 'node:path'
 import { mkdirSync, unlinkSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
@@ -80,11 +63,6 @@ const DEFAULT_FILENAME = 'mikser.sqlite'
 // The non-derived half. Named as data rather than as a cache because that is
 // the distinction an operator has to be able to make at a glance in a folder
 // listing, and it is the one they cannot make today.
-const DEFAULT_DURABLE_FILENAME = 'mikser.data.sqlite'
-
-// The sqlite schema name the durable file is attached under. Durable DDL
-// qualifies with it; queries do not have to.
-const DURABLE = 'durable'
 
 // Schemas registered by subsystems and plugins. Map<name, sqlScript>.
 // Idempotent `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`
@@ -148,323 +126,23 @@ let db = null
 // duplicate detection. Same name twice = the later registration wins
 // (with a warning). Convention: `<owner>` matching the table prefix
 // (`catalog`, `manifest`, `vector`, etc.).
-// Comments removed, so nothing downstream ever parses prose as DDL.
-//
-// Done to the WHOLE script before anything splits or counts, because both
-// operations are wrong on a comment: a comma inside one ends a clause, and a
-// bracket inside one unbalances the walk that finds a table body. Stripping
-// per-clause after the split cannot work — by then the damage is done, and the
-// fragment after the comma no longer starts with `--` so it never gets
-// stripped at all. That produced real columns named `and`, `a` and `which` on
-// a live deployment, from the prose of the schema's own comments, while the
-// columns that comment described were silently omitted.
-function stripSqlComments(sqlScript) {
-    return String(sqlScript ?? '')
-        // Block comments first: one may span the `--` of a line comment.
-        .replace(/\/\*[\s\S]*?\*\//g, ' ')
-        // To end of line, while the newlines are still there to end at.
-        .replace(/--[^\n]*/g, '')
-}
-
-// Column names a CREATE TABLE body declares, in order.
-//
-// Only the leading identifier of each top-level comma-separated clause, and
-// only when it is not a table constraint. Good enough for the schemas this
-// engine registers, and deliberately not a SQL parser.
-function columnsFrom(sqlScript, table) {
-    const clean = stripSqlComments(sqlScript)
-    // The qualifier is optional because durable schemas write
-    // `CREATE TABLE ... durable.mikser_auth_clients` while cache schemas do
-    // not, and this has to answer for both.
-    const re = new RegExp(
-        `CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(?:[\\w$]+\\s*\\.\\s*)?[\`"'\\[]?${table}[\`"'\\]]?\\s*\\(`, 'i')
-    const m = re.exec(clean)
-    if (!m) return []
-    // Walk to the matching close paren so nested types and CHECK(...) do not
-    // end the body early.
-    let depth = 1
-    let i = m.index + m[0].length
-    const start = i
-    for (; i < clean.length && depth > 0; i++) {
-        if (clean[i] === '(') depth++
-        else if (clean[i] === ')') depth--
-    }
-    const body = clean.slice(start, i - 1)
-
-    const clauses = []
-    let current = ''
-    depth = 0
-    for (const ch of body) {
-        if (ch === '(') depth++
-        else if (ch === ')') depth--
-        if (ch === ',' && depth === 0) { clauses.push(current); current = '' } else current += ch
-    }
-    clauses.push(current)
-
-    const CONSTRAINTS = new Set(['primary', 'unique', 'foreign', 'check', 'constraint'])
-    return clauses
-        .map(clause => clause.trim())
-        .filter(Boolean)
-        .map(clause => clause.split(/\s+/)[0].replace(/["\`\[\]]/g, ''))
-        .filter(name => name && !CONSTRAINTS.has(name.toLowerCase()))
-}
-
-// Add columns a DURABLE table has grown since it was created.
-//
-// `CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists, so
-// re-applying a schema never adds a column. For a cache table that is
-// invisible: the version bump wipes and recreates it. A durable table is
-// exactly the one that is never recreated, so it is the only kind that can go
-// stale — and it goes stale silently, with every insert naming the new column
-// failing against a table that still has the old shape.
-//
-// Which tables to check comes from sqlite rather than from parsing the DDL.
-// The previous version read table names back out of the schema text, and that
-// parser created real columns named `and`, `a` and `which` on a live
-// deployment from the prose of a comment. The database can simply be asked
-// what is in it.
-//
-// Runs on the durable connection, where these tables are plain `main` — so no
-// qualifier here either.
-function migrateDurableColumns(handle, entries, logger) {
-    let tables
-    try {
-        tables = handle
-            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-            .all().map(row => row.name)
-    } catch {
-        return
-    }
-
-    const durableScripts = entries.map(entry => entry.sql)
-
-    for (const table of tables) {
-        // The schema that declares this table is the one whose text contains
-        // its CREATE. A table nothing declares belongs to a plugin this config
-        // does not load, and is left exactly as it is.
-        const declared = durableScripts.map(sql => columnsFrom(sql, table)).find(cols => cols.length)
-        if (!declared) continue
-
-        let existing
-        try {
-            existing = new Set(handle.prepare(`PRAGMA table_info("${table}")`).all().map(c => c.name))
-        } catch { continue }
-        if (!existing.size) continue
-
-        for (const column of declared) {
-            if (existing.has(column)) continue
-            // Only ever ADD. Dropping or retyping a column here would discard
-            // data the second database exists to keep.
-            try {
-                handle.exec(`ALTER TABLE "${table}" ADD COLUMN "${column}"`)
-                logger?.info('Durable table %s gained column %s', table, column)
-            } catch (err) {
-                logger?.error({ code: 'durable-migration' },
-                    'Could not add column %s to %s: %s', column, table, err.message)
-            }
-        }
-
-        // Verify, rather than assume the loop above was enough.
-        //
-        // Silence was the dangerous half of the last bug here: the migration
-        // logged what it ADDED and never what it failed to find, so a parser
-        // that quietly omitted a column produced a clean-looking upgrade and a
-        // write that failed days later on a deployment. A declared column
-        // still missing after this runs is a fault in the migration itself.
-        const after = new Set(handle.prepare(`PRAGMA table_info("${table}")`).all().map(c => c.name))
-        const missing = declared.filter(column => !after.has(column))
-        if (missing.length) {
-            logger?.error({ code: 'durable-migration' },
-                'Durable table %s is missing declared column(s): %s. Writes naming them will fail — this is a '
-                + 'fault in the schema migration, not in the caller.',
-                table, missing.join(', '))
-        }
-    }
-}
-
-// A registered schema is either { sql, durable } or, from an external
-// caller of createSqliteDatabase, the bare SQL string that shape replaced.
-// Both are supported: the argument is public API and a plugin or test
-// passing a Map of strings predates the durability flag.
+// A registered schema is either { sql } or, from an external caller of
+// createSqliteDatabase, the bare SQL string that shape replaced. Both are
+// supported: the argument is public API.
 function schemaEntry(value) {
-    return typeof value === 'string' ? { sql: value, durable: false } : value
-}
-
-// Apply every durable schema to the durable file, reconcile columns, and
-// carry across anything a pre-split mikser left in the cache.
-//
-// On a connection of its own, whose `main` IS that file — which is what lets a
-// plugin write `CREATE TABLE IF NOT EXISTS mikser_auth_clients` with no
-// qualifier and have it land in the right place. Opened, used and closed here
-// so nothing else in the process holds two handles on one file.
-//
-// Failures are reported rather than thrown. A durable schema that cannot be
-// applied is a broken plugin, not a reason the site cannot build — and the
-// fault says so where an agent will see it, instead of the tables quietly not
-// existing.
-function applyDurableSchemas(durablePath, cachePath, schemas, logger) {
-    const entries = [...(schemas?.values?.() ?? [])].map(schemaEntry).filter(entry => entry.durable)
-    if (!entries.length) return
-
-    let durable = null
-    try {
-        durable = new Database(durablePath)
-        durable.exec('PRAGMA journal_mode = WAL')
-        // synchronous=FULL, unlike the cache. The cache trades a small
-        // durability window for write throughput because a crash costs a
-        // rebuild; here a crash costs a sign-in nobody can reproduce.
-        durable.exec('PRAGMA synchronous = FULL')
-        durable.exec('PRAGMA foreign_keys = ON')
-
-        for (const { sql } of entries) {
-            try {
-                durable.exec(sql)
-            } catch (err) {
-                logger?.error({ code: 'durable-schema' },
-                    'A durable schema could not be applied to %s: %s. The tables it declares do not exist, so '
-                    + 'whatever owns them cannot store anything.', durablePath, err.message)
-            }
-        }
-        migrateDurableColumns(durable, entries, logger)
-        adoptFromCache(durable, cachePath, logger)
-    } catch (err) {
-        logger?.error({ code: 'durable-schema' },
-            'Could not open the durable database at %s: %s. Anything that is not derived from your files — '
-            + 'sign-ins, the change-set log — has nowhere to go.', durablePath, err.message)
-    } finally {
-        try { durable?.close() } catch { /* already closed */ }
-    }
-}
-
-// Carry a durable table out of a cache file written before the split.
-//
-// Which tables those are is not guessed. The previous design recorded the
-// names in `mikser_meta.durable_tables` — it had to, so that a config which
-// never loaded the owning plugin would not unlink them — and that record is
-// exactly the upgrade instruction needed here. Matching on names alone would
-// be worse than useless: a cache table that happens to share a name with some
-// plugin's durable table would be moved and dropped, which is destroying data
-// on the strength of a coincidence.
-//
-// Runs on the DURABLE connection with the cache attached, rather than the
-// other way round, so a table the schemas did not create can be rebuilt by
-// replaying the CREATE sqlite itself stored — unqualified, landing in durable
-// because that is this connection's main. The alternative was rewriting the
-// stored DDL to insert a schema prefix, and parsing DDL is what produced
-// columns named `and`, `a` and `which` on a live deployment.
-//
-// The record is cleared once the move succeeds, so this is a one-way door
-// that runs once per working folder.
-function adoptFromCache(durable, cachePath, logger) {
-    if (!cachePath || cachePath === ':memory:' || !existsSync(cachePath)) return
-
-    let recorded = []
-    try {
-        durable.exec(`ATTACH DATABASE '${cachePath.replace(/'/g, "''")}' AS cache`)
-        const row = durable.prepare('SELECT value FROM cache.mikser_meta WHERE key = ?').get('durable_tables')
-        const parsed = row?.value ? JSON.parse(row.value) : []
-        recorded = Array.isArray(parsed) ? parsed.filter(name => typeof name === 'string') : []
-    } catch {
-        try { durable.exec('DETACH DATABASE cache') } catch { /* never attached */ }
-        return  // no cache, or one that predates the record — nothing to carry
-    }
-
-    try {
-        const present = new Set(durable.prepare(
-            "SELECT name FROM cache.sqlite_master WHERE type='table'").all().map(r => r.name))
-        const mine = new Set(durable.prepare(
-            "SELECT name FROM main.sqlite_master WHERE type='table'").all().map(r => r.name))
-
-        for (const table of recorded) {
-            if (table === 'mikser_meta' || !present.has(table)) continue
-            try {
-                // A table no loaded plugin declares still has to come across —
-                // that is the case the record exists for. Rebuilt from the
-                // DDL sqlite kept, so no schema has to be reconstructed.
-                if (!mine.has(table)) {
-                    const { sql } = durable.prepare(
-                        "SELECT sql FROM cache.sqlite_master WHERE type='table' AND name = ?").get(table) ?? {}
-                    if (!sql) continue
-                    durable.exec(sql)
-                }
-
-                const columnsOf = (schema) =>
-                    durable.prepare(`PRAGMA ${schema}.table_info("${table}")`).all().map(c => c.name)
-                // Intersected rather than trusting `SELECT *`: the shape in
-                // the cache is by definition the OLD one, and lining the two
-                // up wrong would put values in the wrong columns.
-                const source = new Set(columnsOf('cache'))
-                const shared = columnsOf('main').filter(c => source.has(c))
-                const list = shared.map(c => `"${c}"`).join(', ')
-
-                const moved = durable.transaction(() => {
-                    const { n } = durable.prepare(`SELECT COUNT(*) AS n FROM cache."${table}"`).get()
-                    if (n && shared.length) {
-                        durable.exec(
-                            `INSERT OR IGNORE INTO main."${table}" (${list}) SELECT ${list} FROM cache."${table}"`)
-                    }
-                    durable.exec(`DROP TABLE cache."${table}"`)
-                    return n
-                })()
-
-                logger?.notice('Moved %s out of the cache and into %s (%d row%s)',
-                    table, DEFAULT_DURABLE_FILENAME, moved, moved === 1 ? '' : 's')
-            } catch (err) {
-                // Loud, and specifically not fatal: the rows are still in the
-                // cache, which means the next wipe takes them. That is a
-                // warning an operator can act on; silence is not.
-                logger?.error({ code: 'durable-adopt' },
-                    'Could not move %s into the durable database: %s. Its rows are still in the cache, so the '
-                    + 'next wipe will delete them.', table, err.message)
-            }
-        }
-
-        // Cleared last, and only here. While it is present this runs again,
-        // which is what makes a partial move recoverable on the next start.
-        durable.prepare('DELETE FROM cache.mikser_meta WHERE key = ?').run('durable_tables')
-    } catch (err) {
-        logger?.error({ code: 'durable-adopt' },
-            'Could not read the durable-table record out of the cache: %s', err.message)
-    } finally {
-        try { durable.exec('DETACH DATABASE cache') } catch { /* already detached */ }
-    }
-}
-
-// Keep the durable database out of the repository.
-//
-// It sits at the working-folder root — deliberately outside runtime/, which
-// exists to be deleted — and a working folder is very often a git repo that
-// something runs `git add -A` over. mikser-io-git does exactly that, by
-// design, "relying on .gitignore". A refresh token pushed to a remote is not
-// a mistake an operator can take back, so the ignore line is written here
-// rather than left to a README.
-//
-// Appends one line, only when nothing already covers the name, and only where
-// there is a repository for it to matter to.
-function ensureIgnored(folder, filename, logger) {
-    const ignorePath = path.join(folder, '.gitignore')
-    const hasIgnoreFile = existsSync(ignorePath)
-    if (!hasIgnoreFile && !existsSync(path.join(folder, '.git'))) return
-
-    const line = `${filename}*`
-    try {
-        const current = hasIgnoreFile ? readFileSync(ignorePath, 'utf8') : ''
-        const covered = current.split(/\r?\n/)
-            .map(l => l.trim())
-            .some(l => l && !l.startsWith('#') && (l === filename || l === line))
-        if (covered) return
-
-        const prefix = current.length && !current.endsWith('\n') ? '\n' : ''
-        writeFileSync(ignorePath, `${current}${prefix}${line}\n`)
-        logger?.notice('Added %s to .gitignore — it holds credentials and must not be committed', line)
-    } catch (err) {
-        logger?.error({ code: 'durable-gitignore' },
-            'Could not add %s to .gitignore (%s). Add it by hand: this file holds OAuth clients and refresh '
-            + 'tokens, and a `git add -A` over the working folder would commit them.', line, err.message)
-    }
+    return typeof value === 'string' ? { sql: value } : value
 }
 
 export function registerSchema(name, sqlScript, { durable = false } = {}) {
+    // Loud, not ignored. A plugin that still passes this would have its tables
+    // created in the cache and deleted by the next wipe, and the first sign of
+    // it would be an operator being asked to sign in again after a deploy.
+    if (durable) {
+        throw new Error(
+            `registerSchema("${name}"): the durable flag is gone. Durable tables live in their own database `
+            + 'now and are built by registerMigrations(owner, [{ name, up }]) — an idempotent CREATE cannot '
+            + 'add a column to a table that already exists, which is the permanent condition of a durable one.')
+    }
     if (typeof name !== 'string' || !name.length) {
         throw new Error('registerSchema: name must be a non-empty string')
     }
@@ -478,21 +156,14 @@ export function registerSchema(name, sqlScript, { durable = false } = {}) {
             useLogger().warn('registerSchema: "%s" already registered, overwriting', name)
         } catch { /* logger may not exist yet at module-import time */ }
     }
-    schemas.set(name, { sql: sqlScript, durable })
+    schemas.set(name, { sql: sqlScript })
 
     // Lazy-apply: if the database is already open, run the script
     // against the live handle. Idempotent CREATE statements make this
     // safe to re-execute on the next open() too.
     if (db?.isOpen) {
         try {
-            // Same routing as the open-time pass: a durable script goes to the
-            // durable file, on its own connection, so its unqualified CREATE
-            // lands there rather than in the cache.
-            if (durable && db.durablePath && db.durablePath !== ':memory:') {
-                applyDurableSchemas(db.durablePath, db.path, new Map([[name, { sql: sqlScript, durable }]]), useLogger())
-            } else {
-                db.exec(sqlScript)
-            }
+            db.exec(sqlScript)
             try {
                 useLogger()?.debug('Database schema applied (lazy): %s', name)
             } catch { /* logger optional */ }
@@ -566,12 +237,8 @@ export function useDatabase() {
 // onLoaded below.
 export function createSqliteDatabase({
     runtimeFolder, version, logger, config = {}, schemas, provisioners: provisionersArg,
-    // Where the durable database goes. Separate from runtimeFolder on
-    // purpose — see the note at the top of this file.
-    workingFolder = runtime.options?.workingFolder,
     // Clear the cache on this open even though nothing changed — what
-    // `--clear` asks for. Removes the cache file; the durable database is a
-    // different file and is not part of what `--clear` means.
+    // `--clear` asks for. Removes the file; nothing durable is in it.
     forceWipe = false,
 }) {
     // Tests inject their own provisioners; the runtime path falls
@@ -589,17 +256,6 @@ export function createSqliteDatabase({
                 : path.join(runtimeFolder, config.filename))
             : path.join(runtimeFolder, DEFAULT_FILENAME)
 
-    // The durable file follows the main one into memory for tests, and
-    // otherwise sits at the working-folder root. `config.database.durable`
-    // overrides it, absolute or relative to the working folder.
-    const durablePath = dbPath === ':memory:'
-        ? ':memory:'
-        : config.durable
-            ? (path.isAbsolute(config.durable)
-                ? config.durable
-                : path.join(workingFolder ?? runtimeFolder, config.durable))
-            : path.join(workingFolder ?? runtimeFolder, DEFAULT_DURABLE_FILENAME)
-
     let handle = null
     // Provisioning context exposed on the returned wrapper so any code
     // with a handle (catalog onLoaded, plugin onLoaded, etc.) can ask
@@ -612,10 +268,6 @@ export function createSqliteDatabase({
 
         if (dbPath !== ':memory:') {
             mkdirSync(path.dirname(dbPath), { recursive: true })
-            mkdirSync(path.dirname(durablePath), { recursive: true })
-            // Before the file is created, so the ignore line is in place the
-            // first time anything could stage it.
-            ensureIgnored(path.dirname(durablePath), path.basename(durablePath), logger)
         }
 
         // Detect firstRun BEFORE we touch the filesystem. :memory:
@@ -626,22 +278,6 @@ export function createSqliteDatabase({
             handle.exec('PRAGMA journal_mode = WAL')
             handle.exec('PRAGMA synchronous = NORMAL')
             handle.exec('PRAGMA foreign_keys = ON')
-            // Attached rather than left to a second connection, so queries,
-            // transactions and joins reach both files through one handle and
-            // no caller has to know which file its table is in.
-            //
-            // Part of setupConnection because the wipe reopens the handle, and
-            // a reopen that lost the attachment would leave every durable
-            // table unreachable for the rest of the process.
-            //
-            // Skipped in memory: two `:memory:` connections are two unrelated
-            // databases, so there is nothing to share. Durable schemas are
-            // applied to main there instead, which is the only shape that can
-            // work and costs nothing — nothing survives the process anyway.
-            if (durablePath !== ':memory:') {
-                handle.exec(`ATTACH DATABASE '${durablePath.replace(/'/g, "''")}' AS ${DURABLE}`)
-                handle.exec(`PRAGMA ${DURABLE}.synchronous = FULL`)
-            }
             handle.exec(`
                 CREATE TABLE IF NOT EXISTS mikser_meta (
                     key   TEXT PRIMARY KEY,
@@ -649,11 +285,6 @@ export function createSqliteDatabase({
                 )
             `)
         }
-
-        // Durable schemas go to the durable file, on a connection whose own
-        // `main` is that file — see the note at the top. Before the engine's
-        // connection opens, so the tables exist by the time it attaches.
-        if (durablePath !== ':memory:') applyDurableSchemas(durablePath, dbPath, schemas, logger)
 
         handle = new Database(dbPath)
         setupConnection()
@@ -722,8 +353,7 @@ export function createSqliteDatabase({
                     recorded, version,
                 )
             } else if (forceWipe) {
-                logger?.info('Clearing the cache and rebuilding from sources (%s is a separate file and is kept).',
-                    DEFAULT_DURABLE_FILENAME)
+                logger?.info('Clearing the cache and rebuilding from sources.')
             }
             // Unlink, rather than dropping table by table.
             //
@@ -792,14 +422,7 @@ export function createSqliteDatabase({
         // Apply each subsystem's registered schema script. Idempotent
         // CREATE statements mean replay-safe across opens.
         for (const [name, value] of schemas) {
-            const { sql: sqlScript, durable } = schemaEntry(value)
-            // Durable ones were applied to the durable file above. Running
-            // them here would recreate the same tables in the cache, where
-            // they would shadow the real ones until the next wipe.
-            //
-            // In memory there is no second file to apply them to, and nothing
-            // survives the process anyway, so they belong here.
-            if (durable && durablePath !== ':memory:') continue
+            const { sql: sqlScript } = schemaEntry(value)
             try {
                 handle.exec(sqlScript)
                 logger?.debug('Database schema applied: %s', name)
@@ -832,11 +455,6 @@ export function createSqliteDatabase({
 
     return {
         path: dbPath,
-        // Where the non-derived state is. Named on the wrapper so an operator
-        // asking "what do I lose if I delete this" has somewhere to read the
-        // answer, which is the question the single-file layout could not
-        // answer at all.
-        durablePath,
         open,
         close,
         get isOpen() { return handle !== null },
@@ -872,13 +490,11 @@ onLoaded(async () => {
 
     db = createSqliteDatabase({
         runtimeFolder: runtime.options.runtimeFolder,
-        workingFolder: runtime.options.workingFolder,
         version: packageInfo.version,
         logger,
         config,
         schemas,
-        // `--clear` asks for the CACHE to go. The durable database is a
-        // different file and is not part of what that means.
+        // `--clear` asks for the cache to go, and the cache is all this is.
         forceWipe: Boolean(runtime.options.clear),
     })
 
@@ -889,13 +505,9 @@ onLoaded(async () => {
     // value as useDatabase() — both kept for ergonomics.
     runtime.database = db
 
-    // Both files named, because which one is which is the whole point and an
-    // operator should not have to read source to find out what is safe to
-    // delete.
     logger.info(
-        'Database ready: %s (cache) + %s (durable) (schemas: %s)',
+        'Cache ready: %s (schemas: %s)',
         db.path,
-        db.durablePath,
         schemas.size ? [...schemas.keys()].join(', ') : 'none',
     )
 })

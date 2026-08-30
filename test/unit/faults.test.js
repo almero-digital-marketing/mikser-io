@@ -13,7 +13,7 @@ import path from 'node:path'
 import { tmpdir } from 'node:os'
 
 import { createMikserLogger } from '../../src/logger.js'
-import { recordChangeSetWrite, forgetAllChangeSets } from '../../src/changeset.js'
+import { recordChangeSetWrite, forgetAllChangeSets, pendingChangeSets } from '../../src/changeset.js'
 import { faults, resetFaults, buildReport, requestReport, resetReport } from '../../src/report.js'
 import runtime from '../../src/runtime.js'
 
@@ -131,12 +131,14 @@ describe('faults', () => {
         // itself still succeeds, and the feature silently becomes a no-op that
         // looks like it is working — which is the failure this whole surface
         // exists to make sayable.
-        const Database = (await import('better-sqlite3')).default
-        const handle = new Database(':memory:')
-        handle.exec('CREATE TABLE mikser_change_sets (id TEXT PRIMARY KEY)')
+        const knexFactory = (await import('knex')).default
+        const knex = knexFactory({
+            client: 'better-sqlite3', connection: { filename: ':memory:' }, useNullAsDefault: true,
+        })
+        await knex.schema.createTable('mikser_change_sets', (t) => t.string('id').primary())
 
-        const priorDatabase = runtime.database
-        runtime.database = { handle }
+        const priorDurable = runtime.durable
+        runtime.durable = knex
         runtime.engine = { logger }
         runtime.options.workingFolder = tmpdir()
         forgetAllChangeSets()
@@ -144,13 +146,15 @@ describe('faults', () => {
             const id = recordChangeSetWrite({ changeSet: 'cs-1', uri: path.join(tmpdir(), 'documents', 'x.md') })
             // The write is still attributed in memory — the log is what broke.
             assert.equal(id, 'cs-1')
+            // Reading drains the write queue, which is where the failure lands.
+            await pendingChangeSets()
+
             const [fault] = faults()
             assert.equal(fault.code, 'change-set-log')
             assert.match(fault.message, /cannot be listed or undone/)
         } finally {
-            runtime.database = priorDatabase
-            handle.close()
-            forgetAllChangeSets()
+            runtime.durable = priorDurable
+            await knex.destroy()
         }
     })
 })

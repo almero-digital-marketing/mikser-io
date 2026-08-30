@@ -102,6 +102,13 @@ const runtime = {
         this.started = true
         await this.process()
         this.ready = true
+
+        // A one-shot run ends here, and the durable store's connection pool
+        // would otherwise keep the process alive with nothing left to do.
+        // After every hook from every plugin, so nothing can still need it.
+        // A watcher or a server is not a one-shot run and keeps its
+        // connection — there is another cycle coming.
+        if (!this.options?.watch && !this.options?.server) await this.closeDurable?.()
     },
 
     async process() {

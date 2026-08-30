@@ -11,6 +11,11 @@ export * from './src/report.js'
 export * from './src/explain.js'
 export * from './src/lifecycle.js'
 export * from './src/database/index.js'
+// The durable store — registerMigrations / useDurableDatabase. A separate
+// module from the cache because it is a separate database with none of the
+// cache's constraints: main-thread only, so async, so knex, so portable to
+// another engine.
+export * from './src/database/durable.js'
 export * from './src/journal.js'
 export * from './src/catalog.js'
 export * from './src/search.js'

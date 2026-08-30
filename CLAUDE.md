@@ -137,12 +137,15 @@ brevity.
   descriptors in `runtime.options.plugins` are projected to their
   `render-${name}` / `post-${name}` identifier so workers can
   resolve them via dynamic import.
-- `database/` — `createSqliteDatabase()`, `registerSchema()`,
-  `useDatabase()` (the `mikser_meta` table stamps schema_version).
-  Durable schemas are applied on a separate connection whose own `main`
-  is `mikser.data.sqlite`, then that file is ATTACHed as `durable`;
-  `adoptFromCache` carries tables out of a pre-split database, driven by
-  the `durable_tables` record the old design kept.
+- `database/index.js` — the CACHE only. `createSqliteDatabase()`,
+  `registerSchema()`, `useDatabase()` (the `mikser_meta` table stamps
+  schema_version). Nothing durable lives here any more.
+- `database/durable.js` — the durable store. `registerMigrations()`,
+  `useDurableDatabase()` (a knex instance), `runMigrations()`,
+  `closeDurableDatabase()`. `adoptFromCache` carries tables out of a
+  pre-9.56 database, driven by the `durable_tables` record the old design
+  kept in `mikser_meta` — names alone would move any cache table that
+  happened to collide. `ensureIgnored` adds the file to `.gitignore`.
   `sift-to-sql.js` translates sift filters to SQL WHERE clauses
   against `INDEXED_COLUMNS`; un-pushed clauses fall through to
   JS-side sift. `query-context.js` is the AsyncLocalStorage that
@@ -444,22 +447,23 @@ Test coverage: `test/unit/source-sweep.test.js`.
 - **0008** — MCP-UI rendering + action delivery. Lives in
   `mikser-io-mcp/documentation/decisions/` (not core — moved with
   MCP).
-- **0009** — Sqlite is the engine's persistence substrate. TWO files.
-  `runtime/mikser.sqlite` is the derived CACHE — `mikser_entities` /
-  `mikser_refs` / `mikser_snapshots` / `mikser_journal` (+ `mikser_meta`
-  for the schema-version stamp) — deletable at any moment.
-  `mikser.data.sqlite` at the WORKING-FOLDER ROOT holds everything not
-  derived (auth grants, the change-set log); `registerSchema(name, sql,
-  { durable: true })` routes a table there, SQL unchanged and queries
-  unqualified (it is ATTACHed as `durable`). It lives outside `runtime/`
-  because that folder exists to be deleted, and mikser gitignores it
-  because it holds credentials. The sync constraint is a property of the
-  CACHE only — the durable store is main-thread-only. Sift→SQL pushdown + LRU for findById;
-  worker-side read-only sqlite for sync template helpers.
-  `registerSchema(name, sql)` + `useDatabase()` is the plugin-side
-  persistence pattern. Journal-on-sqlite (Phase 7) enables `--resume`;
-  auto-persist (Phase 9) means plugins mutate the yielded entity and
-  the journal writes back without an explicit `updateEntry` call.
+- **0009** — TWO databases, split by whether the data is DERIVED.
+  `runtime/mikser.sqlite` is the CACHE: sqlite + better-sqlite3, synchronous
+  (render workers need a sync handle for template helpers), holding
+  `mikser_entities` / `mikser_refs` / `mikser_snapshots` / `mikser_journal` /
+  `mikser_meta`. Deletable at any moment; a wipe is `unlink`.
+  `mikser.data.sqlite` at the WORKING-FOLDER ROOT is the DURABLE store: auth
+  grants, the change-set log — behind **knex**, async, main-thread only, so it
+  can point at Postgres via `config.database.durable`. Built by
+  `registerMigrations(owner, [{ name, up }])`, per owner, recorded in
+  `mikser_migrations`; `registerSchema(..., { durable: true })` now THROWS.
+  Outside `runtime/` because that folder exists to be deleted, and gitignored
+  on creation because it holds credentials. `runtime.start()` closes the knex
+  pool for a one-shot run or the process never exits.
+  Sift→SQL pushdown + LRU for findById on the cache side.
+  Journal-on-sqlite (Phase 7) enables `--resume`; auto-persist (Phase 9) means
+  plugins mutate the yielded entity and the journal writes back without an
+  explicit `updateEntry` call.
 - **0010** — Plugin bundles + factory-call form + inline options.
   Plugins are imported by name and called as factories;
   `plugins: []` carries factory returns, never strings.
