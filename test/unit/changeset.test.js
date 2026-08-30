@@ -9,7 +9,7 @@ import path from 'node:path'
 import runtime from '../../src/runtime.js'
 import {
     recordChangeSetWrite, pendingChangeSets, clearChangeSets, forgetAllChangeSets,
-    withChangeSet, currentChangeSet,
+    withChangeSet, currentChangeSet, closeChangeSet,
 } from '../../src/changeset.js'
 import { useCollection, writeEntity } from '../../src/utils.js'
 import { writeEntitySource } from '../../src/write.js'
@@ -192,5 +192,45 @@ describe('the ambient change set', () => {
             await writeEntity({ uri }, { title: 'renamed' })
         })
         assert.deepEqual(pendingChangeSets()[0].paths, ['documents/ref.md'])
+    })
+})
+
+describe('closing a set', () => {
+    it('closes what it minted, so one tool call is committable at once', async () => {
+        // The precise signal: an id nobody else can name cannot grow after the
+        // call that owns it returns.
+        await withChangeSet({ changeSet: 'auto-1', summary: 'One call', closeOnReturn: true }, async () => {
+            recordChangeSetWrite({ uri: path.join(docs, 'a.md') })
+        })
+        assert.equal(pendingChangeSets()[0].closed, true)
+    })
+
+    it('leaves a caller-supplied set open, because more calls may join it', async () => {
+        await withChangeSet({ changeSet: 'explicit-1', summary: 'Call one' }, async () => {
+            recordChangeSetWrite({ uri: path.join(docs, 'b.md') })
+        })
+        assert.equal(pendingChangeSets()[0].closed, false,
+            'grouping across calls is the whole point of passing an id')
+    })
+
+    it('closes even when the request failed part way', async () => {
+        // Work that landed before the failure is real, and a set left open
+        // forever holds it out of the committable half of the log.
+        await assert.rejects(() => withChangeSet(
+            { changeSet: 'boom', closeOnReturn: true },
+            async () => {
+                recordChangeSetWrite({ uri: path.join(docs, 'c.md') })
+                throw new Error('handler failed')
+            }))
+        assert.equal(pendingChangeSets().find(s => s.id === 'boom')?.closed, true)
+    })
+
+    it('tracks when a set last grew, so an open one can go quiet', async () => {
+        recordChangeSetWrite({ changeSet: 'idle-1', uri: path.join(docs, 'd.md') })
+        const first = pendingChangeSets().find(s => s.id === 'idle-1').updatedAt
+        await new Promise(resolve => setTimeout(resolve, 12))
+        recordChangeSetWrite({ changeSet: 'idle-1', uri: path.join(docs, 'e.md') })
+        const second = pendingChangeSets().find(s => s.id === 'idle-1').updatedAt
+        assert.ok(second > first, 'a set that is still growing must not look idle')
     })
 })

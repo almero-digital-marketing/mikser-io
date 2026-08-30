@@ -605,6 +605,16 @@ clearChangeSets(['req-42'])
 | `findChangeSet(id)` | resolve one id |
 | `pendingChangeSets()` | sets no consumer has recorded yet, oldest first |
 | `markChangeSetsRecorded(ids, recordedAs)` | mark recorded, and say what as |
+| `closeChangeSet(id)` | the writer is finished with this set |
+
+`withChangeSet` takes `closeOnReturn` for the case where the call IS the whole
+request — true whenever the id was minted for it rather than supplied. That is
+exact, not a heuristic: an id nobody else can name cannot grow after the call
+that owns it returns, so a consumer can act on it at once instead of waiting to
+see whether more writes arrive. A caller-supplied id exists so several calls
+can join one set, so it stays open and closes on going quiet. Closing happens
+even when the request throws — work that landed before the failure is real, and
+a set left open forever holds it out of reach.
 
 The log is **durable** and survives a restart: nothing else can reconstruct
 which writes belonged to one request. Not the files, which show the result and

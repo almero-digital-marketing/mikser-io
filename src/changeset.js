@@ -41,6 +41,15 @@ registerSchema('change_sets', `
         principal   TEXT,
         undo_of     TEXT,
         created_at  INTEGER NOT NULL,
+        -- Set when the writer said it was finished. A set that closed is
+        -- committable now; one still open is waiting to see whether more
+        -- writes join it.
+        closed_at   INTEGER,
+        -- When the set last grew. A set is one request, and a request is
+        -- finished when it stops writing — which is the only signal available,
+        -- since a caller grouping several tool calls under one id has not said
+        -- which call is the last.
+        updated_at  INTEGER,
         -- Set when a consumer has durably recorded the set somewhere of its
         -- own — a commit, a snapshot. Until then the set is real and listable
         -- but there is nothing to revert FROM, which is a different answer
@@ -77,14 +86,48 @@ const changeSetContext = new AsyncLocalStorage()
 
 // Run `fn` with a change set in effect. Writes inside it are attributed to
 // that set unless they name a different one explicitly.
+//
+// `closeOnReturn` says this call IS the whole request — which is true whenever
+// the id was minted for it rather than supplied by the caller. That is a
+// precise signal, not a heuristic: a set nobody else can name cannot grow
+// after the call that owns it returns, so it is committable immediately.
+//
+// A caller-supplied id is the opposite: it exists so several calls can join
+// one set, and nothing in this call knows whether another is coming. Those
+// close on going quiet instead.
 export function withChangeSet(set, fn) {
     if (!set?.changeSet) return fn()
-    return changeSetContext.run({
+    const context = {
         changeSet: set.changeSet,
         summary: set.summary ?? null,
         principal: set.principal ?? null,
         undoOf: set.undoOf ?? null,
-    }, fn)
+    }
+    if (!set.closeOnReturn) return changeSetContext.run(context, fn)
+    return changeSetContext.run(context, async () => {
+        try {
+            return await fn()
+        } finally {
+            // In `finally`: a request that failed part way still wrote what it
+            // wrote, and leaving that set open forever would hold real work
+            // out of the log's committable half.
+            closeChangeSet(set.changeSet)
+        }
+    })
+}
+
+// Mark a set finished. Idempotent, and silent for an id nothing recorded —
+// a request that wrote nothing has no set to close.
+export function closeChangeSet(id) {
+    if (!id) return
+    const at = Date.now()
+    const set = memory.get(id)
+    if (set) set.closedAt = at
+    const handle = db()
+    if (!handle) return
+    try {
+        handle.prepare('UPDATE mikser_change_sets SET closed_at = COALESCE(closed_at, ?) WHERE id = ?').run(at, id)
+    } catch { /* memory still holds it */ }
 }
 
 export function currentChangeSet() {
@@ -109,15 +152,16 @@ function db() {
 
 function persist(handle, set, rel, operation, entityId) {
     handle.prepare(`
-        INSERT INTO mikser_change_sets (id, summary, principal, undo_of, created_at)
-        VALUES (@id, @summary, @principal, @undoOf, @createdAt)
+        INSERT INTO mikser_change_sets (id, summary, principal, undo_of, created_at, updated_at)
+        VALUES (@id, @summary, @principal, @undoOf, @createdAt, @updatedAt)
         ON CONFLICT(id) DO UPDATE SET
-            summary   = COALESCE(mikser_change_sets.summary, excluded.summary),
-            principal = COALESCE(mikser_change_sets.principal, excluded.principal),
-            undo_of   = COALESCE(mikser_change_sets.undo_of, excluded.undo_of)
+            summary    = COALESCE(mikser_change_sets.summary, excluded.summary),
+            principal  = COALESCE(mikser_change_sets.principal, excluded.principal),
+            undo_of    = COALESCE(mikser_change_sets.undo_of, excluded.undo_of),
+            updated_at = excluded.updated_at
     `).run({
         id: set.id, summary: set.summary, principal: set.principal,
-        undoOf: set.undoOf, createdAt: set.startedAt,
+        undoOf: set.undoOf, createdAt: set.startedAt, updatedAt: set.updatedAt,
     })
     handle.prepare(`
         INSERT INTO mikser_change_set_paths (change_set, path, operation, entity_id)
@@ -152,6 +196,8 @@ function rowsToSets(handle, rows) {
             principal: row.principal,
             undoOf: row.undo_of,
             startedAt: row.created_at,
+            updatedAt: row.updated_at ?? row.created_at,
+            closed: row.closed_at != null,
             recordedAt: row.recorded_at ?? null,
             recordedAs: row.recorded_as ?? null,
             paths: paths.map(p => p.path),
@@ -167,6 +213,8 @@ function memorySets(filter = () => true) {
         principal: set.principal,
         undoOf: set.undoOf,
         startedAt: set.startedAt,
+        updatedAt: set.updatedAt ?? set.startedAt,
+        closed: Boolean(set.closedAt),
         recordedAt: set.recordedAt ?? null,
         recordedAs: set.recordedAs ?? null,
         paths: [...set.paths.keys()],
@@ -222,6 +270,7 @@ export function recordChangeSetWrite({
             // privileged operation that rewrites the record.
             undoOf: undoOf ?? null,
             startedAt: Date.now(),
+            updatedAt: Date.now(),
             paths: new Map(),
         }
         memory.set(changeSet, set)
@@ -229,6 +278,7 @@ export function recordChangeSetWrite({
     if (!set.summary && summary) set.summary = summary
     if (!set.principal && principal) set.principal = principal
     if (!set.undoOf && undoOf) set.undoOf = undoOf
+    set.updatedAt = Date.now()
     set.paths.set(rel, operation)
 
     const handle = db()
