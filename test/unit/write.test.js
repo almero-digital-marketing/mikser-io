@@ -11,7 +11,7 @@ import path from 'node:path'
 
 import runtime from '../../src/runtime.js'
 import {
-    writeEntitySource, contentAdvisories, advisoryWarning, siblingDestinations,
+    writeEntitySource, deleteEntitySource, contentAdvisories, advisoryWarning, siblingDestinations,
 } from '../../src/write.js'
 import { checksum } from '../../src/utils.js'
 
@@ -226,5 +226,92 @@ describe('addressing', () => {
         runtime.catalog = { byId: new Map([[entity.id, entity]]) }
         const result = await writeEntitySource({ id: '/documents/a.md', collection: 'layouts', content: 'x' })
         assert.equal(result.refused, 'collection-mismatch')
+    })
+})
+
+describe('deleting a source file', () => {
+    it('refuses a path that escapes the collection', async () => {
+        const target = `escaped-del-${path.basename(root)}.md`
+        const result = await deleteEntitySource({
+            collection: 'documents', relativePath: `../../${target}`,
+        })
+        assert.equal(result.ok, false)
+        assert.equal(result.refused, 'invalid-target')
+    })
+
+    it('says so rather than throwing when there is nothing there', async () => {
+        const result = await deleteEntitySource({ collection: 'documents', relativePath: 'ghost.md' })
+        assert.equal(result.refused, 'not-found')
+    })
+
+    it('refuses when the file changed since it was read', async () => {
+        // Someone edited what you are about to remove. That is the moment to
+        // stop, not to proceed because the path still matches.
+        await writeFile(path.join(docs, 'a.md'), 'edited by someone else\n')
+        const result = await deleteEntitySource({
+            collection: 'documents', relativePath: 'a.md', ifChecksum: 'a-stale-value',
+        })
+        assert.equal(result.refused, 'checksum-mismatch')
+        assert.equal(await readFile(path.join(docs, 'a.md'), 'utf8'), 'edited by someone else\n')
+    })
+
+    it('deletes when the precondition holds', async () => {
+        await writeFile(path.join(docs, 'a.md'), 'bye\n')
+        const before = await checksum(path.join(docs, 'a.md'))
+        const result = await deleteEntitySource({
+            collection: 'documents', relativePath: 'a.md', ifChecksum: before,
+        })
+        assert.equal(result.ok, true)
+        await assert.rejects(() => stat(path.join(docs, 'a.md')))
+    })
+
+    it('a dry run deletes nothing', async () => {
+        await writeFile(path.join(docs, 'a.md'), 'still here\n')
+        const result = await deleteEntitySource({
+            collection: 'documents', relativePath: 'a.md', dryRun: true,
+        })
+        assert.equal(result.ok, true)
+        assert.equal(result.dryRun, true)
+        assert.equal(await readFile(path.join(docs, 'a.md'), 'utf8'), 'still here\n')
+    })
+
+    it('names what would be left pointing at nothing', async () => {
+        // The check a delete needs and a write does not: removing an entity
+        // other documents reference breaks them, and the path alone cannot
+        // show that.
+        await writeFile(path.join(docs, 'hero.jpg.md'), 'x\n')
+        const target = { id: '/documents/hero.jpg.md', uri: path.join(docs, 'hero.jpg.md'),
+                         collection: 'documents', meta: { url: '/img/hero.jpg' } }
+        runtime.catalog = { byId: new Map([[target.id, target]]) }
+        runtime.refs = {
+            inboundFor: (key) => (key === '/img/hero.jpg'
+                ? [{ id: '/documents/page.md', field: 'hero', kind: 'ref' }]
+                : []),
+        }
+        const result = await deleteEntitySource({
+            collection: 'documents', relativePath: 'hero.jpg.md', dryRun: true,
+        })
+        assert.deepEqual(result.referencedBy.map(r => r.id), ['/documents/page.md'],
+            'found through meta.url, not only through the id')
+        assert.match(result.warning, /reference this/)
+        runtime.refs = undefined
+    })
+
+    it('records the delete in a change set', async () => {
+        await writeFile(path.join(docs, 'gone.md'), 'x\n')
+        const result = await deleteEntitySource({
+            collection: 'documents', relativePath: 'gone.md',
+            changeSet: 'req-del', summary: 'Remove the old promo',
+        })
+        assert.equal(result.ok, true)
+        assert.equal(result.changeSet, 'req-del')
+    })
+
+    it('records nothing when the delete was refused', async () => {
+        const result = await deleteEntitySource({
+            collection: 'documents', relativePath: 'never-existed.md', changeSet: 'req-x',
+        })
+        assert.equal(result.ok, false)
+        assert.equal(result.changeSet, undefined)
     })
 })

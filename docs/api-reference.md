@@ -538,6 +538,27 @@ write back a whole file built from a copy that is now stale.
 catalog's, which lags between builds — pass `diskChecksum`, or the
 `currentChecksum` a refusal hands back.
 
+### `deleteEntitySource(options)`
+
+Removes a source file with the same guards, plus the one only removal needs.
+
+```js
+const preview = await deleteEntitySource({ id: '/documents/old.md', dryRun: true })
+// preview.referencedBy → [{ id: '/documents/page.md', field: 'hero' }]
+```
+
+Takes the same addressing, `ifChecksum` and `dryRun` as the write. `referencedBy`
+reports everything still pointing at the entity — asked of the reference index
+through `lookupKeys`, so a ref by served path counts exactly as invalidation
+counts it, not just a ref by id. A delete is the one write with no content to
+inspect afterwards, which makes the preview the only chance to see its cost.
+
+### Change sets
+
+Both take `changeSet` and `summary`, grouping several writes into one unit a
+consumer can commit together and later take back together. See
+[Change sets](#change-sets-1) below.
+
 ### Advisories
 
 `contentAdvisories(entity, content)` names files a caller must not edit blind,
@@ -555,6 +576,46 @@ extension, which may render to the same destination.
 `locateEntityFile(id)` resolves a catalog id to its `{ collection, relativePath }`,
 or `{ error }` — taken from the entity rather than by splitting the id, since the
 prefix is configurable and the extension may have been stripped.
+
+## Change sets
+
+Which writes belong together, and who asked for them.
+
+The engine does not otherwise care who wrote a file — a write is a write. That
+holds until something wants to undo one request without touching everything
+around it, and then it is the wrong resolution: an agent's three edits and a
+document created through the API a second later are indistinguishable, so
+removing one removes the other.
+
+```js
+await writeEntitySource({ id, content, changeSet: 'req-42', summary: 'Rewrite the hero copy' })
+await deleteEntitySource({ id: other, changeSet: 'req-42' })
+
+pendingChangeSets()
+// [{ id: 'req-42', summary: 'Rewrite the hero copy', paths: [...], deletions: [...] }]
+clearChangeSets(['req-42'])
+```
+
+| Export | Does |
+| --- | --- |
+| `recordChangeSetWrite({ changeSet, summary, principal, uri, operation, undoOf })` | attach one path to a set |
+| `pendingChangeSets()` | sets with unconsumed writes, oldest first |
+| `clearChangeSets(ids)` | drop what a consumer has committed |
+
+Paths come back repo-relative and POSIX-separated, ready for a git pathspec.
+
+**Not a transaction.** Nothing is held back, nothing rolls back on failure, and
+a half-finished set is a real set containing what actually landed. It is a
+label on work that already happened, which is what makes it safe on a write
+path that must never block. A path is claimed only after the write succeeds —
+claiming on intent would make a write that never happened undoable, and undoing
+it would delete whatever is actually at that path.
+
+**Unclaimed writes stay unclaimed.** A consumer must still handle them; they
+happened, and losing them would be worse than not attributing them.
+`mikser-io-git` commits claimed sets to their own scoped commits and sweeps the
+rest into unattributed ones, which is what lets it offer undo for the first and
+not the second.
 
 ## Search
 

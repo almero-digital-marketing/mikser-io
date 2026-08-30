@@ -22,7 +22,7 @@ import { readdir } from 'node:fs/promises'
 
 import runtime from './runtime.js'
 import { readEntity, findEntities } from './catalog.js'
-import { useCollection, checksum, readEntityContent } from './utils.js'
+import { useCollection, checksum, readEntityContent, lookupKeys } from './utils.js'
 import { nextCycleId, whenCycleCompletes } from './report.js'
 import { recordChangeSetWrite } from './changeset.js'
 
@@ -286,4 +286,132 @@ export async function writeEntitySource({
     }
     if (awaitCycle) result.report = await whenCycleCompletes(cycleId)
     return result
+}
+
+// Remove a source file, with the same checks the write has plus the one that
+// only matters for removal: what still points at it.
+//
+// Delete is the more destructive operation and had the fewest guards — no
+// precondition, no preview, no advisory, and nothing at all about the
+// references that break when an entity other documents point at disappears.
+//
+// Same contract as writeEntitySource: never throws for an expected outcome.
+export async function deleteEntitySource({
+    id,
+    collection,
+    relativePath,
+    ifChecksum,
+    dryRun = false,
+    changeSet,
+    summary,
+    principal,
+} = {}) {
+    if (id) {
+        const located = await locateEntityFile(id)
+        if (located.error) return { ok: false, refused: 'unresolvable-id', error: located.error }
+        if (collection && collection !== located.collection) {
+            return {
+                ok: false,
+                refused: 'collection-mismatch',
+                error: `id ${id} is in collection ${located.collection}, not ${collection}. Pass one or the other.`,
+            }
+        }
+        collection ??= located.collection
+        relativePath ??= located.relativePath
+    }
+    if (!collection || !relativePath) {
+        return {
+            ok: false,
+            refused: 'incomplete-target',
+            error: 'Pass either `id` (for an existing entity) or both `collection` and `relativePath`.',
+        }
+    }
+
+    let handle
+    let uri
+    try {
+        handle = useCollection(runtime, collection)
+        uri = handle.resolveWithin(relativePath)
+    } catch (err) {
+        return { ok: false, refused: 'invalid-target', collection, relativePath, error: err.message }
+    }
+
+    const existing = id ? await readEntity({ id }) : await findEntityAtUri(uri)
+    const currentChecksum = await fileChecksum(uri)
+    if (currentChecksum === null) {
+        return {
+            ok: false, refused: 'not-found', collection, relativePath,
+            error: 'Nothing on disk at that path.',
+        }
+    }
+
+    // Everything that would be left pointing at nothing. Asked of the
+    // reference index rather than of the text, so it sees a `$`-ref by served
+    // path exactly the way invalidation does.
+    const referencedBy = existing ? referrersOf(existing) : []
+    const wouldAffect = existing?.id ? (runtime.manifest?.affectedBy?.(existing) ?? []) : []
+
+    if (dryRun) {
+        return {
+            ok: true, dryRun: true, collection, relativePath,
+            id: existing?.id ?? null,
+            exists: true,
+            currentChecksum,
+            referencedBy,
+            wouldAffect,
+            wouldAffectCount: wouldAffect.length,
+            ...(referencedBy.length ? {
+                warning: `${referencedBy.length} entit${referencedBy.length === 1 ? 'y' : 'ies'} reference this. `
+                    + 'Deleting it leaves those references pointing at nothing.',
+            } : {}),
+        }
+    }
+
+    if (ifChecksum !== undefined && ifChecksum !== currentChecksum) {
+        return {
+            ok: false,
+            refused: 'checksum-mismatch',
+            collection, relativePath,
+            expectedChecksum: ifChecksum,
+            currentChecksum,
+            hint: 'The file changed since you read it. Re-read it before deciding to delete it, and retry with '
+                + '`currentChecksum` from THIS response.',
+        }
+    }
+
+    await handle.remove(relativePath)
+    if (changeSet) recordChangeSetWrite({ changeSet, summary, principal, uri, operation: 'delete' })
+
+    return {
+        ok: true, collection, relativePath,
+        id: existing?.id ?? null,
+        deletedChecksum: currentChecksum,
+        cycleId: nextCycleId(),
+        ...(changeSet ? { changeSet } : {}),
+        referencedBy,
+        ...(referencedBy.length ? {
+            warning: `${referencedBy.length} entit${referencedBy.length === 1 ? 'y' : 'ies'} still reference this.`,
+        } : {}),
+    }
+}
+
+// Who points at this entity, by any of the keys it can be referenced by.
+//
+// `lookupKeys` rather than the id alone: content refers to served paths far
+// more often than to catalog ids, and asking only about the id would report a
+// widely-linked image as unreferenced.
+function referrersOf(entity) {
+    const refs = runtime.refs
+    if (!refs?.inboundFor) return []
+    const found = new Map()
+    for (const key of [entity.id, ...(lookupKeys(entity) ?? [])]) {
+        if (!key) continue
+        let inbound = []
+        try { inbound = refs.inboundFor(key) ?? [] } catch { continue }
+        for (const ref of inbound) {
+            if (!ref?.id || ref.id === entity.id) continue
+            found.set(ref.id, { id: ref.id, ...(ref.field ? { field: ref.field } : {}) })
+        }
+    }
+    return [...found.values()]
 }
