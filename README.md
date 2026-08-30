@@ -12,7 +12,7 @@
 
 **References merge sources into one call.** Mikser tracks how entities reference each other — an article's author, the marketing copy and ERP price behind a product page, the images a landing page uses. Fetch the product and pull its marketing copy, price, and hero image along with it in one round-trip. Change any of them and every page subscribed to a reference touching it re-renders live, without polling — and mikser invalidates *exactly* the pages that depend on it, nothing more.
 
-**And it can answer for what an agent did.** The reason to hesitate before pointing an AI at a live site isn't friction — it's *it'll break something and I won't find out until a client calls*. Mikser is built so the engine answers that: a shipped byte traces back to the file, field and line that produced it; a change reports its blast radius before it lands; a write is refused if the file moved underneath it. [What an agent can ask](#what-an-agent-can-ask) is the short version.
+**And it can answer for what an agent did.** The reason to hesitate before letting an AI edit a real website isn't that it's hard to set up — it's *it'll break something and nobody will notice until a client calls*. Mikser is built so you don't have to take the agent's word for it: point at any text on the finished site and it tells you which file wrote it, ask before a change and it lists the pages that will be affected, and it refuses the edit outright if someone else touched the file in the meantime. [What an agent can ask](#what-an-agent-can-ask) is the short version.
 
 **Your content stays yours.** Source files live on disk as `.md` / `.yml` — diffable, version-controllable, portable on day one and year ten. No database lock-in, no proprietary export. And it's the content layer, not your whole backend: business logic, accounts, and transactions stay in their own services; mikser handles the part that's actually content — rendered to HTML, PDF, email, and other formats from the same source.
 
@@ -134,29 +134,29 @@ What that feels like in practice: *"draft three hero-section variants and show m
 
 ### What an agent can ask
 
-Editing is the easy part. When an agent changes ten files you can read the diff; at two hundred you can't, and that is exactly the scale where AI editing gets interesting. Most systems leave verification to the human. Mikser turns the questions a reviewer would ask into calls the agent can make itself — and each answer comes from the engine's own records, not a re-scan that could disagree with what actually ran.
+When an agent changes ten files you can read them all. At two hundred you can't — and that's exactly the point where letting AI do the work starts to be worth it. Most systems leave the checking to you. Mikser lets the agent check its own work first, because the engine kept a record of what it did and can be asked about it afterwards.
 
-**"What produced this?"** — `mikser_which` takes a built destination and returns the source files behind it. Where the value is a parsed field, the field path and its line and column are *recorded at parse time*, not searched for afterwards. Finding which file paints a button used to mean opening the site, reading a class out of the DOM and guessing at filenames.
+**"Where did this come from?"** — point at any text on the finished site and get back the file that produced it, and the line in that file. Nothing else needs to happen: the engine noted it while building. Without this, finding which file writes a particular button means opening the site in a browser, poking at the page source and guessing at filenames.
 
-**"What breaks if I remove it?"** — `mikser_refs_inbound` returns every entity that references it. A delete reports what it would leave pointing at nothing *before* it happens, so "safe to remove" stops being a guess.
+**"What else is using this?"** — before removing a photo, a page or a person, ask what still points at it. The answer is a list, not a search that might have missed something.
 
-**"What will this change affect?"** — every write takes `dryRun`, and the answer is `wouldAffect`: the pages that would re-render, each with the reason. Blast radius before the write, from the same invalidation the build itself uses.
+**"What will this change touch?"** — ask before writing, not after. You get back the pages that would be rebuilt and why each one — so nobody discovers on Monday that editing a shared snippet quietly changed forty pages.
 
-**"Did what I intended actually happen?"** — `mikser_verify` compares the bytes on disk against what the engine believes it wrote. A build that reported success and a site that is actually current are different claims, and this is the one that checks.
+**"Did it actually work?"** — the site as it really is on disk, compared against what the engine believes it published. "The build said it succeeded" and "the site is actually up to date" are two different claims, and this checks the second one.
 
-Alongside those: semantic search over the corpus for "anything that still reads the old way", `git diff` for what changed, and `git checkout` for rollback — the audit trail is the one your engineers already use, because the catalog is plain files.
+Alongside those: search the whole site for anything that still reads the old way, and — because everything is ordinary files — the same change history and one-command rollback your developers already use for code.
 
-The shift this enables: AI review stops being *"read every change"* and becomes *"spot-check the agent's confidence."*
+What this changes: reviewing AI work stops being *read every single change* and becomes *spot-check where the agent was least sure.*
 
 ### What stops an agent breaking your site
 
-Answers are half of it. The other half is refusals — the engine declining an operation it can tell is wrong:
+The other half is the engine saying no. Not politely stepping aside — actually refusing to do things it can tell are wrong:
 
-- **Writes carry a checksum precondition.** A rewrite built from a copy that has since changed on disk is refused, not applied. Two agents, or an agent and a human, cannot silently overwrite each other.
-- **Undo consults the reference graph, not just the patch.** Reverting a change set that something added since now depends on is refused — *even when git would apply the patch cleanly*. A clean revert that leaves a link dangling is the failure mode a diff cannot see.
-- **Deletes name their referrers first**, and in the drive plugin a removed file moves to a trash folder under `runtime/` rather than being unlinked.
-- **Roles are enforced per collection, and a refusal names who can.** An agent connected as an editor that tries to write the design system doesn't get a bare 403 — it gets the role it holds, the capability it lacks, and which role carries it. That is a sentence the end user can forward to the person who can actually do it, instead of an invitation to work around the block.
-- **A broken subsystem says so.** Search returning nothing because it is broken and search returning nothing because nothing matched are otherwise the same answer; `mikser_ping` reports the difference.
+- **It won't overwrite somebody else's work.** If a person, or another agent, changed the file since this one read it, the edit is refused rather than quietly replacing what they wrote.
+- **Undo takes back one piece of work, not everything since.** Documents added afterwards stay. And if taking a change back would leave a link pointing at a page that no longer exists, it refuses — even though the file change itself would have gone through fine. That broken link is the failure nobody spots until it's live.
+- **Nothing is deleted quietly.** A delete first lists what still points at the thing being removed. Uploaded files go to a recycle folder rather than being erased, so a wrong call is recoverable.
+- **People only get the parts of the site they should have.** You decide who may change the words, who may change the design, who may do both. When an agent hits that boundary it doesn't just fail — it says which role could do the thing, which is a sentence the person can forward to whoever can. That's the difference between a dead end and a handoff.
+- **If something is broken, it says so.** "No results" because a feature has failed and "no results" because there genuinely aren't any look identical everywhere else. Here, the agent can tell which one it's looking at — and so can you.
 
 Full tool reference and twelve worked scenarios in the [`mikser-io-mcp` plugin docs](https://github.com/almero-digital-marketing/mikser-io-mcp#readme).
 
@@ -164,13 +164,13 @@ Full tool reference and twelve worked scenarios in the [`mikser-io-mcp` plugin d
 
 The shape this is built for: a developer builds the site, hands it to the client, and the client points their own agent at it. From then on changes happen inside the structure that was designed, rather than the agent reinventing it.
 
-What makes that survivable is that the boundary is declared, not hoped for. Roles are capability sets over collections, and the plain-language summary of each one is yours to write — mikser carries it into the answer. A site might describe its editor role as:
+What makes that work is that the boundary is real, not a convention everyone agrees to respect. You decide which parts of the site each kind of person may change — the words, the pictures, the design, the templates — and you write the description of each role in your own words. Mikser hands that description to whoever is asking. A site might describe its editor role as:
 
 > Pages, text and images. Can read the templates and styles to see how a page is built, but not change them — so nothing edited here can break the site.
 
-An agent connecting as that role sees exactly that sentence, the folders it may write, the folders it may only read, and every other role on the site with the same detail. When it hits the boundary it reports which role could do the thing and stops — the listing names a person to ask, and there is no way to request a role and none will be added.
+An agent connecting as that role sees exactly that sentence, what it may change, what it may only look at, and what the other roles on the site can do. When it reaches the edge of what it's allowed, it stops and names the role that could do the thing instead — so the answer is *ask your developer about the design system*, not a blank error the agent might try to route around. There is no way for it to ask for more access, and there won't be.
 
-So the developer's structure holds because the engine enforces it, the client gets an agent that can genuinely change content, and the failure mode is a refusal with a name on it rather than a broken page nobody noticed.
+So the developer's structure holds because the engine holds it, the client gets an agent that can genuinely change the content, and when something is out of bounds you get a sentence with a name in it rather than a broken page nobody noticed.
 
 ## Plugins on top of the engine
 
