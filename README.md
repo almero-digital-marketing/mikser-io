@@ -6,19 +6,21 @@
 
 # Mikser
 
-**Mikser is the AI-native content engine.** It mixes content from anywhere — markdown files, Google Sheets, your ERP, a CMS, any API — into one live catalog, links it together with references, and ships it to any frontend. Edit a price in your ERP or a cell in a spreadsheet, and every page that uses it updates within seconds — in whatever framework you built the site with.
+**Mikser is the AI-native content engine.** It mixes content from anywhere — markdown files, Google Sheets, your ERP, a CMS, any API — into one live index of everything you publish, keeps track of how the pieces point at each other, and ships it to any frontend. Edit a price in your ERP or a cell in a spreadsheet, and every page that uses it updates within seconds — in whatever framework you built the site with.
 
-**Framework-agnostic on both ends.** Headless CMSes (Sanity, Contentful) free you from the database but lock authoring into their UI. Frameworks like Astro let you bring any frontend but lock you into the framework. Mikser frees both: **any source in, any frontend out.** Provider plugins turn external systems into content sources; the catalog is served over plain HTTP, with idiomatic [Vue](https://github.com/almero-digital-marketing/mikser-io-sdk-vue) / [React](https://github.com/almero-digital-marketing/mikser-io-sdk-react) / [Svelte](https://github.com/almero-digital-marketing/mikser-io-sdk-svelte) SDKs on top (`useDocument`, `useDocuments`, multilingual `useHref`, live SSE). It's also AI-native: agents read and write the same catalog over MCP using the same calls a frontend developer uses — there's no separate "AI API" to keep in sync.
+Two words appear throughout, and they mean what they sound like. The **catalog** is that index: everything mikser currently knows about your content, in one place you can ask questions of. A **reference** is one piece of content pointing at another — an article at its author, a product page at the price behind it, a landing page at the photo it uses. Mikser knowing those links is what makes most of the rest possible.
 
-**References merge sources into one call.** Mikser tracks how entities reference each other — an article's author, the marketing copy and ERP price behind a product page, the images a landing page uses. Fetch the product and pull its marketing copy, price, and hero image along with it in one round-trip. Change any of them and every page subscribed to a reference touching it re-renders live, without polling — and mikser invalidates *exactly* the pages that depend on it, nothing more.
+**Framework-agnostic on both ends.** Headless CMSes (Sanity, Contentful) free you from the database but lock authoring into their UI. Frameworks like Astro let you bring any frontend but lock you into the framework. Mikser frees both: **any source in, any frontend out.** Small adapters turn outside systems into content sources; the catalog is served over ordinary HTTP, with [Vue](https://github.com/almero-digital-marketing/mikser-io-sdk-vue) / [React](https://github.com/almero-digital-marketing/mikser-io-sdk-react) / [Svelte](https://github.com/almero-digital-marketing/mikser-io-sdk-svelte) libraries on top that make it feel native, including live updates pushed to the browser. It's also AI-native: agents read and write that same catalog through MCP — the open standard AI assistants use to talk to outside tools — with the same calls a frontend developer makes. There's no separate "AI API" to keep in sync.
+
+**References merge sources into one call.** Because mikser knows how the pieces point at each other, you can fetch a product page and pull its marketing copy, its price and its hero image along with it in one round-trip — even though those three came from three different systems. Change any one of them and every page that uses it updates by itself, without anything asking repeatedly whether something changed — and only the pages that actually depend on it, nothing more.
 
 **And it can answer for what an agent did.** The reason to hesitate before letting an AI edit a real website isn't that it's hard to set up — it's *it'll break something and nobody will notice until a client calls*. Mikser is built so you don't have to take the agent's word for it: point at any text on the finished site and it tells you which file wrote it, ask before a change and it lists the pages that will be affected, and it refuses the edit outright if someone else touched the file in the meantime. [What an agent can ask](#what-an-agent-can-ask) is the short version.
 
 **Your content stays yours.** Source files live on disk as `.md` / `.yml` — diffable, version-controllable, portable on day one and year ten. No database lock-in, no proprietary export. And it's the content layer, not your whole backend: business logic, accounts, and transactions stay in their own services; mikser handles the part that's actually content — rendered to HTML, PDF, email, and other formats from the same source.
 
-Built for Node.js around a strict lifecycle and a composable plugin system: every document, asset, and template flows through the same pipeline, and plugins hook in at any phase. MIT-licensed, runs on Node, zero hosted dependencies. **The portability promise is the architecture, not a feature.**
+Built for Node.js around a fixed sequence of build steps and a plugin system: every document, image and template goes through the same pipeline, and a plugin can attach to any step in it. MIT-licensed, runs on Node, zero hosted dependencies. **The portability promise is the architecture, not a feature.**
 
-> **New to mikser?** Read the [Architecture Overview](./docs/overview.md) — one document, end-to-end walkthrough of how a file becomes a deployed page across all twenty lifecycle phases. It's the doc most projects need first.
+> **New to mikser?** Read the [Architecture Overview](./docs/overview.md) — one document, start to finish, on how a file becomes a published page. It's the doc most projects need first.
 
 ## Where it fits
 
@@ -36,21 +38,21 @@ Build mikser into the parts of your application that are content-shaped. Keep th
 
 ## Why mikser
 
-**Static-first with a built-in live channel.** Most content engines pick one side: static-site generators (Hugo, Eleventy, Jekyll) are fast but rebuild-only; headless CMSes (Sanity, Contentful, Strapi) are live but every page is an API round-trip. Mikser composes both — content publishes as static files by default (fast first paint, no API on the happy path), and the live channel arrives on top, so edits show up in connected clients without a refresh and without losing the static advantage.
+**Fast pages that still update live.** Most tools make you choose. Site generators (Hugo, Eleventy, Jekyll) produce fast pages but only change when you rebuild them; hosted CMSes (Sanity, Contentful, Strapi) update instantly but every page view waits on their API. Mikser does both: pages are published as real files, so they load fast and don't depend on anything being up, and updates arrive on top of that — an edit shows up in an open browser without a refresh.
 
-**Incremental builds that scale.** Mikser tracks every entity in a journal. When a file changes, only the affected entities re-process — not the whole site graph. On 10k+ documents this dramatically outpaces tools that rebuild more on every change.
+**It only rebuilds what changed.** When a file changes, mikser works out what actually depends on it and redoes only that — not the whole site. On a site with ten thousand pages that is the difference between a rebuild you wait for and one you don't notice.
 
-**Concurrent rendering.** Renders run async by default and CPU-heavy layouts (MJML compile, image processing, custom transforms) opt into a Piscina worker pool per layout via `task: worker` in frontmatter. Multi-format outputs (HTML, PDF, MJML email, etc.) generate from the same source; the pool is lazy — no workers spawn until they're asked for.
+**Heavy work runs in parallel.** Pages render concurrently, and anything genuinely slow — compiling an email template, processing an image — can be moved onto separate CPU cores by adding one line to the template. HTML, PDF and email all come from the same source document.
 
 **Asset pipelines are whatever Node can do.** Most static frameworks (Astro, Next.js, Hugo) ship image optimization and stop there — video transcoding, AI upscaling, watermarking all need a separate service. Mikser runs user-written modules over binary inputs: ~10 lines around `sharp` resize an image, ~10 around `fluent-ffmpeg` transcode a video, ~30 around the Replicate API upscale with AI. Anything an npm package can do, your pipeline can do — including pulling uploads from a DAM or CDN through the same flow.
 
-**One lifecycle, everything composes.** Plugins hook into 20+ named lifecycle phases. A search-indexing plugin shares the same journal iteration as an email-rendering plugin and a PDF-postprocessing plugin — no glue code, no orchestration layer. The engine doesn't know which plugins are loaded; plugins don't have to know about each other.
+**Everything composes.** A build is a fixed sequence of named steps, and a plugin attaches to whichever ones it needs. A search-indexing plugin, an email renderer and a PDF generator all see the same run without knowing about each other, and without any glue code holding them together.
 
 **Run anywhere.** The same CLI handles one-shot builds, watch-mode dev loops, and a long-running HTTP server with a shared Express app. `npx mikser` ships a static site; `mikser --watch` is the dev loop; `mikser --server` exposes a live admin/API.
 
-**Outages don't take you down.** Headless CMSes (Contentful, Sanity, Strapi) treat the API as the source of truth — when it blinks, every frontend errors out. Mikser inverts that: reads become static files on disk, the live channel layers on top. A reverse proxy keeps serving the files when mikser blips. Visitors don't notice; live updates pause until mikser returns.
+**Outages don't take the site down.** With a hosted CMS, the API *is* the site — when it blinks, every page errors. Mikser publishes real files to disk and layers live updates on top, so if mikser itself stops, the files keep being served. Visitors see nothing; live updates simply resume when it's back.
 
-**Library mode.** Mikser is also a library. `useRenderer`, `useCollection`, and direct lifecycle hooks let you embed the engine inside an existing Node app instead of running it as a CLI — plugins like `vector` add their own primitives the same way.
+**Use it as a library.** Mikser doesn't have to be a command you run. You can embed the engine inside an existing Node application and drive it directly.
 
 **Open source.** MIT-licensed, on GitHub, no telemetry, no auth wall, no SaaS dependency. What you see is what runs.
 
@@ -58,15 +60,15 @@ Build mikser into the parts of your application that are content-shaped. Keep th
 
 A real content stack pulls from more than one system. Marketing copy lives in a CMS or a spreadsheet. Prices and stock live in an ERP. Hero images live in a DAM. Editorial pages live in markdown files in the repo. Most teams either pick one tool and contort the rest to fit it, or build sync services that copy everything into one database — and then more sync services when things drift out of sync.
 
-Mikser is built around a different bet: **one queryable substrate that any source can pour into, and any frontend can read from.**
+Mikser is built around a different bet: **one place any source can pour into, and any frontend can read from.**
 
-**Any source.** Provider plugins let you treat external systems as content sources. A Google Sheet, an ERP feed, a Drive folder, a Notion database, an HTTP webhook, the local repo's `.md` files — each becomes a stream of entities flowing into mikser's catalog with the same shape. The authoring tool doesn't change. The editorial workflow doesn't change. The team writing product copy in Google Sheets keeps writing product copy in Google Sheets — mikser just notices when they save.
+**Any source.** Small adapters let you treat outside systems as content sources. A Google Sheet, an ERP feed, a Drive folder, a Notion database, the `.md` files in your repo — each pours into the catalog in the same shape, so everything downstream treats them alike. The authoring tool doesn't change. The editorial workflow doesn't change. The team writing product copy in Google Sheets keeps writing product copy in Google Sheets — mikser just notices when they save.
 
-**Cross-source composition through references.** Mikser tracks references between entities the way a graph database does. A product page can declare `$marketing` pointing at a row pulled from a spreadsheet, `$pricing` at a record pulled from your ERP, `$hero` at an asset pulled from your DAM. A single API call from your frontend asks for the product page *with* its referenced data — and gets the page, the marketing copy, the price, and the hero image merged into one response. One round trip, not three or four, and no consumer-side join logic to maintain.
+**Pieces from different systems, joined.** A product page can point at a row from a spreadsheet for its copy, a record from your ERP for its price, and a photo from your asset library — and one request from your frontend returns all four together. One round trip instead of four, and no stitching code on your side to keep working.
 
-**Live updates are uniform across every source.** Edit a cell in the spreadsheet, change a price in the ERP, replace an asset in the DAM — the pages depending on those entities update within seconds, in every frontend connected to mikser's live channel. You don't write per-source invalidation; mikser already knows which pages reference what.
+**Live updates work the same way whatever the source.** Edit a cell in the spreadsheet, change a price in the ERP, swap a photo in the asset library — the pages that use them update within seconds, everywhere. You don't write anything to make that happen for each source; mikser already knows which pages use what.
 
-**Your frontend is whatever you want.** Mikser exposes the catalog over HTTP (and over MCP, for AI agents). You query it from React, Vue, Svelte, SvelteKit, Next.js, an iOS app, a kiosk — anything that speaks HTTP. The framework SDKs (`mikser-io-sdk-react`, `mikser-io-sdk-vue`, `mikser-io-sdk-svelte`) make the calls feel native, but they're optional. Headless CMSes free you from the database lock. Frameworks like Astro free you from one kind of authoring lock. Mikser frees you from both at once: **any source on the input side, any framework on the output side.**
+**Your frontend is whatever you want.** The catalog is served over ordinary HTTP (and over MCP, for AI agents). You read it from React, Vue, Svelte, SvelteKit, Next.js, an iOS app, a kiosk — anything that can make a web request. The framework SDKs (`mikser-io-sdk-react`, `mikser-io-sdk-vue`, `mikser-io-sdk-svelte`) make the calls feel native, but they're optional. Headless CMSes free you from the database lock. Frameworks like Astro free you from one kind of authoring lock. Mikser frees you from both at once: **any source on the input side, any framework on the output side.**
 
 What this looks like in practice:
 
@@ -78,15 +80,15 @@ Adding a source is mechanical. See [`mikser-io-csv`](https://github.com/almero-d
 
 ## Built for AI-assisted development
 
-Files-as-source isn't just a portability story — it makes the project unusually friendly to AI coding agents. There's a static-time half (the agent reads your tree the way it reads any repo — no DB connection, no schema upload, no sandboxed query layer to learn) and a runtime half (when the agent needs to write or render, mikser ships its own MCP server in core, so it talks to the live engine instead of a parallel REST shim you have to maintain).
+That last section was about an agent looking after a site that already exists. This one is about building one in the first place — where keeping content in files turns out to matter for a second reason: a coding assistant can read your whole project the way it reads any repository, with no database to connect to and no schema to be told about. And when it needs to write something or render a preview, it talks to the running engine directly rather than through a separate API somebody has to maintain.
 
 **Zero infra friction for discovery.** An agent can `rg "type: product"` across the content tree to find every product doc in a second. No DB connection, no API token, no schema file to parse.
 
 **The schema emerges from examples, not a definition file.** Front-matter shows what fields exist *in the docs that exist*. Markdown + YAML are overwhelmingly well-represented in AI training data, so the model "speaks" them fluently and infers structure from real documents better than from a schema definition.
 
-**Determinism shortens the iteration loop.** Save a file → watcher fires → predictable rebuild. No DB triggers, no surprise cache invalidation, no API quotas. The agent's mental model of "what happens next" can be precise instead of probabilistic.
+**What happens next is predictable.** Save a file, the build runs, the output changes — no database triggers firing elsewhere, no cache clearing itself at an awkward moment, no rate limits. An assistant can reason about the result instead of guessing at it.
 
-**The SDK's `.d.ts` is the read-side contract.** When the agent writes frontend query code, the operator subset and envelope shape are right there in types — a step-change for code generation quality versus "go read the REST API docs."
+**The types are the documentation.** When an assistant writes frontend code against mikser, the shape of every query and response is described in TypeScript types it can read directly — which produces markedly better generated code than pointing it at API docs and hoping.
 
 **Plugin-by-example.** Authoring a new plugin? There are 15+ existing ones in the same shape to pattern-match against. Convention is dense enough that new plugins look like the old ones without coaching.
 
@@ -101,20 +103,20 @@ Files-as-source isn't just a portability story — it makes the project unusuall
 
 The runtime half — the agent driving the live engine, not just reading the tree — gets its own section below.
 
-The honest caveat: this advantage is real on **content-shaped work** — adding pages, restructuring collections, generating new layouts, building frontends. It doesn't make mikser better for non-content tasks (concurrency bugs in the worker pool, database tuning elsewhere in your stack); those are plain Node debugging like anywhere else. The visibility advantage also degrades past ~10k documents — at that scale the agent queries via the SDK instead of grepping the tree, which is still good but less "see everything at once."
+The honest caveat: this helps with **content work** — adding pages, reorganising sections, building frontends. It doesn't make mikser better at everything else in your stack; that's ordinary debugging like anywhere. And the "read the whole project at once" advantage fades past roughly ten thousand documents, where an assistant queries the catalog instead — still good, less panoramic.
 
 ## Control mikser from your AI agent
 
 Install the [`mikser-io-mcp`](https://github.com/almero-digital-marketing/mikser-io-mcp) plugin and any MCP-speaking client — Claude Desktop, Claude Code, ChatGPT, custom agents — connects to the running engine. From inside a chat, your AI can:
 
-- read every entity in the catalog
-- write new content files (markdown, layouts, configuration) — writes land on disk and the next cycle picks them up
-- render any layout for preview without touching the output folder
-- **surface interactive UI inline in the conversation** — you author the UI as a normal mikser layout with YAML frontmatter (`mcpUi: { mode, actions }`). The agent reads `mikser://mcp-ui/modes` to discover what UIs your project supports, calls `mikser_preview_ui` to render one against an entity, and the host displays the result as a sandboxed iframe in the chat. Buttons in the UI deliver their click back as a separate MCP tool turn — the iframe sends a JSON-RPC `tools/call` to the host over `postMessage` per the [MCP Apps spec](https://github.com/modelcontextprotocol/ext-apps), which the host bridges into a real `mikser_ui_action` invocation. The agent sees a structured `{action, entityId, payload}` result; if you declared `mcpUi.handler.url`, mikser forwards the action to your webhook first and uses its response. No separate UI framework, no glue code; layouts are still just layouts
-- watch every build log as it streams past
-- introspect engine state — current lifecycle phase, effective config, recent log buffer
+- read anything in the catalog
+- write new content — pages, templates, settings. The file lands on disk and the next build picks it up.
+- render a page just to look at it, without publishing anything
+- **show you a real interface inside the chat.** Instead of describing a change, the agent can render an actual editable panel — a form, a preview with Approve and Reject buttons — and you click it in the conversation. Pressing a button sends your answer straight back to the agent as its next step.
 
-Plugins extend the tool surface the same way they mount HTTP routes; install the plugin, the agent gets new verbs. No glue code, no per-project agent wiring.
+  You build those panels as ordinary mikser templates; there is no separate UI framework and no glue code. Under the hood they follow the [MCP Apps spec](https://github.com/modelcontextprotocol/ext-apps): the panel renders in a sandboxed frame, a click travels back as a real tool call, and if you point it at a webhook of your own, mikser forwards the action there first and uses the reply.
+
+Plugins add to what the agent can do the same way they add web routes: install one, and the agent has new abilities. Nothing to wire up per project.
 
 ```js
 // mikser.config.js
@@ -262,11 +264,11 @@ For a working starter — config with a real plugin set, sample `documents/`, ex
 The shape mikser fits cleanly:
 
 - **Marketing sites with editorial teams** — content authors work in files (via their editor, a Git client, or `mikser-io-decap`), engineers ship features without negotiating with a CMS schema, the site stays portable.
-- **Multilingual publishing platforms** — the `useHref()` / `useAlternates()` pattern decouples logical references from per-locale URLs. One source tree, many language deployments.
-- **Content-heavy product catalogues** — `documents` + `mikser-io-schemas` + `data` plugin + a Frontend Framework = typed product listings with live updates, semantic search via `vector`, and static-CDN-friendly JSON snapshots all at once.
-- **AI-augmented media pipelines** — `assets` plugin presets call out to Replicate / OpenAI / local models to upscale images, transcribe audio, transcode video. The pipeline is JS code, so anything Node can do is in scope.
-- **Mixed-output publishing** — the same source document renders to HTML, PDF (via `post-pdf`), MJML email (via `post-mjml`), and JSON snapshots. One catalog, many output formats, all concurrent.
-- **Headless backends for static frontends** — pair the `api` plugin with `sdk-api` for SSE-driven live frontends; pair the `data` plugin output with any static host for pre-rendered consumption.
+- **Multilingual publishing** — link to a page by what it *is*, and each language gets the right URL automatically. One source tree, many language sites.
+- **Large product catalogues** — product listings that update live, search by meaning rather than exact words, and pre-built data files a CDN can serve — from the same source.
+- **AI-assisted media handling** — upscale images, transcribe audio, transcode video, on the way in. The pipeline is ordinary JavaScript, so anything Node can do is available to it.
+- **One source, several formats** — the same document becomes a web page, a PDF and an email, all from one edit.
+- **A content backend for a frontend you already have** — serve it live over HTTP, or export flat files for any static host.
 
 The shape mikser **doesn't** fit cleanly: anything with non-technical content authors who can't or won't work with files, anything with non-content business logic at the core, anything needing multi-tenant / per-user auth. Those aren't bugs — they're outside the design envelope. See [`decisions/0001-content-layer-not-the-app.md`](./docs/decisions/0001-content-layer-not-the-app.md) for the explicit scope decision.
 
