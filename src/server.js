@@ -22,10 +22,24 @@
 
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { networkInterfaces } from 'node:os'
 
 import runtime from './runtime.js'
 import { useLogger } from './engine.js'
 import { onInitialized, onLoad, onLoaded } from './lifecycle.js'
+
+// Every non-loopback IPv4 address this machine answers on.
+//
+// IPv4 only, deliberately. The non-internal IPv6 addresses on a typical
+// machine are link-local (fe80::), which need a zone index to be usable and
+// are not what anyone is going to type into a phone — listing them would make
+// the useful lines harder to find, which is the opposite of the point.
+export function localAddresses() {
+    return Object.values(networkInterfaces())
+        .flat()
+        .filter(iface => iface && iface.family === 'IPv4' && !iface.internal)
+        .map(iface => iface.address)
+}
 
 // Extend the engine's commander with server-related flags. Called by
 // engine.js's onInitialize callback AFTER engine's own options chain
@@ -214,6 +228,28 @@ export function setupServer() {
                     // back to the bind URL when no public origin is set.
                     const externalUrl = runtime.options.url ?? `http://localhost:${runtime.options.port}`
                     logger.info('Server listening: %s', externalUrl)
+
+                    // The addresses that are NOT localhost.
+                    //
+                    // listen(port) binds every interface, so the server is
+                    // already reachable from a phone or a second machine —
+                    // and the one address printed above is the single one
+                    // that will not work from either. Anyone testing a
+                    // layout on a real device has to go and find their own
+                    // IP, every time, on a machine that already knows it.
+                    //
+                    // Only when no public URL is configured. Behind a proxy
+                    // or a tunnel the LAN address is not how the site is
+                    // reached, and offering it would be an invitation to
+                    // debug the wrong origin.
+                    if (!runtime.options.url) {
+                        const lan = localAddresses()
+                        if (lan.length) {
+                            logger.info('Also on: %s', lan
+                                .map(address => `http://${address}:${runtime.options.port}`)
+                                .join('  '))
+                        }
+                    }
                     resolve()
                 })
 

@@ -69,3 +69,29 @@ describe('server favicon fallback', () => {
             'before it, the engine mark would shadow every project\'s own icon')
     })
 })
+
+// Which addresses the operator is told about.
+//
+// listen(port) binds every interface, so the server is already reachable from
+// a phone or a second machine — and localhost is the single address that will
+// not work from either. Printing only that one sent everyone off to find their
+// own IP, on a machine that already knew it.
+describe('reachable addresses', () => {
+    it('lists every non-loopback IPv4 address', async () => {
+        const { localAddresses } = await import('../../src/server.js')
+        const addresses = localAddresses()
+        assert.ok(Array.isArray(addresses))
+        for (const address of addresses) {
+            assert.match(address, /^\d+\.\d+\.\d+\.\d+$/, 'IPv4 only')
+            assert.notEqual(address, '127.0.0.1', 'loopback is already printed as localhost')
+        }
+    })
+
+    it('leaves out IPv6', async () => {
+        // The non-internal IPv6 addresses on a typical machine are link-local
+        // and need a zone index to be usable. Listing them makes the lines
+        // anyone can actually type harder to find.
+        const { localAddresses } = await import('../../src/server.js')
+        assert.equal(localAddresses().some(a => a.includes(':')), false)
+    })
+})
