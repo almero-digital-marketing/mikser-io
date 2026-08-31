@@ -26,6 +26,7 @@ engine source, the entry point is missing and belongs on this page.
 | I am an agent reading CLI output, not speaking MCP | [`--tools` / `--tool`](#the-two-agent-workflows) |
 | Did my schema validate anything at all? | [`schemas.names()`](#schemasnames--schemaslookup) |
 | A tool answered emptily — is it broken, or is there nothing to find? | [`faults`](#faults) |
+| I edited the build and nothing rebuilt | `--json` → `config.files` |
 
 ## Command line
 
@@ -149,6 +150,14 @@ The buckets, and the distinction between them is the point:
 | `gated` | a count — the source was unchanged, so no render was ever scheduled |
 | `warnings` | everything that went through `logger.warn` this cycle, with its `code` |
 | `faults` | subsystems that reported they **cannot work** — see [Faults](#faults) |
+
+Each report also carries `config`: the files the config stamp spans, and
+whether that coverage is `complete`. The stamp is what makes a config edit
+invalidate the cache, and it covers the config's whole local module graph —
+not just the entry file. So if you keep the build in `config/pipeline.js` and
+import it from both a dev and a prod config, editing the pipeline invalidates,
+which is the case that matters. `config.files` is there so *"I edited the build
+and nothing rebuilt"* is answerable by reading rather than by experiment.
 
 Each report also carries `cycleId`, `startedAt` and `finishedAt`. Under
 `--watch` two consecutive reports are otherwise indistinguishable, so

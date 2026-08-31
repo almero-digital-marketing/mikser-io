@@ -205,7 +205,12 @@ brevity.
   `descriptor.options` and arrive as the `config` arg to
   `load`/`render`/`setup`/`postprocess`/`teardown`.
 - `config.js` — loads `mikser.config.js` at `onLoad` into
-  `runtime.config`. v9 holds only engine-level keys (`server`,
+  `runtime.config`. The cache-invalidating stamp covers the config's whole
+  local module graph, captured via `module.registerHooks` during the import
+  (Node 22.15+; older runtimes fall back to the entry file and warn). Scoped
+  to the config's own directory — `node_modules` alone is not enough of a
+  filter, because a workspace symlinks its siblings outside it. Coverage is
+  published at `runtime.options.configCoverage` and in the build report. v9 holds only engine-level keys (`server`,
   `logging`, `catalog` if tuned) plus the `plugins` array — all
   plugin options moved to the factory call site (ADR-0010).
 - `plugins.js` — dispatches v9 plugin entries at `onLoad`. Each

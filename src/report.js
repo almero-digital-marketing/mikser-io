@@ -325,6 +325,14 @@ export function buildReport() {
         // failed build, whatever the other counts say.
         errors: errorStore(),
         warnings: report.warnings,
+        // Which files the config stamp spans.
+        //
+        // "I edited the build and nothing rebuilt" was only answerable by
+        // experiment: the stamp covered the entry file, real projects put the
+        // build in a module it imports, and nothing said which. Published
+        // rather than documented, because a limit you can see at the moment it
+        // bites is a different thing from one written down elsewhere.
+        ...(runtime.options?.configCoverage ? { config: runtime.options.configCoverage } : {}),
         // Named conditions reported at error level: a subsystem saying it
         // cannot work, as opposed to `errors`, which is a render that threw.
         // Carried whole rather than filtered to this cycle — a fault raised at
