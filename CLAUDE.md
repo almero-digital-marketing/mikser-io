@@ -423,14 +423,13 @@ Test coverage: `test/unit/source-sweep.test.js`.
   camelCase: `import { vector } from 'mikser-io-vector'`,
   `import { renderHbs } from 'mikser-io'`. Consumer uses
   `plugins: [vector({...})]` — never the bare string.
-- **Route paths**: a plugin mounts at `/$<name>` — `/$live`. The output
-  folder is served from `/`, so any path a plugin takes is one the site
-  cannot use; `$` is reserved because no content is served from it, which
-  makes the collision impossible rather than unlikely. NOT `/api/<name>`:
-  those names come from the user's `endpoints` config. Plugins predating
-  the convention keep `/mcp`, `/auth`, `/api`, `/preview` — moving them
-  invalidates every connected agent's endpoint URL, which is a migration
-  rather than a rename.
+- **Route paths**: a plugin mounts at `/<name>`, with a `base` or `path`
+  option to move it — api `/api`, auth `/auth`, drive `/drive`, forms
+  `/forms`, mcp `/mcp`, preview `/preview`, vector `/vector`, decap
+  `/admin`. The output folder is served from `/`, so a route CAN shadow a
+  page; the accepted answer is a predictable name plus a way to change
+  it, not a reserved prefix. Follow the eight, do not invent a ninth
+  shape.
 - **Tool names**: the registry (`src/tools.js`) holds BARE names —
   `explain`, `verify`, `sources`, `search`. The `mikser_` prefix is MCP's
   namespacing, because its tool names are flat across every connected

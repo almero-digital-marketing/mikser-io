@@ -79,24 +79,21 @@ export function routeLocation(displayPath) {
 //   authLabel     bracketed reachability text override for the log.
 //
 // Returns the recorded descriptor.
-// WHERE a plugin should mount: `/$<name>`.
+// WHERE a plugin mounts: `/<name>`, overridable.
 //
-// The output folder is served from `/`, so every path a plugin takes is a path
-// the site cannot use. `$` is the reserved prefix that settles it — no page is
-// served from one, so `/$live` and `/$preview` can never shadow content, and
-// the collision is impossible rather than unlikely.
+// Not a new rule — the one every plugin already follows. api at /api, auth at
+// /auth, drive at /drive, forms at /forms, mcp at /mcp, preview at /preview,
+// vector at /vector, decap at /admin. Each takes a `base` or `path` option so
+// a project whose content wants that path can move it.
 //
-// Not under `/api/<name>`, which looks like the obvious home and is not: those
-// names come from the user's own `endpoints` config, so an engine route there
-// competes with a name somebody may legitimately want.
+// The output folder is served from `/`, so a plugin route can shadow a page.
+// That is a real cost and this is the accepted answer to it: a predictable
+// name, and a way to change it. A reserved prefix like `/$name` would make
+// the collision impossible, and would also make this plugin the only one
+// shaped differently from the other eight — which is a worse trade than the
+// collision it avoids, because the collision is rare and visible and the
+// inconsistency is permanent.
 //
-// `$` already means "mikser's, not yours" — it is the prefix on a reference
-// key (ADR-0007). Same word, same idea, one place further out.
-//
-// Plugins predating this keep their paths: `/mcp`, `/auth`, `/api`,
-// `/preview`. Moving them would invalidate every connected agent's endpoint
-// URL and every proxy config pointing at one, which is a migration and not a
-// rename. New routes use `$`.
 export function registerRoute({
     path,
     plugin,
