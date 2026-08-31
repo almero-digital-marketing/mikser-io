@@ -95,6 +95,58 @@ describe('files() sync path', () => {
         )
     })
 
+    // `id` and `uri` mean DIFFERENT things here, and the difference is
+    // load-bearing for anything asking "which file is this?".
+    //
+    // A file entity is served by symlinking the source into the output
+    // folder, and `uri` is that symlink — under outputFolder, moving when
+    // `options.outputFolder` changes. For a document or a layout `uri` is the
+    // source file, so the meaning is not consistent across collections and
+    // `uri` cannot be used to identify a source.
+    //
+    // `id` can: it is always `/<collection>/<path under the source folder>`.
+    // The render helpers (readFile / glob in src/plugins/render/file.js) key
+    // their dependency edges on it for exactly this reason — keyed on uri they
+    // recorded edges that matched nothing, on a green build.
+    it('ids the source, uris the served copy — they are not interchangeable', async () => {
+        const h = install(root, OPTIONS)
+        await h.runSync('files', {
+            action: h.constants.ACTION.CREATE,
+            context: { relativePath: RELATIVE },
+        })
+        const { entity } = h.journal.at(-1)
+
+        assert.equal(entity.id, '/files/' + RELATIVE.split(path.sep).join('/'),
+            'the id names the file under its source folder')
+        assert.ok(entity.uri.includes('media'),
+            'the uri is the served copy, under the configured output prefix')
+        assert.notEqual(entity.id, entity.uri)
+        assert.equal(entity.uri.includes(path.join('files', RELATIVE)), false,
+            'and it is NOT the source path — an edge matching on uri finds nothing')
+    })
+
+    it('keeps the same id when the served location moves', async () => {
+        // Changing outputFolder relocates the symlink and therefore the uri.
+        // Anything that identified the file by uri breaks; the id does not
+        // move, which is what makes it the safe key.
+        const plain = install(root, {})
+        await plain.runSync('files', {
+            action: plain.constants.ACTION.CREATE,
+            context: { relativePath: RELATIVE },
+        })
+        const bare = plain.journal.at(-1).entity
+
+        const prefixed = install(root, OPTIONS)
+        await prefixed.runSync('files', {
+            action: prefixed.constants.ACTION.CREATE,
+            context: { relativePath: RELATIVE },
+        })
+        const moved = prefixed.journal.at(-1).entity
+
+        assert.equal(bare.id, moved.id, 'the id is stable across output layouts')
+        assert.notEqual(bare.uri, moved.uri, 'the uri is not')
+    })
+
     it('UPDATE skips when the checksum is unchanged', async () => {
         // Seed the catalog with the entity as it is on disk, then sync
         // without touching the file. A correct guard reports not-synced.
