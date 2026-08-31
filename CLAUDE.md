@@ -182,6 +182,14 @@ brevity.
   `isRefKey`, `writeEntity`, `matchEntity`, `getFormatInfo`,
   `changeExtension`, `checksum`, `normalize`, `formatErrorContext`,
   `formatLogArgs`, `ExpandError`, `AbortError`.
+- `src/plugins/render/file.js` — the template filesystem helpers
+  (`readFile`, `jsonFile`, `glob`). Every read RECORDS a query edge by
+  default; `{ track: false }` opts out. Keyed on **`id`, never `uri`** —
+  for a `files` entity `uri` is the DEPLOYED path, so a uri edge matches
+  nothing for the commonest case. `glob` records the PATTERN as a regex
+  over ids, not the matched paths, so a file appearing later still
+  invalidates. Paths resolve against `options.workingFolder` — the
+  render-time `runtime` is a per-render projection with no options on it.
 - `render.js` / `postprocess.js` — Piscina worker entry points AND the
   default-export functions the INLINE/SERIAL dispatcher calls directly.
   Each receives entity + options + config + state; the WORKER path also

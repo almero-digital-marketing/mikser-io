@@ -308,7 +308,17 @@ export default async ({ entity, options, config, context, state, logger, port, t
     for (let pluginName of pluginsToLoad) {
         const plugin = await loadPlugin(pluginName)
         plugins[pluginName] = plugin
-        if (plugin?.load) await plugin.load({ entity, options, config: plugin.options, context, runtime, state, logger })
+        // `track` goes to load(), not only to render().
+        //
+        // A helper plugin publishes functions a template calls DURING the
+        // render — readFile, glob — and those reads are dependencies exactly
+        // as much as a partial or a lookup is. Without this they could not
+        // record even if they wanted to, so a template that read ten files
+        // produced a refClosure naming none of them: the build stays green
+        // and the output goes stale, which is the same hole lookupHref had.
+        if (plugin?.load) {
+            await plugin.load({ entity, options, config: plugin.options, context, runtime, state, logger, track })
+        }
     }
 
     const rendererPlugin = plugins[`render-${renderer}`]
