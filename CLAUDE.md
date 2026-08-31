@@ -195,6 +195,11 @@ brevity.
   over ids, not the matched paths, so a file appearing later still
   invalidates. Paths resolve against `options.workingFolder` — the
   render-time `runtime` is a per-render projection with no options on it.
+  The "this file has no entity" warning reads `options.sourceFolders` —
+  the set useSource records as it registers each collection — NOT a list
+  of folder names written in the plugin. A hardcoded list misses every
+  collection a project registers through `sources()`, which produced 63
+  false warnings per build on a real site.
 - `render.js` / `postprocess.js` — Piscina worker entry points AND the
   default-export functions the INLINE/SERIAL dispatcher calls directly.
   Each receives entity + options + config + state; the WORKER path also

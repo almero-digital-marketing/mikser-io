@@ -331,9 +331,9 @@ export function createSqliteDatabase({
                 configChanged ? 'config' : 'schema version')
         } else if (configChanged && !(recorded && recorded !== version)) {
             logger?.warn(
-                'Config changed since the last run. Wiping the cache and rebuilding from sources ' +
-                '(files are the source of truth — no source data is affected). Note this tracks the ' +
-                'bytes of %s only: a change in a module it imports is not seen.',
+                'Config changed since the last run. Wiping the cache and rebuilding from sources '
+                + '(files are the source of truth — no source data is affected). The stamp covers %s and '
+                + 'every local module it imports; `--json` reports exactly which files under `config.files`.',
                 runtime.options.config,
             )
         }

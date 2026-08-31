@@ -67,16 +67,27 @@ function entityIdFor(workingFolder, resolved) {
 // nothing to track" read identically from a template. Said once per path.
 const warnedOutside = new Set()
 function warnIfUntrackable(options, resolved, logger) {
-    const folders = ['documentsFolder', 'filesFolder', 'assetsFolder', 'resourcesFolder', 'dataFolder']
-        .map(key => options?.[key]).filter(Boolean)
-    if (!folders.length) return  // nothing configured to compare against
+    // Every folder whose files become entities, as recorded by useSource when
+    // it registered them — NOT a list written here.
+    //
+    // The first version of this hardcoded five content folders, and a project
+    // registering its own collections through sources() has more than five. On
+    // lmed that meant 63 warnings per build, one for every stylesheet and
+    // script, all of them tracked correctly and every one of them saying the
+    // opposite. Which is worse than not warning: 63 spurious lines a build
+    // teaches you to filter the channel, and the filtered-out line is the real
+    // one.
+    const folders = Object.values(options?.sourceFolders ?? {})
+    // Nothing registered yet means nothing can be concluded. Silence is the
+    // only honest answer — the previous shape guessed instead.
+    if (!folders.length) return
     if (folders.some(folder => !path.relative(folder, resolved).startsWith('..'))) return
     if (warnedOutside.has(resolved)) return
     warnedOutside.add(resolved)
     logger?.warn?.({ code: 'untracked-file-read' },
-        'A template read %s, which is outside every content folder — so it has no entity, nothing watches it, '
-        + 'and changing it will NOT rebuild the pages that read it. Move it under a content folder if that '
-        + 'matters, or pass { track: false } to say the staleness is intended.', resolved)
+        'A template read %s, which is outside every folder mikser takes entities from — so it has no entity, '
+        + 'nothing watches it, and changing it will NOT rebuild the pages that read it. Register the folder '
+        + 'with sources() if that matters, or pass { track: false } to say the staleness is intended.', resolved)
 }
 
 export function load({ runtime, options, track, logger }) {

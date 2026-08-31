@@ -30,7 +30,15 @@ beforeEach(async () => {
     // `runtime` is a per-render projection with no options on it.
     load({
         runtime,
-        options: { workingFolder: dir, documentsFolder: path.join(dir, 'documents') },
+        options: {
+            workingFolder: dir,
+            // As useSource records them — every collection whose files become
+            // entities, including ones a project registers with sources().
+            sourceFolders: {
+                documents: path.join(dir, 'documents'),
+                styles: path.join(dir, 'styles'),
+            },
+        },
         track,
         logger: { warn: (o, ...a) => warnings.push({ ...o, a }) },
     })
@@ -99,22 +107,49 @@ describe('globbing', () => {
 })
 
 describe('the limit, said out loud', () => {
-    it('warns when the file is outside every content folder', () => {
+    it('warns when the file is outside every folder entities come from', async () => {
         // mikser can only invalidate on entities. A file nothing watches
         // cannot be brought back by any edge — and "tracked it" and "there was
         // nothing to track" otherwise read identically from a template.
-        runtime.readFile('styles/base.css')
+        await writeFile(path.join(dir, 'loose.txt'), 'x')
+        runtime.readFile('loose.txt')
         assert.equal(warnings[0]?.code, 'untracked-file-read')
     })
 
-    it('says it once, not once per render', () => {
-        runtime.readFile('styles/base.css')
-        runtime.readFile('styles/base.css')
+    it('says it once, not once per render', async () => {
+        await writeFile(path.join(dir, 'loose.txt'), 'x')
+        runtime.readFile('loose.txt')
+        runtime.readFile('loose.txt')
         assert.equal(warnings.length, 1)
     })
 
     it('stays quiet for a file that does have an entity', () => {
         runtime.readFile('documents/conf.json')
         assert.deepEqual(warnings, [])
+    })
+
+    it('stays quiet for a collection the project registered itself', () => {
+        // The regression: the folder set was hardcoded to five content
+        // folders, so every file in a sources()-registered collection was
+        // reported as untracked. On a real site that was 63 warnings a build,
+        // all of them wrong — which teaches you to filter the channel, and the
+        // filtered-out line is the real one.
+        runtime.readFile('styles/base.css')
+        assert.deepEqual(warnings, [], 'styles is a registered source; its files DO have entities')
+    })
+
+    it('says nothing at all when no sources are registered yet', () => {
+        // Nothing registered means nothing can be concluded, and silence is
+        // the only honest answer. Guessing is what produced the false ones.
+        const bare = {}
+        const quiet = []
+        load({
+            runtime: bare,
+            options: { workingFolder: dir },
+            track: createTrack(),
+            logger: { warn: (o) => quiet.push(o) },
+        })
+        bare.readFile('documents/conf.json')
+        assert.deepEqual(quiet, [])
     })
 })

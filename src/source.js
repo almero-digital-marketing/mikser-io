@@ -328,6 +328,18 @@ export function useSource(core, options) {
             ? folder
             : path.join(runtime.options.workingFolder, folder)
         runtime.options[`${collection}Folder`] = absFolder
+        // The authoritative set of folders whose files become entities.
+        //
+        // `<collection>Folder` above is the per-collection accessor and reads
+        // like one; this is the LIST, which is a different question and the
+        // one anything asking "could a file here be tracked?" needs. Deriving
+        // it by scanning options for a `*Folder` suffix would sweep up
+        // workingFolder, runtimeFolder and outputFolder, and hand-listing the
+        // content ones misses every collection a project registers itself —
+        // which is exactly how the file helpers came to warn 63 times a build
+        // about files they were tracking correctly.
+        runtime.options.sourceFolders ??= {}
+        runtime.options.sourceFolders[collection] = absFolder
         logger.debug('%s folder: %s', cap, absFolder)
 
         await mkdir(absFolder, { recursive: true })

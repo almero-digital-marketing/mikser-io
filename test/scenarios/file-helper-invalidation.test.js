@@ -97,3 +97,53 @@ describe('a template that globs and reads files', () => {
         assert.match(await out(workdir), /margin:8px/)
     })
 })
+
+describe('reading a collection the project registered itself', () => {
+    // The reported regression, at the level that would have caught it.
+    //
+    // The untrackable check hardcoded five content folder names, so every file
+    // in a sources()-registered collection was reported as having no entity —
+    // 63 warnings a build on a real site, all wrong, while the dependency
+    // edges were working perfectly. The unit tests passed throughout because
+    // they hand-built the options object; only a real build has a real one.
+    const workdir = freshWorkdir('file-helpers-sources')
+    after(() => cleanup(workdir))
+
+    const CONFIG = `
+import { documents, frontMatter, sources, renderHbs, fileHelpers } from 'mikser-io'
+import { layouts } from 'mikser-io-layouts'
+export default {
+    plugins: [
+        documents(), frontMatter(),
+        sources({ styles: { folder: 'styles', extensions: ['css'] } }),
+        layouts(), renderHbs(), fileHelpers(),
+    ],
+}
+`
+
+    before(async () => {
+        await setupFixture(workdir, {
+            'mikser.config.js': CONFIG,
+            'documents/index.html': '---\nlayout: page\nhref: /index.html\n---\n',
+            'layouts/page.hbs': '<style>{{#each (glob "styles/**/*.css")}}{{{readFile this}}}\n{{/each}}</style>',
+            'styles/base.css': 'body{margin:0}',
+            'styles/sections/hero.css': '.hero{color:red}',
+        })
+    })
+
+    it('does not warn about files it is tracking correctly', async () => {
+        const { code, combined } = await runMikser(workdir)
+        assert.equal(code, 0, combined)
+        assert.equal(/outside every folder/.test(combined), false,
+            `a registered source is not untracked\n${combined}`)
+    })
+
+    it('and the edge it was warning about actually works', async () => {
+        // The warning being wrong is only half of it: it claimed edits would
+        // not rebuild, and they do.
+        await writeFile(path.join(workdir, 'styles/sections/hero.css'), '.hero{color:blue}')
+        const { code, combined } = await runMikser(workdir)
+        assert.equal(code, 0, combined)
+        assert.match(await out(workdir), /color:blue/)
+    })
+})
