@@ -47,6 +47,7 @@ import { mkdirSync, unlinkSync, existsSync, readFileSync, writeFileSync } from '
 import Database from 'better-sqlite3'
 import runtime from '../runtime.js'
 import { isReportOnlyRun } from '../tools.js'
+import { reportWipe } from '../report.js'
 import { onLoaded } from '../lifecycle.js'
 import packageInfo from '../../package.json' with { type: 'json' }
 
@@ -355,6 +356,15 @@ export function createSqliteDatabase({
             } else if (forceWipe) {
                 logger?.info('Clearing the cache and rebuilding from sources.')
             }
+            // Recorded where the decision is made. The report otherwise shows
+            // a cold build and no reason for it, and "everything rebuilt" is
+            // the same output whether the version moved, the config moved, or
+            // someone passed --clear.
+            reportWipe(
+                recorded && recorded !== version ? 'version' : forceWipe ? 'clear' : 'config',
+                recorded && recorded !== version ? { from: recorded, to: version } : {},
+            )
+
             // Unlink, rather than dropping table by table.
             //
             // The wipe used to have to know which tables to keep, because

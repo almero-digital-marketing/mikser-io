@@ -158,7 +158,12 @@ brevity.
 - `server.js` — Express bring-up: CLI flags (`--server`, `--cors`,
   `--no-cors`), trust-proxy, CORS (with extensible header arrays for
   plugins to push onto), late-binding static mount + listen.
-- `report.js` — the `--json` build report. `warnings` is a VIEW of
+- `report.js` — the `--json` build report. `invalidated` says WHY the
+  build did work (`nothing` / `sources` / `config` / `version` / `clear`),
+  recorded where each is decided — `reportWipe` in database/index.js,
+  `reportChanged` in source.js as the complement of `reportGated`.
+  `evaluated` is what a subsystem looked at vs what exists
+  (`reportEvaluated`), generalised from assets' matchTally. `warnings` is a VIEW of
   `logger.warn`; `faults` is a view of `logger.error` **carrying a
   `code`** — a subsystem declaring it cannot work, deduped by that code,
   never cleared per cycle, and surfaced in `mikser_ping`. The log call is

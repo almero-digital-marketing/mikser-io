@@ -27,6 +27,8 @@ engine source, the entry point is missing and belongs on this page.
 | Did my schema validate anything at all? | [`schemas.names()`](#schemasnames--schemaslookup) |
 | A tool answered emptily — is it broken, or is there nothing to find? | [`faults`](#faults) |
 | I edited the build and nothing rebuilt | `--json` → `config.files` |
+| Why did this build do any work at all? | `--json` → `invalidated` |
+| Did my new pattern get a chance to match? | `--json` → `evaluated` |
 
 ## Command line
 
@@ -150,6 +152,25 @@ The buckets, and the distinction between them is the point:
 | `gated` | a count — the source was unchanged, so no render was ever scheduled |
 | `warnings` | everything that went through `logger.warn` this cycle, with its `code` |
 | `faults` | subsystems that reported they **cannot work** — see [Faults](#faults) |
+
+`invalidated` says why the build did anything, which the counts never did —
+`0 rendered` reads the same whether nothing needed doing or something did and
+the engine failed to notice:
+
+| cause | means |
+| --- | --- |
+| `nothing` | the engine looked and there was no work. A finding, not an absence — check `summary.gated` to see how much it looked at |
+| `sources` | these files changed, named in `changed` (capped, with `truncated` when there were more) |
+| `config` | the config or a module it imports moved, so the cache was wiped |
+| `version` | the engine version moved, with `from` and `to` |
+| `clear` | you passed `--clear` |
+
+A wipe outranks changed sources: once the cache goes, every file is a changed
+file and listing them all is noise.
+
+`evaluated` says what each subsystem actually looked at, against what exists —
+`{ assets: { evaluated: 0, of: 397 } }`. A new pattern that never had the
+chance to match anything otherwise looks exactly like a run with nothing to do.
 
 Each report also carries `config`: the files the config stamp spans, and
 whether that coverage is `complete`. The stamp is what makes a config edit

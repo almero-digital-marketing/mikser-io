@@ -536,6 +536,33 @@ export async function findEntities(query) {
     return shim.all().filter(m)
 }
 
+// How many entities match, without materializing any of them.
+//
+// findEntities parses the JSON body of every row it returns, which is the
+// wrong price for a number. A COUNT(*) with the same pushed-down WHERE is one
+// query and no parsing — the difference between asking "how big is the
+// catalog" costing nothing and costing a full scan.
+//
+// Returns null when the query cannot be answered in SQL alone. A residual
+// JS-side clause would require fetching the rows to test them, which is
+// exactly what this exists to avoid, and guessing a number would be worse than
+// admitting there isn't one.
+export function countEntities(query) {
+    if (!db?.isOpen) {
+        const shim = mapStub()
+        if (!shim) return 0
+        if (!query) return shim.all().length
+        const m = typeof query === 'function' ? query : sift(query)
+        return shim.all().filter(m).length
+    }
+    if (!query) return stmtCount.get().c
+
+    const t = siftToSql(query)
+    // A residual matcher means part of the filter never reached SQL.
+    if (residualMatcher(query, t.jsFilter)) return null
+    return db.prepare(`SELECT COUNT(*) AS c FROM mikser_entities ${t.sql}`).get(...t.params).c
+}
+
 // Streaming variant of findEntities. Same query shape, same sift→SQL
 // translation, but yields entities chunk-by-chunk so peak memory is
 // O(chunk × entity) instead of O(corpus × entity).

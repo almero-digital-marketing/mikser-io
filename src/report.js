@@ -109,8 +109,12 @@ export function resetReport() {
     const previous = runtime.state.cycle
     if (previous && !previous.finishedAt) finishCycle()
     runtime.state.cycle = { id: nextCycleId(), startedAt: Date.now(), finishedAt: null }
-    runtime.state.report = { rendered: [], skipped: [], unchanged: [], errors: [], warnings: [], gated: 0 }
+    runtime.state.report = {
+        rendered: [], skipped: [], unchanged: [], errors: [], warnings: [], gated: 0, evaluated: {},
+    }
     runtime.state.renderErrors = []
+    // Per cycle, unlike the wipe: what changed is a fact about THIS build.
+    runtime.state.changed = { ids: [], count: 0 }
 }
 
 // End of a cycle: stamp it, file it, and wake anyone waiting on it.
@@ -136,8 +140,68 @@ function store() {
     // Without this the build everyone looks at first reports cycleId: null.
     runtime.state ??= {}
     runtime.state.cycle ??= { id: 1, startedAt: Date.now(), finishedAt: null }
-    runtime.state.report ??= { rendered: [], skipped: [], unchanged: [], errors: [], warnings: [], gated: 0 }
+    runtime.state.report ??= {
+        rendered: [], skipped: [], unchanged: [], errors: [], warnings: [], gated: 0, evaluated: {},
+    }
+    runtime.state.report.evaluated ??= {}
     return runtime.state.report
+}
+
+// Why this cycle did any work at all.
+//
+// The counts say what happened; they never said what STARTED it. "0 rendered"
+// is the same line whether nothing needed doing, or something needed doing and
+// the engine could not tell — which is the difference between a build you can
+// trust and one you have to reproduce by hand.
+//
+// Two halves, because there are two ways work begins. A WIPE is process-level:
+// the version moved, the config moved, `--clear` was passed, and everything is
+// rebuilt from source. Otherwise it is the sources that changed since last
+// time, which is per cycle.
+//
+// `nothing` is a first-class answer, not an absence. It means the engine
+// looked and there was genuinely no work — which is the one thing an operator
+// most wants distinguished from a build that silently did not notice.
+
+// Set once, by whoever decided to wipe. Not gated on reportWanted: it happens
+// at database open, which may be before a reader has asked for a report, and
+// it is one small object.
+export function reportWipe(cause, detail = {}) {
+    runtime.state ??= {}
+    runtime.state.wipe = { cause, ...detail }
+}
+
+// One source whose bytes moved. The complement of reportGated: between them
+// every file the engine looked at is accounted for.
+export function reportChanged(id) {
+    if (!reportWanted() || !id) return
+    const store = changedStore()
+    store.count++
+    // Capped. On a cold build this is the whole corpus, and the cause already
+    // says so — the list is for the incremental case, where naming the three
+    // files that moved is the entire answer.
+    if (store.ids.length < CHANGED_LIMIT) store.ids.push(id)
+}
+
+const CHANGED_LIMIT = 50
+
+function changedStore() {
+    runtime.state ??= {}
+    runtime.state.changed ??= { ids: [], count: 0 }
+    return runtime.state.changed
+}
+
+// What a subsystem looked at, against what it could have looked at.
+//
+// Generalised from the assets plugin, which already warns when a configured
+// preset matched none of the entities a full cycle evaluated. That reasoning —
+// an incremental cycle only re-evaluates what changed, so matching nothing can
+// be perfectly healthy — is not specific to presets, and neither is the
+// question it answers. "assets evaluated 4 of 397" is the line that tells you
+// instantly that a new pattern never had the chance to match anything.
+export function reportEvaluated(scope, { evaluated, of } = {}) {
+    if (!reportWanted() || !scope) return
+    store().evaluated[scope] = { evaluated: evaluated ?? 0, ...(Number.isFinite(of) ? { of } : {}) }
 }
 
 // An entity whose SOURCE did not change is gated at import and never becomes
@@ -309,6 +373,25 @@ export function renderErrorCount() {
     return errorStore().length
 }
 
+// The cause, and enough detail to act on it.
+//
+// A wipe outranks changed sources: when the cache went, everything is a
+// changed source and saying so is noise. `nothing` is returned rather than
+// omitted, because an absent field reads as "not recorded" and this is a
+// finding.
+function invalidation() {
+    const wipe = runtime.state?.wipe
+    if (wipe) return wipe
+    const { ids, count } = changedStore()
+    if (!count) return { cause: 'nothing' }
+    return {
+        cause: 'sources',
+        changed: ids,
+        count,
+        ...(count > ids.length ? { truncated: count - ids.length } : {}),
+    }
+}
+
 export function buildReport() {
     const report = store()
     const cycle = runtime.state?.cycle
@@ -325,6 +408,10 @@ export function buildReport() {
         // failed build, whatever the other counts say.
         errors: errorStore(),
         warnings: report.warnings,
+        // Why this build did any work — see reportWipe / reportChanged.
+        invalidated: invalidation(),
+        // What each subsystem looked at, against what it could have.
+        ...(Object.keys(report.evaluated ?? {}).length ? { evaluated: report.evaluated } : {}),
         // Which files the config stamp spans.
         //
         // "I edited the build and nothing rebuilt" was only answerable by
@@ -353,6 +440,8 @@ export function buildReport() {
             gated: report.gated,
             warnings: report.warnings.length,
             faults: faults().length,
+            // Sources whose bytes moved this cycle. The complement of `gated`.
+            changed: changedStore().count,
         },
     }
 }

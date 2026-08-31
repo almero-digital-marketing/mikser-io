@@ -44,7 +44,7 @@ import pMap from 'p-map'
 import runtime from './runtime.js'
 import { ACTION } from './constants.js'
 import { checksum as fileChecksum, checksumOf, junkIgnore } from './utils.js'
-import { reportGated } from './report.js'
+import { reportGated, reportChanged } from './report.js'
 import { findById, findEntities, checksumsByCollection } from './catalog.js'
 import { useDatabase } from './database/index.js'
 
@@ -456,6 +456,10 @@ export function useSource(core, options) {
             reportGated()
             return
         }
+        // Past the gate means the bytes are new or different — the complement
+        // of reportGated, so between them every file looked at is accounted
+        // for and "why did this build do anything" has an answer.
+        reportChanged(id)
 
         const base = {
             id,

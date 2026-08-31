@@ -1,3 +1,5 @@
+import { reportEvaluated } from '../report.js'
+import { countEntities } from '../catalog.js'
 import path from 'node:path'
 import { mkdir, writeFile, unlink, rm, readFile, symlink, } from 'fs/promises'
 import { existsSync } from 'node:fs'
@@ -481,6 +483,24 @@ export function assets(options = {}) {
         const { presets } = runtime.state.assets
 
         reportUnmatchedPresets(logger)
+
+        // How much of the catalog this run actually looked at.
+        //
+        // The warning above only fires on a full cycle, because on an
+        // incremental one a healthy preset legitimately matches nothing. That
+        // is correct and it leaves the reverse question unanswered: a NEW
+        // pattern that never had the chance to match anything looks exactly
+        // like a run with nothing to do. `evaluated 4 of 397` answers it
+        // without needing a warning to decide whether to fire.
+        try {
+            // COUNT(*), not a fetch: the denominator is a number, and paying a
+            // full scan and a JSON.parse per row to produce it would make the
+            // diagnostic cost more than the thing it diagnoses.
+            reportEvaluated('assets', {
+                evaluated: matchTally.evaluated,
+                of: countEntities({ collection: { $ne: collection } }),
+            })
+        } catch { /* a count is not worth failing a build over */ }
 
         let revisions = await globby('**/*.md5', { cwd: runtime.options.assetsFolder })
         for (let revision of revisions) {
