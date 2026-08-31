@@ -130,7 +130,12 @@ export function observer(options = {}) {
             } else {
                 if (current) {
                     logger.debug('Observer delete: %s', id)
-                    await deleteEntity(entity)
+                    // `current`, not `entity` — the latter is built inside the
+                    // branch above and is not in scope here, so this threw
+                    // ReferenceError into the surrounding catch and became one
+                    // log line. A record deleted upstream stayed in the
+                    // catalog and went on rendering.
+                    await deleteEntity(current)
                 }
             }
         } catch (err) {
