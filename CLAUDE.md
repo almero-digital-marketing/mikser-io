@@ -233,7 +233,14 @@ brevity.
   - `{ name, options, postprocess, output?, setup?, teardown? }` →
     postprocessor descriptor; stored in `runtime.postprocessors`.
   Strings produce a v9 migration error pointing at the new shape.
-- `manager.js` — file watching (chokidar) and cron scheduling.
+- `manager.js` — file watching (chokidar) and cron scheduling. `watch()`
+  turns file events into SYNC events — it is how a source folder becomes
+  entities, so pointing it at the output folder feeds output back in as
+  input. `watchFolder(folder, handler, options)` is the primitive without
+  that meaning, for a plugin that only needs to know bytes changed; it
+  carries the shared junk filter and `followSymlinks: true`, which is
+  load-bearing because the files plugin serves by symlinking into the
+  output folder.
 - `source.js` — `useSource` codifies the folder-of-files pattern.
 - `tools.js` — tool registry. `registerTool(name, {description,
   inputSchema}, handler)` / `toolNames()` / `toolSchema()` / `invokeTool()`,

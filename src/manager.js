@@ -90,6 +90,33 @@ export async function deletedHook(name, context) {
 // `ignored` and a function is the one form that has stayed stable.
 const ignoreJunk = (filePath) => /[/\\]\./.test(filePath) || junkFilter()(filePath)
 
+// Watch a folder, with mikser's own settings and none of its lifecycle.
+//
+// `watch()` below turns file events into SYNC events — it is how a source
+// folder becomes entities, and pointing it at anything else feeds output back
+// in as input. A plugin that only wants to know when bytes changed needs the
+// watching without the meaning, and was otherwise reaching for chokidar
+// directly: a second copy of a dependency the engine already has, and a second
+// junk filter that would drift from this one.
+//
+// followSymlinks matters more than it looks. The files plugin serves a file by
+// symlinking it from the source folder into the output folder, so a watcher on
+// the output folder that did not follow links would see the link created once
+// and never hear about the file again — every stylesheet edit silently
+// invisible to anything watching what is served.
+export function watchFolder(folder, handler, options = {}) {
+    return chokidar
+        .watch(folder, {
+            interval: 1000,
+            binaryInterval: 3000,
+            ignored: ignoreJunk,
+            ignoreInitial: true,
+            followSymlinks: true,
+            ...options,
+        })
+        .on('all', (event, fullPath) => handler(event, fullPath))
+}
+
 export function watch(name, folder, options = { interval: 1000, binaryInterval: 3000, ignored: ignoreJunk, ignoreInitial: true }) {
     if (runtime.options.watch !== true) return
 
