@@ -2,6 +2,38 @@ import path from 'path'
 import { hash } from 'hasha'
 import _ from 'lodash'
 
+// Where the record came from, when that is knowable.
+//
+// `uri` is optional: an observer reading from an SDK, a local queue or
+// anything without an addressable endpoint has nothing meaningful to put here.
+// The empty string is the established shape for a synthetic entity whose meta
+// IS its content — the same one csv row entities use — and the source sweep
+// scopes on it, so inventing a path like `/7` would be worse than saying
+// nothing.
+function entityUri(base, id) {
+    return base ? `${base}/${id}` : ''
+}
+
+// The origin to register a webhook sync under, or null if there is none.
+//
+// This used to be `new URL(options[name].uri).origin` inline, which made `uri`
+// silently mandatory: leaving it out threw ERR_INVALID_URL out of onLoaded and
+// took the whole build down at startup, with nothing in the message naming the
+// observer or the option responsible. An absent uri is a legitimate config; a
+// malformed one is a mistake, and only the second deserves to stop anything.
+function originOf(uri, observerName, logger) {
+    if (!uri) return null
+    try {
+        return new URL(uri).origin
+    } catch {
+        logger?.warn?.({ code: 'observer-bad-uri' },
+            'Observer [%s] has uri: %j, which is not an absolute URL — so no webhook can be routed to it by '
+            + 'origin. Give it a full URL like https://api.example.com/things, or drop the option if this '
+            + 'observer is not reachable over HTTP.', observerName, uri)
+        return null
+    }
+}
+
 export function observer(options = {}) {
     return ({
         runtime,
@@ -48,7 +80,7 @@ export function observer(options = {}) {
                     recent.add(id)
                     const entity = normalize({
                         id,
-                        uri: `${uri}/${meta.id}`,
+                        uri: entityUri(uri, meta.id),
                         name,
                         collection,
                         type,
@@ -110,7 +142,7 @@ export function observer(options = {}) {
                 const name = path.join(collection, meta.name || meta.id.toString())
                 const entity = normalize({
                     id,
-                    uri: `${uri}/${meta.id}`,
+                    uri: entityUri(uri, meta.id),
                     name,
                     collection,
                     type,
@@ -160,13 +192,15 @@ export function observer(options = {}) {
                 }
             })
 
-            const { origin } = new URL(options[observerName].uri)
-            onSync(origin, async ({ context }) => {
-                if (context.uri) {
-                    logger.debug('Syncing observer: [%s] %s', observerName, context.uri)
-                    return syncEntities(observerName)
-                }
-            })
+            const origin = originOf(options[observerName].uri, observerName, logger)
+            if (origin) {
+                onSync(origin, async ({ context }) => {
+                    if (context.uri) {
+                        logger.debug('Syncing observer: [%s] %s', observerName, context.uri)
+                        return syncEntities(observerName)
+                    }
+                })
+            }
         }
     })
 

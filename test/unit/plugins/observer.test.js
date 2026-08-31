@@ -126,3 +126,51 @@ describe('syncing one record by id', () => {
         assert.deepEqual(ops(h), [])
     })
 })
+
+describe('an observer with no endpoint', () => {
+    // `uri` was effectively mandatory by accident: onLoaded did
+    // `new URL(options[name].uri)` to register a webhook handler, so leaving
+    // it out threw ERR_INVALID_URL and took the build down at startup — with
+    // nothing in the message naming the observer or the option.
+    //
+    // An observer reading from an SDK, a queue or a local file has no
+    // addressable endpoint and should not need to invent one.
+    it('loads without a uri', async () => {
+        const h = createHarness({})
+        observer({ things: { readMany: items({ id: 1, name: 'one' }) } })(h.core)
+        await assert.doesNotReject(() => h.runHook('loaded'))
+    })
+
+    it('still syncs', async () => {
+        const h = setup({ things: { readMany: items({ id: 1, name: 'one' }) } })
+        await h.runHook('import')
+        assert.deepEqual(ops(h), [['create', '/observer/things/1']])
+    })
+
+    it('leaves the entity with no uri rather than inventing a path', async () => {
+        // normalize() drops empty values, so "no uri" is an absent key — the
+        // same shape a csv row entity has, and what the source sweep scopes
+        // on. `/1` would look like a real location and is not one.
+        const h = setup({ things: { readMany: items({ id: 1, name: 'one' }) } })
+        await h.runHook('import')
+        const { entity } = h.journal.at(-1)
+        assert.equal('uri' in entity, false, 'no uri key at all')
+        assert.notEqual(entity.uri, '/1', 'and certainly not a path built from the record id')
+    })
+
+    it('warns about a uri that is set but not a URL, and carries on', async () => {
+        // A missing uri is a choice; a malformed one is a mistake, and only
+        // the second is worth saying anything about.
+        const h = setup({ things: { uri: 'not a url', readMany: items({ id: 1, name: 'one' }) } })
+        await assert.doesNotReject(() => h.runHook('loaded'))
+        assert.ok(h.logs.some(l => l.level === 'warn'), 'said once, not thrown')
+        await h.runHook('import')
+        assert.deepEqual(ops(h), [['create', '/observer/things/1']], 'and the sync still works')
+    })
+
+    it('keeps the record address when a uri IS given', async () => {
+        const h = setup({ things: { uri: URI, readMany: items({ id: 1, name: 'one' }) } })
+        await h.runHook('import')
+        assert.equal(h.journal.at(-1).entity.uri, `${URI}/1`)
+    })
+})

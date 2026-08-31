@@ -1112,6 +1112,17 @@ debris; `isJunkPath(filePath)` asks.
 
 Plugin factories — `yaml()`, `json()`, `frontMatter()`, `assets()`,
 `resources()`, `shares()`, `observer()`, `mapper()`, `commands()`,
+
+`observer({ <name>: { readMany, readOne?, uri?, cron?, collection?, type? } })`
+pulls entities from an external API and keeps the catalog in step with it:
+`readMany` supplies the records, each becomes an entity under
+`/observer/<collection>/<record.id>` with the record as its meta, and anything
+the source no longer returns is deleted. Writes are gated on a checksum of the
+meta, so a frequent cron over unchanged records writes nothing. `readOne` is
+the single-record path a webhook uses. `uri` is OPTIONAL — give it the
+collection's endpoint and mikser can route a webhook to it by origin and record
+where each entity came from; leave it out for a source with no addressable URL,
+and the entities are synthetic, with the record as their whole content.
 `renderHbs()` — are configured rather than called, and live in
 [configuration.md](configuration.md).
 
