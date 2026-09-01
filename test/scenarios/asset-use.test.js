@@ -4,8 +4,15 @@
 // run, or a template naming an extension the preset no longer emits,
 // ships a page full of 404s that the build reports as a success.
 //
-// Every such helper call records its destination on the render track.
-// At finalize the engine checks each one against the output folder.
+// Every such helper call records its destination on the render track. At
+// finalize the engine checks each one against the output folder.
+//
+// This is the half of the check that reads the render track rather than the
+// emitted bytes, so the fixture emits a FEED — references.js scans html and
+// css, which is where the browser-accurate resolution matters, and a url that
+// only ever appears in an xml feed would otherwise go unchecked. Where both
+// checks can see the same file, the output scan wins and this one stays quiet;
+// broken-references.test.js covers that side.
 //
 // Verifies:
 //   1. A helper call whose derivative exists stays silent
@@ -49,13 +56,13 @@ export default async function web({ entity }) {
 const PAGE = '---\nlayout: page\nhref: /index.html\n---\n'
 
 const LAYOUT_REAL =
-    '<!doctype html><body>{{#with (asset "web" "/media/real.jpg")}}<img src="{{url}}">{{/with}}</body>'
+    '<?xml version="1.0"?><feed>{{#with (asset "web" "/media/real.jpg")}}<image>{{url}}</image>{{/with}}</feed>'
 
 // Same page, plus a second asset() call for a source file that does not
 // exist — so no derivative is ever rendered for it.
 const LAYOUT_WITH_GHOST =
-    '<!doctype html><body>{{#with (asset "web" "/media/real.jpg")}}<img src="{{url}}">{{/with}}' +
-    '{{#with (asset "web" "/media/ghost.jpg")}}<img src="{{url}}">{{/with}}</body>'
+    '<?xml version="1.0"?><feed>{{#with (asset "web" "/media/real.jpg")}}<image>{{url}}</image>{{/with}}' +
+    '{{#with (asset "web" "/media/ghost.jpg")}}<image>{{url}}</image>{{/with}}</feed>'
 
 describe('render asset usage checked against the output', () => {
     const workdir = freshWorkdir('asset-use')
@@ -66,7 +73,7 @@ describe('render asset usage checked against the output', () => {
             'mikser.config.js': CONFIG,
             'presets/web.js': WEB_PRESET,
             'documents/index.html': PAGE,
-            'layouts/page.html.hbs': LAYOUT_REAL,
+            'layouts/page.xml.hbs': LAYOUT_REAL,
             'files/media/real.jpg': 'not really a jpeg, the preset only copies it',
         })
     })
@@ -79,7 +86,7 @@ describe('render asset usage checked against the output', () => {
     })
 
     it('warns naming the missing file and the page that linked it', async () => {
-        await writeFile(path.join(workdir, 'layouts/page.html.hbs'), LAYOUT_WITH_GHOST)
+        await writeFile(path.join(workdir, 'layouts/page.xml.hbs'), LAYOUT_WITH_GHOST)
 
         const { code, combined } = await runMikser(workdir)
         assert.equal(code, 0, combined)

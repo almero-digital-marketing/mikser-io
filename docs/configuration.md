@@ -64,6 +64,31 @@ These options are part of `runtime.options` and apply to the engine itself.
 | `server.requestTimeout` | — | number | node default (`300000`) | Milliseconds a single request may take, set on the underlying `http.Server`. Node's 5-minute default is effectively an **upload size limit expressed in seconds** — a large file over a slow link is indistinguishable from a stalled request, so it is cut off and the caller sees a truncated write rather than a readable error. Raised to two hours automatically when any route registers as `streaming` (an upload surface such as `mikser-io-drive`), because Node's default mismeasures exactly those; set this explicitly to override. `0` disables the cap: reasonable on a trusted-network build server, bad facing the internet, where it removes the only bound on how long a client can hold a connection open doing nothing. `headersTimeout` is clamped to stay at or below it. The server is also exposed as `runtime.options.httpServer`. |
 | `url` | `-u, --url <url>` | string | — | Public URL where this mikser is reachable (e.g. `https://blog.me.com`). Validated, trailing slash stripped, stamped on `runtime.options.url`. Read by webhook-capable plugins for push-vs-poll gating (`url.startsWith('https://')`); used by anything that surfaces absolute URLs externally — MCP preview URLs returned to agents, forms share links, email tracking pixels. Plugins that just need internal URLs keep using `runtime.options.port`. |
 
+### `siteRoots`
+
+Which subtrees of the output folder are deployed as their own domain root.
+
+```js
+export default {
+    // out/bg becomes lmed.bg, out/en becomes lmed.info, out/mk becomes lmed.mk
+    siteRoots: ['bg', 'en', 'mk'],
+}
+```
+
+Read only by the broken-reference check. It resolves urls the way a browser
+does, and a browser cannot climb above the origin root — it discards the
+extra `..` and loads the file. Where the site root actually is therefore
+decides whether `../../x.svg` on a given page is correct, merely over-deep,
+or broken.
+
+Default is the output folder itself, which is right for the ordinary case of
+one site per build. Declare this only when a build emits several sites, as a
+per-language deploy does — resolving those against the output root instead
+misses the over-escape entirely and reports the working urls as broken.
+
+Nothing can infer it: it is a fact about where the bytes get deployed, not
+about the bytes.
+
 ## Engine Substrate
 
 The catalog, inverse-ref graph, render snapshot manifest, and per-cycle

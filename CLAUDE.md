@@ -214,6 +214,25 @@ brevity.
   when it looks like one (`'hash' in format`); without that, `asset 'web'
   '/x.jpg'` built `/assets/web/x.[object Object]` — the bug the finalize
   check found on its first run, present since the helper took a format.
+- `references.js` — the OTHER half of the broken-link answer: reads the
+  EMITTED output (html + css) and resolves every `src` / `href` / `poster`
+  / `srcset` / `url()` the way a browser does. Complements
+  `reportMissingAssets`, which reads the render track — that one sees urls
+  that never reach an html file (a feed, a sitemap) and knows the entity;
+  this one sees paths written by hand and can tell BROKEN (resolves to no
+  file) from OVER-DEEP (resolves only because a `..` run was floored at the
+  site root — loads today, breaks one nesting level deeper). Where both can
+  see a file the scan wins and the track check is skipped, so one problem
+  is one warning. Codes: `reference-broken` / `reference-over-deep` plus
+  summaries. `runtime.config.siteRoots` declares which subtrees deploy as
+  their own domain root; it CANNOT be derived — it is a fact about
+  deployment, not about the bytes — and resolving a per-language build
+  against the output root reports every working url as broken. Skips other
+  origins, `data:`, fragments, percent-encoded externals
+  (`https%3A%2F%2F...` in a query param) and unrendered template syntax.
+  Decodes `&quot;` first: a CSS custom property in an inline style is
+  `url(&quot;../x.svg&quot;)`, and left encoded the entity text becomes the
+  path. 434 references over a real site in ~20ms.
 - Postprocess failures are RENDER ERRORS. The dispatcher's catch used to
   log one uncoded `Postprocess error:` line and stop there — exit code 0,
   nothing in `--json` `errors`, `🟢 Mikser completed`. A build missing

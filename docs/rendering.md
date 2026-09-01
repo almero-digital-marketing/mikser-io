@@ -392,7 +392,15 @@ naming the path and the pages that linked it, with a summary under
 deployed into the output as a link resolves normally.
 
 It is a warning, not an error: a build can legitimately link a file that
-some later step supplies. What it removes is the silence.
+some later step supplies, and a missing asset must not stop a dev server.
+What it removes is the silence.
+
+A second check reads the **emitted output** rather than the render track —
+every `src` / `href` / `poster` / `srcset` / CSS `url()` in the html and
+css that shipped, resolved the way a browser resolves it. It covers paths
+written by hand, which no helper ever saw, and it is the only one that can
+see a url which loads solely because the browser floored a `..` run at the
+site root. See [diagnostics](./diagnostics.md#when-mikser-is-silent).
 
 ---
 

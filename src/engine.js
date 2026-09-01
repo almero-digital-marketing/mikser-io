@@ -12,6 +12,7 @@ import { globby } from 'globby'
 import { OPERATION, TASKS } from './constants.js'
 import { changeExtension, formatErrorContext, projectMeta, lookupKeys } from './utils.js'
 import { reportRendered, reportSkipped, reportError, renderErrorCount, emitReport, finishCycle, reportAssetUse, assetUse } from './report.js'
+import { checkReferences } from './references.js'
 import { toolSchemas, invokeTool, toolResultText, toolResultFailed } from './tools.js'
 import { registerBuiltinTools } from './builtin-tools.js'
 import { useDatabase } from './database/index.js'
@@ -89,6 +90,61 @@ function workerSafeOptions(opts) {
     return result
 }
 
+// Warn for anything the EMITTED output points at that is not there.
+//
+// Complements the helper-call check below rather than repeating it: this reads
+// what shipped, so it also sees paths written by hand, and it resolves them the
+// way a browser does, which is the only way to see a url that works solely
+// because a `..` run was floored at the site root.
+//
+// A floored url is not broken today. It is the same markup one level deeper
+// away from being broken, and it means the emitted depth does not match the
+// page — so it is reported separately rather than folded in with the failures.
+//
+// Warn, never fail: a missing asset must not stop a dev server. Both lists
+// carry stable codes into `--json` so a deploy script can decide for itself.
+// Returns the set of broken targets so the helper-call check can skip them.
+async function reportBrokenReferences(logger) {
+    const outputFolder = runtime.options.outputFolder
+    if (!outputFolder || !existsSync(outputFolder)) return new Set()
+
+    const siteRoots = runtime.config?.siteRoots ?? []
+    const { broken, overDeep, checked } = await checkReferences(outputFolder, { siteRoots })
+    if (!checked) return new Set()
+
+    const SHOWN = 10
+    const named = (files) =>
+        files.slice(0, 3).join(', ') + (files.length > 3 ? ` and ${files.length - 3} more` : '')
+
+    for (const { url, target, files } of broken.slice(0, SHOWN)) {
+        logger.warn({ code: 'reference-broken', url, target, files },
+            'Resolves to nothing: %s (from %s) — %s', url, named(files), target)
+    }
+    if (broken.length) {
+        logger.warn({ code: 'reference-broken-summary', broken: broken.length, checked },
+            '%d of %d reference(s) in the output resolve to nothing%s. A URL helper builds the '
+            + 'path rather than looking it up, so these are links to files nothing produced.',
+            broken.length, checked, broken.length > SHOWN ? `, ${SHOWN} shown` : '')
+    }
+
+    for (const { url, target, files } of overDeep.slice(0, SHOWN)) {
+        logger.warn({ code: 'reference-over-deep', url, target, files },
+            'Over-deep, loads only because the browser floors it: %s (from %s) — %s',
+            url, named(files), target)
+    }
+    if (overDeep.length) {
+        logger.warn({ code: 'reference-over-deep-summary', overDeep: overDeep.length, checked },
+            '%d of %d reference(s) climb above the site root and load only because a browser '
+            + 'discards the extra `..`%s. They break as soon as the same markup renders one '
+            + 'level deeper.%s',
+            overDeep.length, checked, overDeep.length > SHOWN ? `, ${SHOWN} shown` : '',
+            siteRoots.length ? '' : ' No siteRoots are declared, so this resolved against the '
+                + 'output root — declare runtime.config.siteRoots if a subtree is deployed as its own domain.')
+    }
+
+    return new Set(broken.map(b => b.target))
+}
+
 // Warn for anything a render linked to that is not in the output.
 //
 // Deliberately phrased as what was OBSERVED. Only entities that rendered this
@@ -96,7 +152,7 @@ function workerSafeOptions(opts) {
 // and says nothing about the rest — the same reasoning the assets plugin
 // already applies to its preset warning, and for the same reason: a warning
 // that overclaims gets filtered, and the filtered-out line is the real one.
-async function reportMissingAssets(logger) {
+async function reportMissingAssets(logger, alreadyReported = new Set()) {
     const used = assetUse()
     if (!used.length) return
     const outputFolder = runtime.options.outputFolder
@@ -105,6 +161,10 @@ async function reportMissingAssets(logger) {
     const missing = []
     for (const [destination, ids] of used) {
         const file = path.join(outputFolder, destination.replace(/^\//, ''))
+        // The output scan resolves the same file the way a browser does and
+        // names the pages that link it, which is strictly more useful. Where
+        // both would fire, one warning is enough.
+        if (alreadyReported.has(destination.replace(/^\//, ''))) continue
         if (!existsSync(file)) missing.push([destination, ids])
     }
     if (!missing.length) return
@@ -1138,7 +1198,8 @@ export async function setup(options) {
         // Checked at the end of the cycle because that is the first moment the
         // answer is stable: derivatives are produced during the cycle, so
         // asking any earlier would report files that were about to appear.
-        await reportMissingAssets(useLogger())
+        const brokenTargets = await reportBrokenReferences(useLogger())
+        await reportMissingAssets(useLogger(), brokenTargets)
 
         // After the cycle, and only under --json. stdout has been kept clear
         // for exactly this (the logger writes to stderr under --json), so the

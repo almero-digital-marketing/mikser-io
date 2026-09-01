@@ -873,10 +873,26 @@ surfaces that turn silence into a statement:
   `resource()` *build* a URL from a naming convention rather than looking
   an entity up, so they cannot fail: a preset that never ran, or a
   template naming an extension the preset no longer emits, yields a
-  well-formed URL to nothing. Every such call is recorded on the render
-  track and checked against the output folder at finalize; what is missing
-  is warned under `asset-missing`, naming the path and the pages that
-  linked it.
+  well-formed URL to nothing. Two checks run at finalize, from different
+  evidence:
+  - **The emitted output**, read back and resolved the way a browser
+    would — `src`, `href`, `poster`, `srcset` and CSS `url()` across
+    html and css. Anything resolving to no file warns under
+    `reference-broken`, naming the url and the pages carrying it. This
+    one sees paths written by hand, not just helper output.
+  - **The render track**, which records every `asset()` / `resource()`
+    call and tests the destination it built. This catches a url that
+    never reaches an html file at all — one emitted into a feed or a
+    sitemap — and warns under `asset-missing`. Where both can see the
+    same file, the output scan reports it and this one stays quiet.
+- **A link that works only by accident** — a url with one `..` too many
+  still loads, because a browser discards a climb above the origin root
+  rather than failing. It is one level of nesting away from a 404, and
+  it means the emitted depth does not match the page. Reported under
+  `reference-over-deep`, separately from the outright failures. Which
+  root to floor at is deployment intent and cannot be derived, so
+  declare it — see `siteRoots` in
+  [configuration](./configuration.md#siteroots).
 
 ## See also
 
