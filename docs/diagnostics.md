@@ -862,6 +862,13 @@ surfaces that turn silence into a statement:
 - **A plugin that appears to do nothing** — `No plugins loaded` with a
   config present is a warning naming the file. A config that fails to
   load now exits non-zero rather than loading as empty.
+- **A postprocess that could not run** — a stage whose external
+  dependency is absent (no chrome for a PDF, no binary for a conversion)
+  reports a fault naming the subsystem, and each page that wanted that
+  output fails as an ordinary render error. The fault says why once; the
+  errors say who, and set the exit code. A missing dependency does not
+  fail the whole build — the HTML is already written and correct — but it
+  does not pass as clean either.
 - **A link to a file nothing produced** — helpers like `asset()` and
   `resource()` *build* a URL from a naming convention rather than looking
   an entity up, so they cannot fail: a preset that never ran, or a

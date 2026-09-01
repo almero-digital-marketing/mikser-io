@@ -561,6 +561,16 @@ Return shapes the dispatcher accepts:
 
 A chain is all-or-nothing. The first stage to throw or return `{success: false}` fails the entry; the dispatcher unlinks every intermediate it produced and the final destination, then re-throws. No partial output leaks.
 
+The renderer's own output (`entity.origin`) is the exception: on success the
+dispatcher unlinks it, on failure it stays. It is the input a retry needs, and
+for a converter it is content in its own right — the HTML of a report whose PDF
+could not be produced.
+
+A failed entry counts as a **render error**: it lands in `errors` under `--json`
+with the failing `postprocessor` named, and sets the exit code. It wrote no
+file, so it has to count the same as a render that threw — otherwise a build
+missing every PDF it was asked for reports success.
+
 ### Execution mode
 
 Postprocess inherits the layout's `task:` setting. `task: worker` routes both render and postprocess through the lazy Piscina pool (right for CPU-heavy stages: PDF, image compose, big MJML compilations). Default INLINE is right for everything else.

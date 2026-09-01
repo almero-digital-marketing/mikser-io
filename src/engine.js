@@ -1060,6 +1060,17 @@ export async function setup(options) {
                         if (!signal.aborted) {
                             await updateEntry({ id, output: { success: false } })
                             logger.error('Postprocess error: %s%s %s', entity.id, formatErrorContext(entity, err, runtime.options), err.message)
+                            // A failed postprocess wrote no file, so it has to
+                            // count the same as a failed render. It did not:
+                            // this line was the whole of it, the exit code
+                            // stayed 0, and `errors` in --json never mentioned
+                            // it — a build with output missing reporting
+                            // success, which is the exact shape of bug the
+                            // rest of this file exists to make impossible.
+                            reportError(entity, err, {
+                                postprocessor: options.postprocessor ?? null,
+                                layout: entity.layout?.id ?? null,
+                            })
                         }
                         logger.debug('Postprocess canceled')
                     }

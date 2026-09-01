@@ -214,6 +214,14 @@ brevity.
   when it looks like one (`'hash' in format`); without that, `asset 'web'
   '/x.jpg'` built `/assets/web/x.[object Object]` — the bug the finalize
   check found on its first run, present since the helper took a format.
+- Postprocess failures are RENDER ERRORS. The dispatcher's catch used to
+  log one uncoded `Postprocess error:` line and stop there — exit code 0,
+  nothing in `--json` `errors`, `🟢 Mikser completed`. A build missing
+  every PDF it was asked for reported success. It now calls `reportError`
+  with the failing `postprocessor`, so a stage that wrote no file counts
+  the same as a render that threw. `entity.origin` is deliberately NOT
+  unlinked on failure (it is on success): a retry needs it as input, and
+  for a converter it is real content.
 - `render.js` / `postprocess.js` — Piscina worker entry points AND the
   default-export functions the INLINE/SERIAL dispatcher calls directly.
   Each receives entity + options + config + state; the WORKER path also
