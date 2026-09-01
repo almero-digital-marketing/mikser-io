@@ -111,6 +111,25 @@ const runtime = {
         if (!this.options?.watch && !this.options?.server) await this.closeDurable?.()
     },
 
+    // A build on request, from a process that is already running.
+    //
+    // start() runs the import hooks once and every cycle after that only
+    // processes what the watcher reported. A forwarded build has to RESCAN:
+    // a client that writes a file and immediately asks can beat the inotify
+    // event, and draining the queue would then build without the change that
+    // prompted the request. Scanning makes it mean what a one-shot means.
+    //
+    // The gate makes the rescan cheap — an unchanged file is a checksum
+    // comparison, not a re-import.
+    async rebuild() {
+        // Its own cycle in the report, like any other — otherwise a forwarded
+        // build's counts are added to whatever the watcher last did.
+        this.resetReport?.()
+        await this.callHooks(this.hooks.import, undefined, 'import')
+        await this.callHooks(this.hooks.imported, undefined, 'imported')
+        await this.process()
+    },
+
     async process() {
         if (this.abortController?.signal.aborted) return
         else if (this.abortController) {

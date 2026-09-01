@@ -1,0 +1,381 @@
+// One engine per working folder.
+//
+// Running `mikser` next to a live `mikser --watch` used to start a second
+// engine on the same folder: two writers, one sqlite catalogue, one output
+// tree, no lock and no warning. WAL keeps the pages intact and does nothing
+// for the logical state — a `--clear` from one process while the other holds
+// the folder produces a cold rebuild reporting nothing rendered, and output
+// that does not match source.
+//
+// The fix is not a lock alone, because a lock only forbids the thing people
+// were doing for a reason. A one-shot build is not faster than the watcher —
+// the watcher has usually already done the work — it is started because
+// PROCESS EXIT IS THE ONLY COMPLETION SIGNAL. Everything else in mikser
+// hot-reloads; nothing else says "the tree is settled, assert against it now".
+//
+// So a second invocation forwards its request to the running instance and
+// wears its result: the instance's log output, the instance's exit code. The
+// caller asked for a build and gets an answer about that build, with nothing
+// new to learn and no watermark to reason about — which matters, because a
+// design that needs discipline from the caller is the one that gets violated.
+//
+// `--standalone` opts out, for when a fresh process IS the point: checking
+// that a cold start works, that startup ordering hides nothing.
+
+import net from 'node:net'
+import { createHash } from 'node:crypto'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { existsSync, unlinkSync } from 'node:fs'
+import { chmod } from 'node:fs/promises'
+
+import runtime from './runtime.js'
+import { onLoaded } from './lifecycle.js'
+import { renderErrorCount } from './report.js'
+
+// Where the endpoint lives.
+//
+// A unix socket rather than a port: no allocation, no auth decision, no
+// network exposure. The obvious home is under the working folder, and it does
+// not work — sun_path caps a socket path at about 107 bytes, and a working
+// folder nested a few levels deep blows through that. It fails as
+// `listen EINVAL`, which is not a phrase that suggests "your path is long",
+// so it would have been diagnosed as forwarding simply not working.
+//
+// So: a short, fixed-length name in the system temp directory, derived from
+// the resolved working folder. One rule, no length to exceed, and it survives
+// an `rm -rf runtime`.
+//
+// The permissions argument survives the move. The socket is chmod 0600 after
+// listen, so it is the owner's alone — /tmp being world-writable buys an
+// attacker the ability to create their own socket, not to talk to this one.
+//
+// Windows has no unix sockets; Node maps this name shape onto a named pipe,
+// which has no such length limit.
+export function socketPath(workingFolder) {
+    const key = createHash('sha1').update(path.resolve(workingFolder ?? '.')).digest('hex').slice(0, 16)
+    return process.platform === 'win32'
+        ? `\\\\.\\pipe\\mikser-${key}`
+        : path.join(tmpdir(), `mikser-${key}.sock`)
+}
+
+// ── protocol ────────────────────────────────────────────────────────────
+//
+// Newline-delimited JSON, one object per line. Deliberately boring: both ends
+// ship together, so there is nothing to negotiate and no version to carry.
+//
+//   → { type: 'build', config, clear }
+//   ← { type: 'log', chunk }        (zero or more, in order)
+//   ← { type: 'done', code }
+//   ← { type: 'refused', reason, detail }
+
+function frame(socket, object) {
+    try { socket.write(JSON.stringify(object) + '\n') } catch { /* peer gone */ }
+}
+
+function readFrames(socket, onFrame) {
+    let buffer = ''
+    socket.on('data', (chunk) => {
+        buffer += chunk.toString()
+        let index
+        while ((index = buffer.indexOf('\n')) >= 0) {
+            const line = buffer.slice(0, index)
+            buffer = buffer.slice(index + 1)
+            if (!line.trim()) continue
+            try { onFrame(JSON.parse(line)) } catch { /* not ours */ }
+        }
+    })
+}
+
+// ── client ──────────────────────────────────────────────────────────────
+
+// Ask the running instance to build, and wear its answer.
+//
+// Returns the exit code to use, or null when there is nobody to ask — in
+// which case the caller proceeds exactly as it always did. Called before
+// setup(), so a forwarded command never pays for importing the config or the
+// plugin graph, which is most of what a one-shot spends its time on.
+export function forward({ workingFolder, config, clear }) {
+    const endpoint = socketPath(workingFolder)
+
+    return new Promise((resolve) => {
+        const socket = net.connect(endpoint)
+        let answered = false
+
+        // Nobody home. A crash leaves the socket file behind, so "connect
+        // failed" has to mean "no instance — clean up and carry on" rather
+        // than a hang: this is the way the pattern usually breaks.
+        socket.on('error', () => {
+            if (answered) return
+            answered = true
+            if (process.platform !== 'win32' && existsSync(endpoint)) {
+                try { unlinkSync(endpoint) } catch { /* another client won the race */ }
+            }
+            resolve(null)
+        })
+
+        socket.on('connect', () => frame(socket, { type: 'build', config, clear }))
+
+        readFrames(socket, (message) => {
+            if (message.type === 'log') {
+                // The instance's output for THIS request, on the stream it
+                // would have used locally.
+                process.stderr.write(message.chunk)
+            } else if (message.type === 'refused') {
+                answered = true
+                process.stderr.write(`mikser: ${message.reason}\n`)
+                if (message.detail) process.stderr.write(`${message.detail}\n`)
+                socket.end()
+                resolve(1)
+            } else if (message.type === 'done') {
+                answered = true
+                socket.end()
+                resolve(message.code ?? 0)
+            }
+        })
+
+        // The instance went away mid-request. Not "success with no output":
+        // the build this was asked about has no known outcome.
+        socket.on('close', () => {
+            if (answered) return
+            answered = true
+            process.stderr.write('mikser: the running instance closed the connection before finishing.\n')
+            resolve(1)
+        })
+    })
+}
+
+// ── server ──────────────────────────────────────────────────────────────
+
+// Requests run one at a time, to completion.
+//
+// Not because the engine could not interleave them, but because "which cycle
+// covers my edit" is the question this whole thing exists to remove. Serialised,
+// a client's answer is about a cycle that started after its request arrived,
+// and the log output during that window belongs to exactly one request.
+let chain = Promise.resolve()
+let server = null
+
+// Tee the process's own output to the client for the duration of its request.
+//
+// The engine logs through pino to stdout/stderr; capturing there rather than
+// adding a log transport means the client sees precisely what it would have
+// seen locally, formatting and all, with no second rendering of the same
+// records to keep in step.
+function captureOutput(onChunk) {
+    const originals = [process.stdout.write, process.stderr.write]
+    const patch = (stream, original) => function (chunk, encoding, callback) {
+        try { onChunk(typeof chunk === 'string' ? chunk : chunk.toString()) } catch { /* client gone */ }
+        return original.call(stream, chunk, encoding, callback)
+    }
+    process.stdout.write = patch(process.stdout, originals[0])
+    process.stderr.write = patch(process.stderr, originals[1])
+    return () => {
+        process.stdout.write = originals[0]
+        process.stderr.write = originals[1]
+    }
+}
+
+// Is the config the client resolved the one this instance is running?
+//
+// The accident this prevents is the one already written down: a command
+// resolving mikser.config.prod.js reaching an instance running the dev config
+// executes against the wrong one, silently. Compared by resolved PATH rather
+// than by content hash — the hash would require the client to import its
+// config, which is most of the startup forwarding exists to skip, and it is
+// not what tells the two apart. Different configs are different files.
+function configMismatch(theirs) {
+    if (!theirs) return null
+    const mine = path.resolve(runtime.options.config ?? 'mikser.config.js')
+    return path.resolve(theirs) === mine ? null : mine
+}
+
+// Has this instance's own config changed under it since it started?
+//
+// The other half of the same question, and the half a client cannot answer.
+// configCoverage lists every local module the config graph pulled in, so a
+// stat over that list catches an edit to an imported module — which a
+// client-side checksum of the entry file would miss entirely.
+async function configStale() {
+    const covered = runtime.options.configCoverage?.files ?? []
+    if (!covered.length) return null
+    const { stat } = await import('node:fs/promises')
+    const stamps = runtime.options.configStamps
+    if (!stamps) {
+        // First call: record, do not judge. Nothing to compare against yet.
+        runtime.options.configStamps = Object.fromEntries(
+            await Promise.all(covered.map(async (file) => {
+                try { return [file, (await stat(file)).mtimeMs] } catch { return [file, 0] }
+            })))
+        return null
+    }
+    for (const file of covered) {
+        let now = 0
+        try { now = (await stat(file)).mtimeMs } catch { /* deleted counts as changed */ }
+        if (stamps[file] !== now) return file
+    }
+    return null
+}
+
+async function serveBuild(socket, request, logger) {
+    const wrongConfig = configMismatch(request.config)
+    if (wrongConfig) {
+        frame(socket, {
+            type: 'refused',
+            reason: `this instance is running ${wrongConfig}, and you asked for ${path.resolve(request.config)}.`,
+            detail: 'Forwarding would build with the wrong config — the accident this refusal exists to prevent. '
+                + 'Stop that instance, or pass --standalone to run your own.',
+        })
+        return
+    }
+
+    const movedFile = await configStale()
+    if (movedFile) {
+        frame(socket, {
+            type: 'refused',
+            reason: `this instance's config changed on disk since it started (${movedFile}).`,
+            detail: 'It is still building with the old one. Restart it, and this command will reach an '
+                + 'instance that matches what you edited.',
+        })
+        return
+    }
+
+    const restore = captureOutput((chunk) => frame(socket, { type: 'log', chunk }))
+    let code = 0
+    try {
+        // Fire the pending debounce rather than waiting it out.
+        //
+        // The 1000ms window exists to INFER that editing has stopped. A client
+        // asking for a build has STATED it, so inference is not needed and the
+        // timer is pure latency. The accumulated events are not discarded by
+        // this: the watcher already wrote them into the journal, so clearing
+        // the timer and building now covers exactly what it would have.
+        clearTimeout(runtime.engine?.processTimeout)
+
+        // RESCAN, not drain.
+        //
+        // A watch cycle processes what the watcher reported. A client that
+        // writes a file and immediately asks for a build can beat the inotify
+        // event, so draining what is already queued would build without the
+        // change that prompted the request — the watermark bug wearing a
+        // different hat. Rescanning makes a forwarded build mean what a
+        // one-shot means, which is what every existing caller assumes.
+        await runtime.rebuild()
+
+        // From the render-error count, NOT from process.exitCode.
+        //
+        // The engine deliberately leaves exitCode alone in watch mode — a
+        // failed render there is a state to fix on the next cycle, not a
+        // reason to tear the watcher down — and the instance is always in
+        // watch or server mode. So the signal a one-shot would have exited
+        // with does not exist here and has to be read from the report, which
+        // is where it came from in the first place.
+        code = renderErrorCount() ? 1 : 0
+    } catch (err) {
+        logger?.error('instance: forwarded build failed — %s', err.message)
+        code = 1
+    } finally {
+        restore()
+    }
+    frame(socket, { type: 'done', code })
+}
+
+// Listen, if this process is one that sticks around.
+//
+// A one-shot build has nothing to offer a client — it is already exiting — so
+// only a watcher or a server publishes an endpoint.
+export function serveInstance() {
+    onLoaded(async () => {
+        if (!runtime.options.watch && !runtime.options.server) return
+        if (runtime.options.standalone) return
+        const logger = runtime.engine?.logger
+        const endpoint = socketPath(runtime.options.workingFolder)
+
+        // A socket left by a crash. Nothing is listening, so removing it is
+        // safe — and a live one would have refused this process's own startup
+        // long before here, in the client check.
+        if (process.platform !== 'win32' && existsSync(endpoint)) {
+            try { unlinkSync(endpoint) } catch { /* nothing to remove */ }
+        }
+        await configStale()   // record the baseline stamps
+
+        server = net.createServer((socket) => {
+            socket.on('error', () => { /* client vanished mid-request */ })
+            readFrames(socket, (request) => {
+                if (request.type !== 'build') return
+                chain = chain.then(() => serveBuild(socket, request, logger)).catch(() => {})
+            })
+        })
+        server.on('error', (err) => {
+            logger?.warn({ code: 'instance-listen-failed' },
+                'Could not open the control socket (%s). Other mikser commands in this folder will start their '
+                + 'own engine instead of talking to this one.', err.message)
+        })
+        server.listen(endpoint, async () => {
+            // The owner's, and nobody else's — the filesystem permission IS
+            // the access decision, which is why this needs no token.
+            if (process.platform !== 'win32') {
+                try { await chmod(endpoint, 0o600) } catch { /* best effort */ }
+            }
+            logger?.info('Instance socket: %s', endpoint)
+        })
+        server.unref?.()
+
+        const close = () => {
+            try { server?.close() } catch { /* already closed */ }
+            if (process.platform !== 'win32' && existsSync(endpoint)) {
+                try { unlinkSync(endpoint) } catch { /* gone */ }
+            }
+        }
+        process.on('exit', close)
+        for (const signal of ['SIGINT', 'SIGTERM']) {
+            process.on(signal, () => { close(); process.exit(0) })
+        }
+    })
+}
+
+// Say so when a private engine is starting in a folder someone else holds.
+//
+// The local counterpart of the rule already written down for deployments —
+// "never run a one-shot mikser command against the deployment" — which existed
+// because there was no alternative. There is one now, so this covers what is
+// left: --standalone, and the report-only runs that stay local by design.
+//
+// A warning rather than a refusal. --standalone is how you deliberately check
+// that a cold start works, and refusing it would take away the escape hatch
+// this design depends on having.
+export async function warnIfHeld({ workingFolder, standalone }) {
+    const endpoint = socketPath(workingFolder)
+    if (process.platform !== 'win32' && !existsSync(endpoint)) return false
+
+    const live = await new Promise((resolve) => {
+        const probe = net.connect(endpoint)
+        const done = (answer) => { try { probe.destroy() } catch { /* already gone */ } resolve(answer) }
+        probe.on('connect', () => done(true))
+        probe.on('error', () => done(false))
+        setTimeout(() => done(false), 250).unref?.()
+    })
+    if (!live) return false
+
+    const logger = runtime.engine?.logger
+    const message = standalone
+        ? 'Another mikser is already running in this folder, and --standalone means this one will not talk to '
+          + 'it. Two engines share the catalogue and the output tree with no lock between them; a --clear from '
+          + 'either is what produces a cold rebuild that renders nothing.'
+        : 'Another mikser is already running in this folder. This command reads and does not write, so it is '
+          + 'safe — but it may see a catalogue mid-cycle.'
+    logger?.warn?.({ code: 'instance-already-running' }, message)
+    return true
+}
+
+// Registered at setup so both halves are wired from one call.
+export function instanceControl() {
+    serveInstance()
+    onLoaded(async () => {
+        if (runtime.options.watch || runtime.options.server) return
+        await warnIfHeld({
+            workingFolder: runtime.options.workingFolder,
+            standalone: Boolean(runtime.options.standalone),
+        })
+    })
+}

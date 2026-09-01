@@ -27,6 +27,7 @@ engine source, the entry point is missing and belongs on this page.
 | Did my schema validate anything at all? | [`schemas.names()`](#schemasnames--schemaslookup) |
 | A tool answered emptily — is it broken, or is there nothing to find? | [`faults`](#faults) |
 | I edited the build and nothing rebuilt | `--json` → `config.files` |
+| Is another mikser already holding this folder? | run any command — it forwards, or says so |
 | Why did this build do any work at all? | `--json` → `invalidated` |
 | Did my new pattern get a chance to match? | `--json` → `evaluated` |
 
@@ -732,6 +733,36 @@ content is clean.
 `mikser-io`'s preview plugin exposes `runtime.options.preview = { store,
 get, stats, config }` — the on-demand render cache, useful for asking
 what has been rendered outside a build.
+
+## One engine per folder
+
+Running `mikser` while `mikser --watch` holds the same folder used to start a
+second engine: two writers over one catalogue and one output tree, with no lock
+and no warning. A `--clear` from either is what produces a cold rebuild that
+reports nothing rendered.
+
+A second invocation now forwards its build to the running instance and wears
+its answer — the instance's log output, the instance's exit code. Nothing to
+learn, and no question about *which* cycle covers your edit: you asked, so the
+answer is about your request. It is also faster, because a forwarded command
+never imports the config or the plugin graph, which is most of what a one-shot
+spends its time on.
+
+Three things it refuses or reports rather than guessing:
+
+- **A different config.** If you resolve `mikser.config.prod.js` and the
+  instance is running `mikser.config.js`, it refuses. Building with the wrong
+  config is the accident this exists to prevent.
+- **A config that moved under the instance.** It stats every file in
+  `config.files` and tells you to restart rather than building with a config
+  you have since edited.
+- **A folder held by someone else.** `--standalone` runs a private engine
+  anyway — for checking that a cold start works — and says the folder is held.
+
+A forwarded build **rescans**; it does not drain what the watcher happened to
+queue. A client that writes a file and immediately asks can beat the file
+event, and draining would then build without the change that prompted the
+request.
 
 ## Faults
 

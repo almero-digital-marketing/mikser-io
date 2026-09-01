@@ -6,6 +6,7 @@ import _ from 'lodash'
 import Piscina from 'piscina'
 import runtime from './runtime.js'
 import { onInitialize, onInitialized, onLoad, onImport, onRender, onCancel, onCancelled, onFinalized, onLoaded, onBeforePostprocess, onPostprocess, postprocessEntities } from './lifecycle.js'
+import { instanceControl } from './instance.js'
 import { useJournal, updateEntry } from './journal.js'
 import { globby } from 'globby'
 import { OPERATION, TASKS } from './constants.js'
@@ -132,10 +133,16 @@ export async function setup(options) {
     // need an agent surface configured when `--verify` does not.
     registerBuiltinTools()
 
+    // One engine per working folder: publish the control socket when this
+    // process is long-running, and warn when a private one starts in a folder
+    // somebody else is already holding.
+    instanceControl()
+
     onInitialize(async () => {
         runtime.engine.commander?.version(packageInfo.version)
             .option('-i --working-folder <folder>', 'set mikser working folder', './')
             .option('-c --config <file>', 'set mikser mikser.config.js location', './mikser.config.js')
+            .option('--standalone', 'run a private engine even if one is already running in this folder')
             .option('-m --mode <mode>', 'set mikser runtime mode', 'development')
             .option('-r --clear', 'clear current state before execution', false)
             .option('-o --output-folder <folder>', 'set mikser output folder relative to working folder', 'out')

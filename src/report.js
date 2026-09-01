@@ -117,6 +117,11 @@ export function resetReport() {
     runtime.state.changed = { ids: [], count: 0 }
 }
 
+// Published on the runtime so runtime.js can start a fresh cycle for a
+// forwarded build without importing this module — runtime.js loads first, and
+// an import here would close the cycle.
+runtime.resetReport = resetReport
+
 // End of a cycle: stamp it, file it, and wake anyone waiting on it.
 export function finishCycle() {
     if (!runtime.state?.cycle || runtime.state.cycle.finishedAt) return

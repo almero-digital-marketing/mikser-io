@@ -15,6 +15,9 @@ export * from './src/lifecycle.js'
 // cache's constraints: main-thread only, so async, so knex, so portable to
 // another engine.
 export * from './src/database/durable.js'
+// One engine per working folder: the control socket a second invocation
+// forwards to, and the guard that says so when it cannot.
+export * from './src/instance.js'
 
 export * from './src/database/index.js'
 export * from './src/journal.js'

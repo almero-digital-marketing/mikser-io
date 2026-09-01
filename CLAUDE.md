@@ -233,6 +233,19 @@ brevity.
   - `{ name, options, postprocess, output?, setup?, teardown? }` →
     postprocessor descriptor; stored in `runtime.postprocessors`.
   Strings produce a v9 migration error pointing at the new shape.
+- `instance.js` — one engine per working folder. A second `mikser` in a
+  folder a watcher holds FORWARDS its build over a unix socket and wears
+  the instance's log output and exit code; `--standalone` opts out and
+  warns. Socket lives in `os.tmpdir()` keyed by a hash of the resolved
+  working folder — NOT under `runtime/`, because sun_path caps a socket
+  path at ~107 bytes and a nested working folder fails as `listen
+  EINVAL`. chmod 0600, so the filesystem permission is the access
+  decision. A forwarded build RESCANS (`runtime.rebuild()`), never
+  drains: a client can beat the inotify event for the file it just
+  wrote. Exit code comes from `renderErrorCount()`, not
+  `process.exitCode` — the engine suppresses that in watch mode by
+  design. Config mismatch is refused by resolved PATH; config drift
+  under a running instance is detected by stat over `configCoverage`.
 - `manager.js` — file watching (chokidar) and cron scheduling. `watch()`
   turns file events into SYNC events — it is how a source folder becomes
   entities, so pointing it at the output folder feeds output back in as
