@@ -113,6 +113,24 @@ Inside a render, a `runtime` object is assembled and passed to all plugins:
 
 Render plugins extend this object further (e.g. `runtime.href`, `runtime.asset`, `runtime.resource`).
 
+`asset(preset, url)` returns the deployed URL of a preset derivative, relative
+to the page asking for it:
+
+```hbs
+<img src="{{ (asset 'web' '/media/hero.jpg').url }}">
+```
+
+The extension comes from the preset — every preset module exports a `format`,
+and the helper uses it, so a template never has to repeat it. Pass a third
+argument to override it, and mikser warns if that contradicts what the preset
+actually produces.
+
+It BUILDS the url rather than looking one up, which is worth knowing: nothing
+it returns has been checked against a file. A preset name nothing declares
+warns once, but a derivative that simply was not generated cannot be detected
+here. Where you have the entity rather than a path, `meta.presets` is the
+looked-up answer (ADR-0011).
+
 ### Logging from templates
 
 The runtime exposes five logger functions — `log` (info), `warn`, `error`, `debug`, `trace` — that route through Mikser's central logger (`useLogger()` is resolved at call time, so progress-bar wrappers in `info` mode are honoured). Each renderer's auto-helper loop picks them up:
