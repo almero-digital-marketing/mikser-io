@@ -1,10 +1,14 @@
 import path from 'node:path'
+import { matchesLibrary } from '../../utils.js'
 
 export function load({ runtime, entity, state, options, track }) {
     runtime.resource = (url) => {
         const { resourceLib } = state.resources
         for (let library in resourceLib) {
-            if (url.match(library)) {
+            // Same matcher the resources plugin uses to decide what to
+            // DOWNLOAD. When these disagreed, this built urls for files the
+            // plugin never fetched.
+            if (matchesLibrary(url, library)) {
                 const { origin } = new URL(url)
                 const name = url.replace(origin, `${resourceLib[library]}`)
                 const relative = url.replace(origin, `${state.resources.resourcesFolder}/${resourceLib[library]}`)

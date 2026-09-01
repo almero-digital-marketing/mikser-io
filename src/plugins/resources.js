@@ -10,6 +10,7 @@ import * as stream from 'stream'
 import { promisify } from 'util'
 import isUrl from 'is-url'
 import map from 'p-map'
+import { matchesLibrary } from '../utils.js'
 
 export function resources(options = {}) {
     return ({
@@ -24,7 +25,6 @@ export function resources(options = {}) {
         checksum,
         trackProgress,
         updateProgress,
-        matchEntity,
         constants: { OPERATION },
     }) => {
     const collection = 'resources'
@@ -52,6 +52,11 @@ export function resources(options = {}) {
 
         for (let library in (options.libraries || [])) {
             let resource = options.libraries[library]
+                // The key is a REGULAR EXPRESSION source, which is what the
+            // escapeStringRegexp call says: you only escape a string you are
+            // about to compile. The render helper has always read it that way
+            // (`url.match(library)`), so a library declared by `url` is a
+            // prefix pattern matching anything under it.
             runtime.state.resources.resourceLib[resource.match || escapeStringRegexp(resource.url)] = library
         }
     })
@@ -66,7 +71,15 @@ export function resources(options = {}) {
                 _.eachDeep(entity.meta, resource => {
                     if (typeof resource == 'string') {
                         for (let library in resourceLib) {
-                            if (matchEntity(resource, library)) {
+                            // Regex, matching the render helper. This used
+                            // matchEntity, which is a GLOB demanding a full
+                            // match — so a key derived from `url` (a bare
+                            // prefix, no trailing wildcard) matched nothing and
+                            // NO url-declared library was ever downloaded. The
+                            // helper still built urls for them, so pages linked
+                            // files nothing fetched and the build stayed green:
+                            // one string read with two incompatible matchers.
+                            if (matchesLibrary(resource, library)) {
                                 resourceMap[entity.id].push({ library, resource, entity })
                             }
                         }

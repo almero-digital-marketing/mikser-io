@@ -214,6 +214,16 @@ brevity.
   when it looks like one (`'hash' in format`); without that, `asset 'web'
   '/x.jpg'` built `/assets/web/x.[object Object]` — the bug the finalize
   check found on its first run, present since the helper took a format.
+- `matchesLibrary` (utils.js) — a resources library key is a REGEX source
+  (`escapeStringRegexp(url)`), and it has two consumers: the plugin's
+  discovery walk, which decides what to DOWNLOAD, and the `resource` render
+  helper, which builds the url. They read the same string with two matchers
+  — discovery used `matchEntity`, a GLOB demanding a full match, so a key
+  derived from `url` (a bare prefix, no trailing wildcard) matched nothing
+  and NO url-declared library was ever fetched, while the helper kept
+  building links to the missing files. Green build, missing images; found
+  when the reference check read the output back. Both now call one function
+  so they cannot drift.
 - `references.js` — the OTHER half of the broken-link answer: reads the
   EMITTED output (html + css) and resolves every `src` / `href` / `poster`
   / `srcset` / `url()` the way a browser does. Complements
