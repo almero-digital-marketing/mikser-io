@@ -756,6 +756,10 @@ Three things it refuses or reports rather than guessing:
 - **A config that moved under the instance.** It stats every file in
   `config.files` and tells you to restart rather than building with a config
   you have since edited.
+- **A second server or watcher.** `mikser --server` and `mikser --watch` ask
+  to *become* the instance, which is not something a running one can do for
+  you — it would have to open a port in your process. They exit 1 and say so,
+  rather than building and leaving nothing on the port.
 - **A folder held by someone else.** `--no-attach` runs a private engine
   anyway — for checking that a cold start works — and says the folder is held.
 
