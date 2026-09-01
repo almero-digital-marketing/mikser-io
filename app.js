@@ -2,7 +2,7 @@
 import path from 'node:path'
 
 import { setup } from './index.js'
-import { forward } from './src/instance.js'
+import { forward, isInstanceLive } from './src/instance.js'
 
 // Before anything is imported or read.
 //
@@ -26,6 +26,12 @@ function locate(argv) {
     }
     const has = (...names) => names.some(n => argv.includes(n) || argv.some(a => names.some(x => a.startsWith(`${x}=`))))
 
+    // Asking to BECOME the instance, rather than asking one for something.
+    // Not forwardable in principle: a running engine cannot open a listener on
+    // someone else's behalf, and forwarding it built, printed "completed" and
+    // exited with nothing on the port.
+    const longRunning = has('--watch', '-w', '--server', '-s')
+
     // What to ask the instance for. Report-only commands go over the same
     // socket as a build: they read, so running them locally never damaged
     // anything, but a catalogue being written by another process is not a
@@ -40,6 +46,7 @@ function locate(argv) {
         : { type: 'build', clear: has('--clear') }
 
     return {
+        longRunning,
         workingFolder: value('--working-folder', '-i') ?? '.',
         config: value('--config', '-c') ?? 'mikser.config.js',
         // Commander's negated form: `attach` is true unless --no-attach said so.
@@ -50,9 +57,25 @@ function locate(argv) {
 
 async function main() {
     const where = locate(process.argv.slice(2))
-    if (where.attach !== false) {
+    const workingFolder = path.resolve(where.workingFolder)
+
+    // A second server or watcher is the hazard this whole surface exists to
+    // remove, and it is the one shape that cannot be answered by forwarding.
+    // So it stops, rather than silently doing something else.
+    if (where.attach !== false && where.longRunning) {
+        if (await isInstanceLive(workingFolder)) {
+            process.stderr.write(
+                'mikser: another mikser is already running in this folder, and a server or watcher cannot be '
+                + 'forwarded to it — it would have to open a port on your behalf.\n'
+                + 'Stop that one, or pass --no-attach to run a second engine here (two engines share the '
+                + 'catalogue and the output tree, with no lock between them).\n')
+            process.exit(1)
+        }
+    }
+
+    if (where.attach !== false && !where.longRunning) {
         const code = await forward({
-            workingFolder: path.resolve(where.workingFolder),
+            workingFolder,
             config: path.resolve(where.workingFolder, where.config),
             request: where.request,
         })

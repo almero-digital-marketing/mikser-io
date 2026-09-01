@@ -149,6 +149,35 @@ export function forward({ workingFolder, config, request }) {
     })
 }
 
+// Is somebody already holding this folder?
+//
+// Used by the commands that cannot be forwarded because they are not requests
+// at all — `--server` and `--watch` ask to BECOME the instance. Forwarding one
+// builds and exits, and the port never opens: the caller asked for a server on
+// 3010, got "completed", and has nothing listening.
+//
+// Same stale-socket rule as forward(): connect-and-fail means nobody is there,
+// never a wait.
+export function isInstanceLive(workingFolder) {
+    const endpoint = socketPath(workingFolder)
+    return new Promise((resolve) => {
+        const probe = net.connect(endpoint)
+        let settled = false
+        const answer = (live) => {
+            if (settled) return
+            settled = true
+            try { probe.destroy() } catch { /* already gone */ }
+            if (!live && process.platform !== 'win32' && existsSync(endpoint)) {
+                try { unlinkSync(endpoint) } catch { /* another client won the race */ }
+            }
+            resolve(live)
+        }
+        probe.on('connect', () => answer(true))
+        probe.on('error', () => answer(false))
+        setTimeout(() => answer(false), 1000).unref?.()
+    })
+}
+
 // ── server ──────────────────────────────────────────────────────────────
 
 // Requests run one at a time, to completion.
@@ -409,10 +438,17 @@ export async function warnIfHeld({ workingFolder, attached }) {
 export function instanceControl() {
     serveInstance()
     onLoaded(async () => {
-        if (runtime.options.watch || runtime.options.server) return
+        // Only --no-attach reaches this now. Everything else either forwarded
+        // (a build, a report) or refused before setup ran (a second server or
+        // watcher), so a process that is still here and not attaching is one
+        // that deliberately opted out — and that is exactly the case worth
+        // saying something about, long-running or not. The earlier gate
+        // skipped watch and server, which excluded `--no-attach --server`:
+        // the very command that puts two engines on one folder.
+        if (runtime.options.attach !== false) return
         await warnIfHeld({
             workingFolder: runtime.options.workingFolder,
-            attached: runtime.options.attach,
+            attached: false,
         })
     })
 }

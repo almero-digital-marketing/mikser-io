@@ -168,6 +168,23 @@ describe('a second invocation forwards to the running one', () => {
         assert.match(combined, /--no-attach/, 'and says how to get a private engine')
     })
 
+    it('refuses a second server rather than forwarding it', async () => {
+        // The bug this replaced: `--server 3010` was treated as a build
+        // request, so the instance built, the client printed "completed" and
+        // exited, and nothing was listening on 3010. A server is not a
+        // request an engine can satisfy on someone's behalf — it has to open
+        // a port in ITS OWN process — so it stops instead.
+        const { code, combined } = await runMikser(workdir, ['--server', '3999'])
+        assert.equal(code, 1, `a server that cannot start must not report success\n${combined}`)
+        assert.match(combined, /cannot be forwarded/)
+        assert.match(combined, /--no-attach/, 'and says how to run one anyway')
+    })
+
+    it('refuses a second watcher for the same reason', async () => {
+        const { code, combined } = await runMikser(workdir, ['--watch'])
+        assert.equal(code, 1, combined)
+    })
+
     it('--no-attach runs its own engine, and says the folder is held', async () => {
         const { code, combined } = await runMikser(workdir, ['--no-attach'])
         assert.equal(code, 0, combined)
