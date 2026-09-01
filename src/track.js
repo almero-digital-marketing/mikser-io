@@ -40,7 +40,7 @@ export function filterKey(filter) {
 // The returned object exposes `partials: Set<string>` and
 // `queries: Array<filter | null>` directly. Consumers iterate either
 // shape; both are owned by the track for the lifetime of the run.
-export function createTrack({ partial = true, query = true, lookup = true, meta = false, consumed = false } = {}) {
+export function createTrack({ partial = true, query = true, lookup = true, meta = false, consumed = false, assets = true } = {}) {
     const track = {}
     if (lookup) {
         // Lookups a TEMPLATE made by name: runtime.href('/contacts'),
@@ -122,6 +122,26 @@ export function createTrack({ partial = true, query = true, lookup = true, meta 
             paths.add(path)
         }
     }
+    if (assets) {
+        // Files a template asked for by URL: a preset derivative, a resource
+        // from a library. Recorded so the engine can check at the end of the
+        // cycle whether the thing being linked to is actually in the output.
+        //
+        // The helpers BUILD these paths — nothing they return has been checked
+        // against a file — so a preset that never ran, or one whose format
+        // changed, produces a perfectly well-formed link to nothing. The page
+        // renders, the build is green, and the image is missing until a person
+        // notices.
+        //
+        // The output-relative destination, not the page-relative url the
+        // helper returns: `../../assets/web/hero.webp` cannot be resolved
+        // without knowing which page asked, and this is the form that maps
+        // straight onto a path under the output folder.
+        const assetRefs = new Set()
+        track.assets = assetRefs
+        track.asset = (destination) => { if (destination) assetRefs.add(destination) }
+    }
+
     if (query) {
         const queries = []
         const queryKeys = new Set()
@@ -282,6 +302,7 @@ export function serializeTrack(track) {
         partials:  track.partials  ? [...track.partials]  : undefined,
         queries:   track.queries   ? [...track.queries]   : undefined,
         metaReads: track.metaReads ? [...track.metaReads] : undefined,
+        assets:    track.assets    ? [...track.assets]    : undefined,
         lookups:   track.lookups   ? [...track.lookups].map(([k, v]) => [k, [...v]]) : undefined,
         consumedReads: track.consumedReads
             ? [...track.consumedReads].map(([k, v]) => [k, [...v]]) : undefined,
@@ -296,6 +317,7 @@ export function mergeTrack(target, data) {
     for (const p of data.partials  ?? []) target.partial?.(p)
     for (const q of data.queries   ?? []) target.query?.(q)
     for (const m of data.metaReads ?? []) target.metaRead?.(m)
+    for (const a of data.assets    ?? []) target.asset?.(a)
     for (const [name, ids] of data.lookups ?? []) target.lookup?.(name, ids)
     for (const [id, paths] of data.consumedReads ?? []) {
         for (const path of paths) target.consumedRead?.(id, path)

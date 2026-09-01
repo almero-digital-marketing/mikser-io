@@ -850,10 +850,11 @@ surfaces that turn silence into a statement:
 - **A pattern or query that matched nothing** — several plugins warn on
   this now (layout patterns, preset matching, null filters). The warnings
   carry stable `code`s in `--json`.
-- **Output that does not match the config** — the config's bytes take
-  part in cache invalidation, so a config change forces a rebuild; but a
-  module the config *imports* does not. If you changed a helper the config
-  pulls in, use `--force`.
+- **Output that does not match the config** — the config's checksum
+  covers the local module graph it imports, not just its own bytes, so
+  editing a helper the config pulls in forces a rebuild the same way
+  editing the config does. A change *outside* that graph — inside an npm
+  dependency — still does not, so use `--force` after upgrading one.
 - **A tool that answers emptily because it is broken** — check
   [`faults`](#faults) before reading an empty result as a fact about the
   site. This is the one case where the answer and the failure are the same
@@ -861,6 +862,14 @@ surfaces that turn silence into a statement:
 - **A plugin that appears to do nothing** — `No plugins loaded` with a
   config present is a warning naming the file. A config that fails to
   load now exits non-zero rather than loading as empty.
+- **A link to a file nothing produced** — helpers like `asset()` and
+  `resource()` *build* a URL from a naming convention rather than looking
+  an entity up, so they cannot fail: a preset that never ran, or a
+  template naming an extension the preset no longer emits, yields a
+  well-formed URL to nothing. Every such call is recorded on the render
+  track and checked against the output folder at finalize; what is missing
+  is warned under `asset-missing`, naming the path and the pages that
+  linked it.
 
 ## See also
 

@@ -15,7 +15,7 @@ import { changeExtension } from '../../utils.js'
 // derivative may simply not have been generated, and this cannot tell.
 // `meta.presets` (ADR-0011) is the looked-up answer where a caller has the
 // entity; this helper exists for the case where they have a path.
-export function load({ runtime, entity, state, options, logger }) {
+export function load({ runtime, entity, state, options, logger, track }) {
     const presets = state?.assets?.presets ?? {}
     const warned = new Set()
     const warnOnce = (key, code, message, ...args) => {
@@ -26,6 +26,15 @@ export function load({ runtime, entity, state, options, logger }) {
 
     runtime.asset = (preset, url, format) => {
         if (url[0] != '/') url = `/${url}`
+
+        // Handlebars appends its own options object to every helper call, so a
+        // two-argument `{{asset 'web' '/media/hero.jpg'}}` arrives here with a
+        // third. Taken as a format it stringifies, and the helper cheerfully
+        // built `hero.[object Object]` — a well-formed link to a file that
+        // could never exist. file.js strips it for the same reason; this one
+        // never did, and nothing noticed until the output check started
+        // looking at what these URLs point at.
+        if (format && typeof format === 'object' && 'hash' in format) format = undefined
 
         const declared = presets[preset]?.format
 
@@ -57,6 +66,11 @@ export function load({ runtime, entity, state, options, logger }) {
         // happened to be rendering.
         const relative = `${state.assets.assetsFolder}/${preset}${effective ? changeExtension(url, effective) : url}`
         const destination = '/' + relative
+        // Recorded so the engine can check at the end of the cycle whether
+        // this file exists. It is the one thing this helper cannot answer for
+        // itself — it takes a path, not an entity, so there is nothing to look
+        // up and the URL is well-formed whether or not anything produced it.
+        track?.asset?.(destination)
         const from = path.dirname(entity.destination || '/')
         return { url: path.relative(from, destination) }
     }

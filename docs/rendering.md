@@ -375,6 +375,25 @@ Generates relative URLs to transformed assets (output of the assets plugin). Ret
 
 The underlying path is: `/{assetsFolder}/{preset}/{path}[.{format}]`
 
+#### Checked against the output
+
+The path is *built* from that convention, not looked up, so the helper
+cannot fail — it returns a well-formed URL whether or not anything ever
+produced the file. A preset that did not run, a source that is not
+matched by the preset's patterns, or a template naming a format the
+preset no longer emits all yield a link to nothing, on a build that
+reports success.
+
+So every `asset()` and `resource()` call records its destination on the
+render track, and at finalize the engine checks each one against the
+output folder. Anything missing is warned under the `asset-missing` code,
+naming the path and the pages that linked it, with a summary under
+`asset-missing-summary`. The check follows symlinks, so an assets folder
+deployed into the output as a link resolves normally.
+
+It is a warning, not an error: a build can legitimately link a file that
+some later step supplies. What it removes is the silence.
+
 ---
 
 ### `render-resource` — CDN Resource Mapping

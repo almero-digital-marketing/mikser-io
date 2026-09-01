@@ -231,6 +231,13 @@ export function assets(options = {}) {
             for (let entityPreset of assetsMap[entityToRender.id] || []) {
                 const entity = _.cloneDeep(entityToRender)
                 entity.preset = presets[entityPreset]
+                // Named in config but with no module in presets/ and no
+                // mikser-io-preset-* package: there is nothing to render with.
+                // Loading already reported this preset ('Preset not found'),
+                // and the finalize check names the links left dangling. A line
+                // per entity here would just be that fact a third time, once
+                // per matched file.
+                if (!entity.preset) continue
                 // Per-preset config options override the preset module's
                 // defaults. Looked up at render time so config edits are
                 // picked up on the next cycle without rebuilding the

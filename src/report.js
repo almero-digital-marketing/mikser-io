@@ -115,6 +115,10 @@ export function resetReport() {
     runtime.state.renderErrors = []
     // Per cycle, unlike the wipe: what changed is a fact about THIS build.
     runtime.state.changed = { ids: [], count: 0 }
+    // Per cycle too: an asset referenced by a page that did not re-render this
+    // time was not re-checked, and claiming otherwise would be the kind of
+    // completeness this codebase keeps having to walk back.
+    runtime.state.assetUse = new Map()
 }
 
 // Published on the runtime so runtime.js can start a fresh cycle for a
@@ -207,6 +211,38 @@ function changedStore() {
 export function reportEvaluated(scope, { evaluated, of } = {}) {
     if (!reportWanted() || !scope) return
     store().evaluated[scope] = { evaluated: evaluated ?? 0, ...(Number.isFinite(of) ? { of } : {}) }
+}
+
+// Files a render linked to, and who linked to them.
+//
+// The URL helpers build paths rather than resolving them, so nothing they hand
+// a template has been checked against a file: a preset that never ran, or one
+// whose format changed under a template still naming the old extension,
+// produces a well-formed link to nothing. The page renders, the build is
+// green, and the image is missing until somebody looks at the site.
+//
+// Keyed by destination with the referencing entities attached, because "this
+// file is missing" is only actionable next to "and these pages point at it".
+//
+// NOT gated on reportWanted(): the check that reads this runs on every build,
+// and gating it would make a broken link visible only to someone who already
+// suspected one.
+export function reportAssetUse(destination, entityId) {
+    if (!destination) return
+    const store = assetUseStore()
+    if (!store.has(destination)) store.set(destination, new Set())
+    if (entityId) store.get(destination).add(entityId)
+}
+
+function assetUseStore() {
+    runtime.state ??= {}
+    runtime.state.assetUse ??= new Map()
+    return runtime.state.assetUse
+}
+
+// Everything referenced this cycle, as [destination, [entity ids]].
+export function assetUse() {
+    return [...assetUseStore()].map(([destination, ids]) => [destination, [...ids]])
 }
 
 // An entity whose SOURCE did not change is gated at import and never becomes

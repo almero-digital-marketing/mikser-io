@@ -200,6 +200,20 @@ brevity.
   of folder names written in the plugin. A hardcoded list misses every
   collection a project registers through `sources()`, which produced 63
   false warnings per build on a real site.
+- `src/plugins/render/asset.js` / `resource.js` — URL helpers that BUILD
+  a path from a naming convention instead of looking an entity up, so
+  they cannot fail: a preset that never ran yields a well-formed link to
+  nothing on a green build. Each records its destination via
+  `track.asset()`; `engine.js` checks the collected set against
+  `outputFolder` in `onFinalized` (`reportAssetUse` / `assetUse` in
+  report.js, `reportMissingAssets` in engine.js), warning under
+  `asset-missing` / `asset-missing-summary`. `existsSync` FOLLOWS
+  symlinks, which is required — the assets folder is deployed into the
+  output as a symlink. Handlebars appends an options object to every
+  helper call, so a trailing optional arg (`format`) must be discarded
+  when it looks like one (`'hash' in format`); without that, `asset 'web'
+  '/x.jpg'` built `/assets/web/x.[object Object]` — the bug the finalize
+  check found on its first run, present since the helper took a format.
 - `render.js` / `postprocess.js` — Piscina worker entry points AND the
   default-export functions the INLINE/SERIAL dispatcher calls directly.
   Each receives entity + options + config + state; the WORKER path also

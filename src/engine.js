@@ -11,7 +11,7 @@ import { useJournal, updateEntry } from './journal.js'
 import { globby } from 'globby'
 import { OPERATION, TASKS } from './constants.js'
 import { changeExtension, formatErrorContext, projectMeta, lookupKeys } from './utils.js'
-import { reportRendered, reportSkipped, reportError, renderErrorCount, emitReport, finishCycle } from './report.js'
+import { reportRendered, reportSkipped, reportError, renderErrorCount, emitReport, finishCycle, reportAssetUse, assetUse } from './report.js'
 import { toolSchemas, invokeTool, toolResultText, toolResultFailed } from './tools.js'
 import { registerBuiltinTools } from './builtin-tools.js'
 import { useDatabase } from './database/index.js'
@@ -87,6 +87,43 @@ function workerSafeOptions(opts) {
         } catch { /* not cloneable — skip */ }
     }
     return result
+}
+
+// Warn for anything a render linked to that is not in the output.
+//
+// Deliberately phrased as what was OBSERVED. Only entities that rendered this
+// cycle recorded anything, so an incremental build checks the pages it built
+// and says nothing about the rest — the same reasoning the assets plugin
+// already applies to its preset warning, and for the same reason: a warning
+// that overclaims gets filtered, and the filtered-out line is the real one.
+async function reportMissingAssets(logger) {
+    const used = assetUse()
+    if (!used.length) return
+    const outputFolder = runtime.options.outputFolder
+    if (!outputFolder) return
+
+    const missing = []
+    for (const [destination, ids] of used) {
+        const file = path.join(outputFolder, destination.replace(/^\//, ''))
+        if (!existsSync(file)) missing.push([destination, ids])
+    }
+    if (!missing.length) return
+
+    // Capped, with the total alongside. One broken preset can be referenced by
+    // every page on the site, and a thousand lines of it buries whatever else
+    // the build said.
+    const SHOWN = 10
+    for (const [destination, ids] of missing.slice(0, SHOWN)) {
+        logger.warn({ code: 'asset-missing', destination, referencedBy: ids },
+            'Linked but not in the output: %s — referenced by %s', destination,
+            ids.slice(0, 3).join(', ') + (ids.length > 3 ? ` and ${ids.length - 3} more` : ''))
+    }
+    logger.warn({ code: 'asset-missing-summary', missing: missing.length, checked: used.length },
+        '%d of %d linked file(s) are not in the output%s. A URL helper builds the path rather than looking it '
+        + 'up, so this is a link to something nothing produced — usually a preset that did not run, or a '
+        + 'template naming an extension the preset no longer emits.',
+        missing.length, used.length,
+        missing.length > SHOWN ? `, ${SHOWN} shown` : '')
 }
 
 // The report-only commands, as functions that RETURN their exit code.
@@ -677,6 +714,15 @@ export async function setup(options) {
                     result = rendered?.output
                     if (rendered?.track) mergeTrack(track, rendered.track)
 
+                    // Which files this entity's template linked to. Harvested
+                    // here because this is the one place that has both the
+                    // track and the entity that produced it — a worker's track
+                    // has just been folded in, so a worker render is covered
+                    // the same as an inline one.
+                    for (const destination of track.assets ?? []) {
+                        reportAssetUse(destination, renderEntity.id)
+                    }
+
                     if (!signal.aborted) {
                         // Meta reads ride on `output`, which is already
                         // free-form JSON on the journal row, rather than in
@@ -1069,6 +1115,19 @@ export async function setup(options) {
         const failed = renderErrorCount()
         if (failed) logger.error('Mikser completed with %d render error%s', failed, failed === 1 ? '' : 's')
         else logger.notice('Mikser completed')
+
+        // Is everything the templates linked to actually there?
+        //
+        // The URL helpers build paths; they do not resolve them. So a preset
+        // that never ran, a library that was not copied, or a template naming
+        // an extension the preset stopped producing all yield a well-formed
+        // link to a file that does not exist — and the only symptom is a
+        // missing image on the deployed site, found by a person.
+        //
+        // Checked at the end of the cycle because that is the first moment the
+        // answer is stable: derivatives are produced during the cycle, so
+        // asking any earlier would report files that were about to appear.
+        await reportMissingAssets(useLogger())
 
         // After the cycle, and only under --json. stdout has been kept clear
         // for exactly this (the logger writes to stderr under --json), so the
