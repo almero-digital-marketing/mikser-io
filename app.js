@@ -24,27 +24,37 @@ function locate(argv) {
         }
         return null
     }
-    const has = (...names) => names.some(n => argv.includes(n))
+    const has = (...names) => names.some(n => argv.includes(n) || argv.some(a => names.some(x => a.startsWith(`${x}=`))))
+
+    // What to ask the instance for. Report-only commands go over the same
+    // socket as a build: they read, so running them locally never damaged
+    // anything, but a catalogue being written by another process is not a
+    // catalogue anyone can answer from — a --verify against a half-finished
+    // cycle reports drift that is not there.
+    const tool = value('--tool')
+    const explain = value('--explain')
+    const request = has('--tools') ? { type: 'report', tools: true, json: has('--json') }
+        : tool                    ? { type: 'report', tool, toolArgs: value('--tool-args'), json: has('--json') }
+        : explain                 ? { type: 'report', explain, json: has('--json') }
+        : has('--verify')         ? { type: 'report', verify: true, json: has('--json') }
+        : { type: 'build', clear: has('--clear') }
+
     return {
         workingFolder: value('--working-folder', '-i') ?? '.',
         config: value('--config', '-c') ?? 'mikser.config.js',
-        clear: has('--clear'),
         // Commander's negated form: `attach` is true unless --no-attach said so.
         attach: has('--no-attach') ? false : true,
-        // Report-only runs read; they do not write the catalogue or the output
-        // tree, and their handlers exit the process themselves. Left local —
-        // the guard in setup() still says an instance is there.
-        reportOnly: has('--tool', '--tools', '--verify', '--explain'),
+        request,
     }
 }
 
 async function main() {
     const where = locate(process.argv.slice(2))
-    if (where.attach !== false && !where.reportOnly) {
+    if (where.attach !== false) {
         const code = await forward({
             workingFolder: path.resolve(where.workingFolder),
             config: path.resolve(where.workingFolder, where.config),
-            clear: where.clear,
+            request: where.request,
         })
         // null means nobody was listening — carry on exactly as before.
         if (code !== null) process.exit(code)

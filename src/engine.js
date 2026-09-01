@@ -89,6 +89,127 @@ function workerSafeOptions(opts) {
     return result
 }
 
+// The report-only commands, as functions that RETURN their exit code.
+//
+// They used to be inline here and call process.exit, which is fine for a
+// process whose only job is to answer one question and stop. It is not fine
+// for the instance that has to answer the same question on behalf of a client
+// and stay alive — and answering it there is the point, because a local run
+// reads a catalogue another process is in the middle of writing.
+//
+// `request` carries the CLIENT's arguments. Reading runtime.options here would
+// answer with the instance's own flags, which are whatever it happened to be
+// started with.
+export async function runReportOnly(request = {}) {
+    const logger = useLogger()
+    const {
+        tools = runtime.options.tools,
+        tool = runtime.options.tool,
+        toolArgs = runtime.options.toolArgs,
+        json = runtime.options.json,
+        explain = runtime.options.explain,
+        verify = runtime.options.verify,
+    } = request
+
+    if (tools) {
+        const schemas = toolSchemas()
+        if (json) {
+            process.stdout.write(JSON.stringify(schemas, null, 2) + '\n')
+        } else if (!schemas.length) {
+            logger.warn('No tools registered. The mcp plugin registers the standard set; '
+                + 'this flag only lists and invokes what is registered.')
+        } else {
+            for (const schema of schemas) {
+                process.stdout.write(`${schema.name}\n    ${String(schema.description).split('\n')[0]}\n`)
+            }
+        }
+        return 0
+    }
+
+    if (tool) {
+        // An empty catalog answers every question with a confident nothing —
+        // `null`, `total: 0`, "no render claims this destination" — all of
+        // which read as "the thing you asked about does not exist" when the
+        // truth is "nothing has been built here yet". Said once, before the
+        // answer, so it cannot be missed.
+        const entityCount = (() => {
+            try {
+                return useDatabase().handle
+                    .prepare('SELECT count(*) AS n FROM mikser_entities').get()?.n ?? 0
+            } catch { return null }
+        })()
+        if (entityCount === 0 && !runtime.manifest?.size?.()) {
+            logger.warn('The catalog and manifest are empty — no build has run in this working '
+                + 'folder. Tools answer from what the last build recorded, so this one will '
+                + 'report nothing found. Run a build first.')
+        }
+
+        let args = {}
+        if (toolArgs) {
+            try {
+                args = JSON.parse(toolArgs)
+            } catch (err) {
+                logger.error('--tool-args is not valid JSON: %s', err.message)
+                return 3
+            }
+        }
+        let result
+        try {
+            result = await invokeTool(tool, args)
+        } catch (err) {
+            logger.error('%s', err.message)
+            return 3
+        }
+        process.stdout.write(toolResultText(result) + '\n')
+        // A tool that reports failure must not exit 0 — an agent reading CLI
+        // output has only the exit code to branch on.
+        return toolResultFailed(result) ? 1 : 0
+    }
+
+    if (explain) {
+        // Exit codes:
+        //   0 — the entity was found and described
+        //   3 — not in the catalog (distinct from --verify's 1/2, which are
+        //       about output drift; "no such entity" is neither clean nor
+        //       corrupt, it is a question that could not be answered)
+        const { explain: explainEntity, formatExplain } = await import('./explain.js')
+        const report = await explainEntity(explain)
+        process.stdout.write((json ? JSON.stringify(report, null, 2) : formatExplain(report)) + '\n')
+        return report.found ? 0 : 3
+    }
+
+    if (verify) {
+        if (!runtime.manifest) {
+            logger.error('Verify: no manifest available — nothing to check against')
+            return 2
+        }
+        const { verdict, missing, mismatched, unverifiable, orphaned, collisions } =
+            await runtime.manifest.verify()
+        const total = runtime.manifest.size()
+
+        for (const e of missing)      logger.error('Missing:    %s (entity %s)', e.destination, e.id)
+        for (const e of mismatched)   logger.error('Mismatched: %s (entity %s)%s', e.destination, e.id,
+            e.writtenBy ? ` — the bytes on disk are ${e.writtenBy}'s` : '')
+        for (const e of unverifiable) logger.warn('No hash:    %s (entity %s)', e.destination, e.id)
+        for (const e of orphaned)     logger.warn('Orphan:     %s', e.path)
+        // Named per destination: "two entities write here" is only actionable
+        // if you know which two.
+        for (const c of collisions)   logger.warn('Collision:  %s ← %s', c.destination, c.entities.join(', '))
+
+        // Level picked from the verdict, because the level IS the marker in
+        // pino-pretty's messageFormat: notice renders 🟢, warn 🟡, error 🔴. A
+        // fixed `notice` prints a green tick next to the word FAIL, which
+        // reads as success at a glance even though the exit code is right.
+        const report = verdict === 'FAIL' ? logger.error : verdict === 'WARN' ? logger.warn : logger.notice
+        report.call(logger,
+            'Verify %s: %d snapshots, %d missing, %d mismatched, %d unverifiable, %d orphaned, %d collisions',
+            verdict, total, missing.length, mismatched.length, unverifiable.length, orphaned.length, collisions.length)
+        return verdict === 'FAIL' ? 2 : verdict === 'WARN' ? 1 : 0
+    }
+
+    return null   // not a report-only request
+}
+
 export async function setup(options) {
     runtime.options.threads = options?.threads !== undefined ? options.threads : 4
     runtime.engine = {
@@ -291,57 +412,8 @@ export async function setup(options) {
         // registry is complete. Nothing is imported, because this exits first,
         // the same way --explain and --verify do.
         if (runtime.options.tools || runtime.options.tool) {
-            if (runtime.options.tools) {
-                const schemas = toolSchemas()
-                if (runtime.options.json) {
-                    process.stdout.write(JSON.stringify(schemas, null, 2) + '\n')
-                } else if (!schemas.length) {
-                    logger.warn('No tools registered. The mcp plugin registers the standard set; '
-                        + 'this flag only lists and invokes what is registered.')
-                } else {
-                    for (const schema of schemas) {
-                        process.stdout.write(`${schema.name}\n    ${String(schema.description).split('\n')[0]}\n`)
-                    }
-                }
-                process.exit(0)
-            }
-            // An empty catalog answers every question with a confident
-            // nothing — `null`, `total: 0`, "no render claims this
-            // destination" — all of which read as "the thing you asked about
-            // does not exist" when the truth is "nothing has been built here
-            // yet". Said once, before the answer, so it cannot be missed.
-            const entityCount = (() => {
-                try {
-                    return useDatabase().handle
-                        .prepare('SELECT count(*) AS n FROM mikser_entities').get()?.n ?? 0
-                } catch { return null }
-            })()
-            if (entityCount === 0 && !runtime.manifest?.size?.()) {
-                logger.warn('The catalog and manifest are empty — no build has run in this working '
-                    + 'folder. Tools answer from what the last build recorded, so this one will '
-                    + 'report nothing found. Run a build first.')
-            }
-
-            let args = {}
-            if (runtime.options.toolArgs) {
-                try {
-                    args = JSON.parse(runtime.options.toolArgs)
-                } catch (err) {
-                    logger.error('--tool-args is not valid JSON: %s', err.message)
-                    process.exit(3)
-                }
-            }
-            let result
-            try {
-                result = await invokeTool(runtime.options.tool, args)
-            } catch (err) {
-                logger.error('%s', err.message)
-                process.exit(3)
-            }
-            process.stdout.write(toolResultText(result) + '\n')
-            // A tool that reports failure must not exit 0 — an agent reading
-            // CLI output has only the exit code to branch on.
-            process.exit(toolResultFailed(result) ? 1 : 0)
+            const code = await runReportOnly()
+            if (code !== null) process.exit(code)
         }
     })
 
@@ -368,58 +440,11 @@ export async function setup(options) {
         //   3 — not in the catalog (distinct from --verify's 1/2, which are
         //       about output drift; "no such entity" is neither clean nor
         //       corrupt, it is a question that could not be answered)
-        if (runtime.options.explain) {
-            const { explain, formatExplain } = await import('./explain.js')
-            const report = await explain(runtime.options.explain)
-            if (runtime.options.json) {
-                process.stdout.write(JSON.stringify(report, null, 2) + '\n')
-            } else {
-                process.stdout.write(formatExplain(report) + '\n')
-            }
-            process.exit(report.found ? 0 : 3)
-        }
-
-        if (runtime.options.explain) {
-            const { explain, formatExplain } = await import('./explain.js')
-            const report = await explain(runtime.options.explain)
-            if (runtime.options.json) {
-                process.stdout.write(JSON.stringify(report, null, 2) + '\n')
-            } else {
-                process.stdout.write(formatExplain(report) + '\n')
-            }
-            process.exit(report.found ? 0 : 3)
-        }
-
-
-        if (runtime.options.verify) {
-            if (!runtime.manifest) {
-                logger.error('Verify: no manifest available — nothing to check against')
-                process.exit(2)
-            }
-            const { verdict, missing, mismatched, unverifiable, orphaned, collisions } =
-                await runtime.manifest.verify()
-            const total = runtime.manifest.size()
-
-            for (const e of missing)      logger.error('Missing:    %s (entity %s)', e.destination, e.id)
-            for (const e of mismatched)   logger.error('Mismatched: %s (entity %s)%s', e.destination, e.id,
-                e.writtenBy ? ` — the bytes on disk are ${e.writtenBy}'s` : '')
-            for (const e of unverifiable) logger.warn('No hash:    %s (entity %s)', e.destination, e.id)
-            for (const e of orphaned)     logger.warn('Orphan:     %s', e.path)
-            // Named per destination: "two entities write here" is only
-            // actionable if you know which two.
-            for (const c of collisions)   logger.warn('Collision:  %s ← %s', c.destination, c.entities.join(', '))
-
-            // Level picked from the verdict, because the level IS the marker
-            // in pino-pretty's messageFormat: notice renders 🟢, warn 🟡,
-            // error 🔴. A fixed `notice` prints a green tick next to the word
-            // FAIL, which reads as success at a glance even though the exit
-            // code is right.
-            const report = verdict === 'FAIL' ? logger.error : verdict === 'WARN' ? logger.warn : logger.notice
-            report.call(logger,
-                'Verify %s: %d snapshots, %d missing, %d mismatched, %d unverifiable, %d orphaned, %d collisions',
-                verdict, total, missing.length, mismatched.length, unverifiable.length, orphaned.length, collisions.length)
-            process.exit(verdict === 'FAIL' ? 2 : verdict === 'WARN' ? 1 : 0)
-        }
+        // The same three commands the instance answers over the socket —
+        // one implementation, so a forwarded --verify cannot disagree with a
+        // local one about what it checked.
+        const code = await runReportOnly()
+        if (code !== null) process.exit(code)
     })
 
     onRender(async (signal) => {

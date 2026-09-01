@@ -759,6 +759,14 @@ Three things it refuses or reports rather than guessing:
 - **A folder held by someone else.** `--no-attach` runs a private engine
   anyway — for checking that a cold start works — and says the folder is held.
 
+`--tool`, `--tools`, `--verify` and `--explain` forward as well, and for a
+different reason than builds do. They only read, so running one locally never
+damaged anything — it just could not be trusted: on a large site a local
+`--verify` reads a catalogue the instance is halfway through writing and
+reports drift that is a cycle in progress. The instance has the settled state
+and the config that produced it. Exit codes cross the socket unchanged, so
+`--explain` still answers 3 for an entity that is not there.
+
 A forwarded build **rescans**; it does not drain what the watcher happened to
 queue. A client that writes a file and immediately asks can beat the file
 event, and draining would then build without the change that prompted the

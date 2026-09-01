@@ -242,7 +242,11 @@ brevity.
   EINVAL`. chmod 0600, so the filesystem permission is the access
   decision. A forwarded build RESCANS (`runtime.rebuild()`), never
   drains: a client can beat the inotify event for the file it just
-  wrote. Exit code comes from `renderErrorCount()`, not
+  wrote. Report-only commands (`--tool`, `--tools`, `--verify`,
+  `--explain`) forward too — they read, so a local run damaged nothing,
+  but a catalogue another process is mid-write in is not one anyone can
+  answer from. `runReportOnly()` in engine.js is the one implementation
+  both paths call. Exit code comes from `renderErrorCount()`, not
   `process.exitCode` — the engine suppresses that in watch mode by
   design. Config mismatch is refused by resolved PATH; config drift
   under a running instance is detected by stat over `configCoverage`.

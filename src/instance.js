@@ -34,6 +34,7 @@ import { chmod } from 'node:fs/promises'
 import runtime from './runtime.js'
 import { onLoaded } from './lifecycle.js'
 import { renderErrorCount } from './report.js'
+import { runReportOnly } from './engine.js'
 
 // Where the endpoint lives.
 //
@@ -66,7 +67,8 @@ export function socketPath(workingFolder) {
 // Newline-delimited JSON, one object per line. Deliberately boring: both ends
 // ship together, so there is nothing to negotiate and no version to carry.
 //
-//   → { type: 'build', config, clear }
+//   → { type: 'build',  config, clear }
+//   → { type: 'report', config, tool, tools, toolArgs, explain, verify, json }
 //   ← { type: 'log', chunk }        (zero or more, in order)
 //   ← { type: 'done', code }
 //   ← { type: 'refused', reason, detail }
@@ -97,7 +99,7 @@ function readFrames(socket, onFrame) {
 // which case the caller proceeds exactly as it always did. Called before
 // setup(), so a forwarded command never pays for importing the config or the
 // plugin graph, which is most of what a one-shot spends its time on.
-export function forward({ workingFolder, config, clear }) {
+export function forward({ workingFolder, config, request }) {
     const endpoint = socketPath(workingFolder)
 
     return new Promise((resolve) => {
@@ -116,7 +118,7 @@ export function forward({ workingFolder, config, clear }) {
             resolve(null)
         })
 
-        socket.on('connect', () => frame(socket, { type: 'build', config, clear }))
+        socket.on('connect', () => frame(socket, { ...request, config }))
 
         readFrames(socket, (message) => {
             if (message.type === 'log') {
@@ -219,29 +221,50 @@ async function configStale() {
     return null
 }
 
+// Report-only commands, answered from the live catalogue.
+//
+// These read; they do not write, so running them locally was safe for the
+// FILES. It was not safe for the ANSWER. A local --verify at ten thousand
+// pages reads a catalogue the instance is in the middle of writing and reports
+// drift that is a half-finished cycle, and a local --tool answers from
+// whatever the last build left rather than from what is true now.
+//
+// The instance has the settled state and the config that produced it, so it is
+// the only process that can answer correctly. Same guards as a build: wrong
+// config refuses, drifted config refuses.
+async function serveReport(socket, request, logger) {
+    const restore = captureOutput((chunk) => frame(socket, { type: 'log', chunk }))
+    let code = 0
+    try {
+        code = await runReportOnly(request) ?? 0
+    } catch (err) {
+        logger?.error('instance: forwarded report failed — %s', err.message)
+        code = 3
+    } finally {
+        restore()
+    }
+    frame(socket, { type: 'done', code })
+}
+
+function refuseConfig(socket, request, wrongConfig) {
+    frame(socket, {
+        type: 'refused',
+        reason: `this instance is running ${wrongConfig}, and you asked for ${path.resolve(request.config)}.`,
+        detail: 'Answering would use the wrong config — the accident this refusal exists to prevent. '
+            + 'Stop that instance, or pass --no-attach to run your own.',
+    })
+}
+
+function refuseStale(socket, movedFile) {
+    frame(socket, {
+        type: 'refused',
+        reason: `this instance's config changed on disk since it started (${movedFile}).`,
+        detail: 'It is still running the old one. Restart it, and this command will reach an instance that '
+            + 'matches what you edited.',
+    })
+}
+
 async function serveBuild(socket, request, logger) {
-    const wrongConfig = configMismatch(request.config)
-    if (wrongConfig) {
-        frame(socket, {
-            type: 'refused',
-            reason: `this instance is running ${wrongConfig}, and you asked for ${path.resolve(request.config)}.`,
-            detail: 'Forwarding would build with the wrong config — the accident this refusal exists to prevent. '
-                + 'Stop that instance, or pass --no-attach to run your own.',
-        })
-        return
-    }
-
-    const movedFile = await configStale()
-    if (movedFile) {
-        frame(socket, {
-            type: 'refused',
-            reason: `this instance's config changed on disk since it started (${movedFile}).`,
-            detail: 'It is still building with the old one. Restart it, and this command will reach an '
-                + 'instance that matches what you edited.',
-        })
-        return
-    }
-
     const restore = captureOutput((chunk) => frame(socket, { type: 'log', chunk }))
     let code = 0
     try {
@@ -304,8 +327,20 @@ export function serveInstance() {
         server = net.createServer((socket) => {
             socket.on('error', () => { /* client vanished mid-request */ })
             readFrames(socket, (request) => {
-                if (request.type !== 'build') return
-                chain = chain.then(() => serveBuild(socket, request, logger)).catch(() => {})
+                if (request.type !== 'build' && request.type !== 'report') return
+                chain = chain.then(async () => {
+                    // Both kinds answer for the client's config, not the
+                    // instance's — a report against the wrong config is the
+                    // original incident, and it is wrong whether or not it
+                    // writes anything.
+                    const wrongConfig = configMismatch(request.config)
+                    if (wrongConfig) return refuseConfig(socket, request, wrongConfig)
+                    const movedFile = await configStale()
+                    if (movedFile) return refuseStale(socket, movedFile)
+                    return request.type === 'build'
+                        ? serveBuild(socket, request, logger)
+                        : serveReport(socket, request, logger)
+                }).catch(() => {})
             })
         })
         server.on('error', (err) => {
