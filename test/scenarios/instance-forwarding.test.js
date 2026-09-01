@@ -136,11 +136,11 @@ describe('a second invocation forwards to the running one', () => {
         const { code, combined } = await runMikser(workdir, ['-c', 'mikser.config.prod.js'])
         assert.equal(code, 1)
         assert.match(combined, /this instance is running/)
-        assert.match(combined, /--standalone/, 'and says how to get a private engine')
+        assert.match(combined, /--no-attach/, 'and says how to get a private engine')
     })
 
-    it('--standalone runs its own engine, and says the folder is held', async () => {
-        const { code, combined } = await runMikser(workdir, ['--standalone'])
+    it('--no-attach runs its own engine, and says the folder is held', async () => {
+        const { code, combined } = await runMikser(workdir, ['--no-attach'])
         assert.equal(code, 0, combined)
         assert.match(combined, /Another mikser is already running/)
     })

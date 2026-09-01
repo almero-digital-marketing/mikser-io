@@ -756,7 +756,7 @@ Three things it refuses or reports rather than guessing:
 - **A config that moved under the instance.** It stats every file in
   `config.files` and tells you to restart rather than building with a config
   you have since edited.
-- **A folder held by someone else.** `--standalone` runs a private engine
+- **A folder held by someone else.** `--no-attach` runs a private engine
   anyway — for checking that a cold start works — and says the folder is held.
 
 A forwarded build **rescans**; it does not drain what the watcher happened to

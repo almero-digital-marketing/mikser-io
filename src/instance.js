@@ -19,8 +19,10 @@
 // new to learn and no watermark to reason about — which matters, because a
 // design that needs discipline from the caller is the one that gets violated.
 //
-// `--standalone` opts out, for when a fresh process IS the point: checking
-// that a cold start works, that startup ordering hides nothing.
+// `--no-attach` opts out, for when a fresh process IS the point: checking that
+// a cold start works, that startup ordering hides nothing. Named for what it
+// switches off rather than for a property of the process — the default is to
+// attach, and the flag should say which behaviour is being declined.
 
 import net from 'node:net'
 import { createHash } from 'node:crypto'
@@ -224,7 +226,7 @@ async function serveBuild(socket, request, logger) {
             type: 'refused',
             reason: `this instance is running ${wrongConfig}, and you asked for ${path.resolve(request.config)}.`,
             detail: 'Forwarding would build with the wrong config — the accident this refusal exists to prevent. '
-                + 'Stop that instance, or pass --standalone to run your own.',
+                + 'Stop that instance, or pass --no-attach to run your own.',
         })
         return
     }
@@ -287,7 +289,7 @@ async function serveBuild(socket, request, logger) {
 export function serveInstance() {
     onLoaded(async () => {
         if (!runtime.options.watch && !runtime.options.server) return
-        if (runtime.options.standalone) return
+        if (runtime.options.attach === false) return
         const logger = runtime.engine?.logger
         const endpoint = socketPath(runtime.options.workingFolder)
 
@@ -339,12 +341,12 @@ export function serveInstance() {
 // The local counterpart of the rule already written down for deployments —
 // "never run a one-shot mikser command against the deployment" — which existed
 // because there was no alternative. There is one now, so this covers what is
-// left: --standalone, and the report-only runs that stay local by design.
+// left: --no-attach, and the report-only runs that stay local by design.
 //
-// A warning rather than a refusal. --standalone is how you deliberately check
+// A warning rather than a refusal. --no-attach is how you deliberately check
 // that a cold start works, and refusing it would take away the escape hatch
 // this design depends on having.
-export async function warnIfHeld({ workingFolder, standalone }) {
+export async function warnIfHeld({ workingFolder, attached }) {
     const endpoint = socketPath(workingFolder)
     if (process.platform !== 'win32' && !existsSync(endpoint)) return false
 
@@ -358,8 +360,8 @@ export async function warnIfHeld({ workingFolder, standalone }) {
     if (!live) return false
 
     const logger = runtime.engine?.logger
-    const message = standalone
-        ? 'Another mikser is already running in this folder, and --standalone means this one will not talk to '
+    const message = attached === false
+        ? 'Another mikser is already running in this folder, and --no-attach means this one will not talk to '
           + 'it. Two engines share the catalogue and the output tree with no lock between them; a --clear from '
           + 'either is what produces a cold rebuild that renders nothing.'
         : 'Another mikser is already running in this folder. This command reads and does not write, so it is '
@@ -375,7 +377,7 @@ export function instanceControl() {
         if (runtime.options.watch || runtime.options.server) return
         await warnIfHeld({
             workingFolder: runtime.options.workingFolder,
-            standalone: Boolean(runtime.options.standalone),
+            attached: runtime.options.attach,
         })
     })
 }

@@ -29,7 +29,8 @@ function locate(argv) {
         workingFolder: value('--working-folder', '-i') ?? '.',
         config: value('--config', '-c') ?? 'mikser.config.js',
         clear: has('--clear'),
-        standalone: has('--standalone'),
+        // Commander's negated form: `attach` is true unless --no-attach said so.
+        attach: has('--no-attach') ? false : true,
         // Report-only runs read; they do not write the catalogue or the output
         // tree, and their handlers exit the process themselves. Left local —
         // the guard in setup() still says an instance is there.
@@ -39,7 +40,7 @@ function locate(argv) {
 
 async function main() {
     const where = locate(process.argv.slice(2))
-    if (!where.standalone && !where.reportOnly) {
+    if (where.attach !== false && !where.reportOnly) {
         const code = await forward({
             workingFolder: path.resolve(where.workingFolder),
             config: path.resolve(where.workingFolder, where.config),
