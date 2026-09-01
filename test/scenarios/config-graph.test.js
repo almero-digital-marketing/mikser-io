@@ -7,7 +7,7 @@
 // that processes every asset invalidated nothing — on a green build, with the
 // old output left in place.
 //
-// Reported from lmed-web, where widening an assets preset in an imported
+// Reported from a production site, where widening an assets preset in an imported
 // module silently did nothing and three 2 MB PNGs kept shipping unprocessed.
 
 import { describe, it, after, before } from 'node:test'

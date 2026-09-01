@@ -72,7 +72,7 @@ function warnIfUntrackable(options, resolved, logger) {
     //
     // The first version of this hardcoded five content folders, and a project
     // registering its own collections through sources() has more than five. On
-    // lmed that meant 63 warnings per build, one for every stylesheet and
+    // one real site that meant 63 warnings per build, one for every stylesheet and
     // script, all of them tracked correctly and every one of them saying the
     // opposite. Which is worse than not warning: 63 spurious lines a build
     // teaches you to filter the channel, and the filtered-out line is the real

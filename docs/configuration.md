@@ -70,7 +70,7 @@ Which subtrees of the output folder are deployed as their own domain root.
 
 ```js
 export default {
-    // out/bg becomes lmed.bg, out/en becomes lmed.info, out/mk becomes lmed.mk
+    // out/bg, out/en and out/mk each deploy to their own domain
     siteRoots: ['bg', 'en', 'mk'],
 }
 ```

@@ -89,8 +89,8 @@ describe('resolveUrl', () => {
 })
 
 describe('siteRootFor', () => {
-    // lmed emits one subtree per language and deploys each as its own domain
-    // root, so out/bg is the site root and every url carries one extra `..`
+    // A build emitting one subtree per language, each deployed to its own
+    // domain, makes out/bg the site root — so every url carries one extra `..`
     // for the language segment. Resolving against the output root would miss
     // the over-escape entirely and call the working urls broken.
     const roots = ['bg', 'en', 'mk']

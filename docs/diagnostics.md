@@ -231,7 +231,7 @@ the whole question:
 ```json
 { "destination": "/index.html", "reason": "query-matched",
   "matched": { "filter": { "id": { "$regex": "^/documents/devices/" } },
-               "by": "/documents/devices/hera.md" } }
+               "by": "/documents/devices/model-a.md" } }
 ```
 
 A `matched.filter` of `null` is a different statement: the page's predicate

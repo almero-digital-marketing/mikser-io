@@ -122,12 +122,12 @@ export function resolveUrl(pageDir, url, { root = '' } = {}) {
 
 // Which declared site root a file belongs to.
 //
-// lmed emits one subtree per language and deploys each as its own domain root
-// (out/bg becomes lmed.bg), so the site root is out/<lang>/ and every url
-// carries one extra `..` for the language segment that the browser then floors.
-// Resolving against the output root instead would miss the over-escape entirely
-// and report working urls as broken. Nothing can derive this — it is deployment
-// intent — so it is declared, and the default is the output root itself.
+// A build can emit one subtree per language and deploy each as its own domain
+// root, which puts the site root at out/<lang>/ rather than at out/. Every url
+// then carries one extra `..` for the language segment, which the browser
+// floors — so resolving against the output root would miss the over-escape
+// entirely and report the working urls as broken. Nothing can derive this: it
+// is deployment intent, so it is declared, and the default is the output root.
 export function siteRootFor(relativeFile, roots) {
     let best = ''
     for (const root of roots) {

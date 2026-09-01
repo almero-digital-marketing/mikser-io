@@ -12,7 +12,7 @@ import {
     reachOf, actingRole, rolesIn, describeAuthority, explainRefusal, registerCapability,
 } from '../../src/roles.js'
 
-// lmed's real shape: widening tiers built by readWrite(...).
+// A real deployment's shape: widening tiers built by readWrite(...).
 const rw = (...names) => names.flatMap(n => [`drive:${n}`, `drive:${n}:write`])
 const CATALOGUE = {
     editors: rw('documents', 'media'),
