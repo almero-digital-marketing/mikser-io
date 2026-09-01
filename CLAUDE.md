@@ -224,6 +224,22 @@ brevity.
   building links to the missing files. Green build, missing images; found
   when the reference check read the output back. Both now call one function
   so they cannot drift.
+- `siteRelativeUrl` / `siteRootFor` (utils.js) — every url helper (`asset`,
+  `href`, `resource`) builds an output-root absolute destination and
+  relativises it from the page. With one site per build the output folder IS
+  the deployed root and that is right; with several it is not, and each url
+  carries an extra `..` for the site segment that a browser FLOORS rather
+  than failing on — so it works, at every depth, and nothing says the base is
+  wrong. `runtime.config.siteRoots` declares the deployable subtrees and is
+  copied onto `runtime.options` in the engine's onLoad, because the helpers
+  run in render workers which never see `runtime.config`. Three cases and the
+  third is the reason it is not a one-liner: a target OUTSIDE every root is a
+  shared asset and is addressed inside the page's own root (the case that was
+  wrong); a target in the SAME root is already correct; a target in a
+  DIFFERENT root is a cross-site link that no relative path can reach on a
+  per-domain deploy, so it is left alone and the reference check reports it
+  rather than this inventing a path. Nothing declared → `''` → byte-identical
+  output, which is the compatibility guarantee.
 - `references.js` — the OTHER half of the broken-link answer: reads the
   EMITTED output (html + css) and resolves every `src` / `href` / `poster`
   / `srcset` / `url()` the way a browser does. Complements

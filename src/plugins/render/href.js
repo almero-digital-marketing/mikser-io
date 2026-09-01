@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { siteRelativeUrl } from '../../utils.js'
 
 export function load({ entity, runtime, options }) {
     const { clear } = options
@@ -19,16 +20,14 @@ export function load({ entity, runtime, options }) {
 
         let found = runtime.hrefLang(href)
         if (!found) {
-            const from = path.dirname(entity.destination || '/')
-            return { url: path.relative(from, href) }
+            return { url: siteRelativeUrl(entity.destination, href, options?.siteRoots) }
         } else {
             if (!found.id) {
                 found = found[lang]
             }
             if (found?.destination) {
                 const destination = clear ? found.destination.replace('index.html', '') : found.destination
-                const from = path.dirname(entity.destination || '/')
-                found.url = path.relative(from, destination)
+                found.url = siteRelativeUrl(entity.destination, destination, options?.siteRoots)
             }
             return found
         }

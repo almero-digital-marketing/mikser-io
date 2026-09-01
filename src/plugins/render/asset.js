@@ -1,6 +1,6 @@
 import path from 'node:path'
 
-import { changeExtension } from '../../utils.js'
+import { changeExtension, siteRelativeUrl } from '../../utils.js'
 
 // `{{asset 'web' '/media/hero.jpg'}}` — the deployed URL of a preset
 // derivative, relative to the page asking for it.
@@ -71,8 +71,10 @@ export function load({ runtime, entity, state, options, logger, track }) {
         // itself — it takes a path, not an entity, so there is nothing to look
         // up and the URL is well-formed whether or not anything produced it.
         track?.asset?.(destination)
-        const from = path.dirname(entity.destination || '/')
-        return { url: path.relative(from, destination) }
+        // Resolved within the site this page belongs to, not against the
+        // output root — see siteRelativeUrl. With no siteRoots declared the two
+        // are the same folder and the url is byte-identical.
+        return { url: siteRelativeUrl(entity.destination, destination, options?.siteRoots) }
     }
 }
 

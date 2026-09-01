@@ -887,12 +887,16 @@ surfaces that turn silence into a statement:
     same file, the output scan reports it and this one stays quiet.
 - **A link that works only by accident** — a url with one `..` too many
   still loads, because a browser discards a climb above the origin root
-  rather than failing. It is one level of nesting away from a 404, and
-  it means the emitted depth does not match the page. Reported under
-  `reference-over-deep`, separately from the outright failures. Which
-  root to floor at is deployment intent and cannot be derived, so
-  declare it — see `siteRoots` in
-  [configuration](./configuration.md#siteroots).
+  rather than failing. Reported under `reference-over-deep`, separately
+  from the outright failures, and grouped by how far each climbed:
+  - **One url, or several climbing different distances** — each is a
+    latent 404, working today and broken as soon as the same markup
+    renders one level deeper.
+  - **Every url climbing the same distance** — not N problems but one
+    base that is off by a constant, reported once and flagged
+    `structural` in `--json`. The urls work at every depth. Usually it
+    means `siteRoots` is undeclared for a build that emits several
+    sites; see [configuration](./configuration.md#siteroots).
 
 ## See also
 

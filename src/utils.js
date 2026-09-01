@@ -1343,3 +1343,50 @@ export function matchesLibrary(value, pattern) {
     }
     return libraryPatterns.get(pattern).test(value)
 }
+
+// Which declared site root a path belongs to.
+//
+// A build can emit one subtree per language and deploy each as its own domain
+// root, which puts the site root at out/<lang>/ rather than at out/. Nothing
+// can derive that — it is a fact about where the bytes get deployed, not about
+// the bytes — so it is declared as `siteRoots` and the default is the output
+// root itself. Accepts a path with or without a leading slash, because an
+// entity destination has one and an output-relative file path does not.
+export function siteRootFor(file, roots = []) {
+    const relative = String(file ?? '').replace(/^\/+/, '')
+    let best = ''
+    for (const root of roots) {
+        if (!root) continue
+        if (relative.startsWith(`${root}/`) && root.length > best.length) best = root
+    }
+    return best
+}
+
+// A page-relative url from one output destination to another, addressed within
+// the site the page belongs to.
+//
+// Both are output-root absolute (`/bg/aparati/index.html`, `/derived/x.webp`),
+// which is the only shape the engine has. With one site per build that is also
+// the deployed root and this is a plain path.relative. With several, it is not:
+// out/bg IS the domain root, so a url computed against out/ carries one extra
+// `..` for the language segment. The browser floors that rather than failing,
+// which is why it worked and why nothing said so.
+//
+// Three cases, and the middle one is the reason this is not a one-liner:
+//
+//   target outside every root   a shared asset. It has to be reachable from
+//                               inside this page's site, so it is addressed
+//                               there — this is the case that was wrong.
+//   target in the same root     already correct; a plain relative path.
+//   target in a DIFFERENT root  a cross-site link. On a per-domain deploy the
+//                               other site is another origin and no relative
+//                               path reaches it. Left as it was, so the
+//                               reference check reports it broken instead of
+//                               this silently inventing a path that is not.
+export function siteRelativeUrl(pageDestination, target, siteRoots = []) {
+    const from = path.dirname(pageDestination || '/')
+    const pageRoot = siteRootFor(pageDestination, siteRoots)
+    if (!pageRoot) return path.relative(from, target)
+    if (siteRootFor(target, siteRoots)) return path.relative(from, target)
+    return path.relative(from, path.join('/', pageRoot, target))
+}

@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { matchesLibrary } from '../../utils.js'
+import { matchesLibrary, siteRelativeUrl } from '../../utils.js'
 
 export function load({ runtime, entity, state, options, track }) {
     runtime.resource = (url) => {
@@ -17,8 +17,7 @@ export function load({ runtime, entity, state, options, track }) {
                 // than resolving one, so a library that was never copied
                 // yields a link to nothing on a green build.
                 track?.asset?.(destination)
-                const from = path.dirname(entity.destination || '/')
-                return { url: path.relative(from, destination), name }
+                return { url: siteRelativeUrl(entity.destination, destination, options?.siteRoots), name }
             }
         }
     }

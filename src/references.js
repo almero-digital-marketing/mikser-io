@@ -25,6 +25,7 @@ import path from 'node:path'
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { globby } from 'globby'
+import { siteRootFor } from './utils.js'
 
 // Documents that can carry a reference. Anything else in the output is either
 // an asset itself or something whose internal structure this has no business
@@ -82,6 +83,8 @@ function decodeEntities(source) {
 }
 
 // Everything a page points at, as raw url strings.
+export { siteRootFor }
+
 export function extractReferences(rawSource) {
     const source = decodeEntities(rawSource)
     const found = new Set()
@@ -111,30 +114,17 @@ export function resolveUrl(pageDir, url, { root = '' } = {}) {
     const segments = clean.split('/').filter(s => s !== '' && s !== '.')
 
     const parts = absolute ? [] : pageDir.split('/').filter(Boolean)
-    let overDeep = false
+    // How FAR above the root it climbed, not merely that it did. When every
+    // over-deep url on a site climbs the same distance, that is one base
+    // mismatch reported once — not N findings, which is how a real signal gets
+    // filtered.
+    let floored = 0
     for (const segment of segments) {
         if (segment !== '..') { parts.push(segment); continue }
         if (parts.length) parts.pop()
-        else overDeep = true      // a climb above the root, floored
+        else floored++            // a climb above the root, discarded
     }
-    return { target: path.join(root, ...parts), overDeep }
-}
-
-// Which declared site root a file belongs to.
-//
-// A build can emit one subtree per language and deploy each as its own domain
-// root, which puts the site root at out/<lang>/ rather than at out/. Every url
-// then carries one extra `..` for the language segment, which the browser
-// floors — so resolving against the output root would miss the over-escape
-// entirely and report the working urls as broken. Nothing can derive this: it
-// is deployment intent, so it is declared, and the default is the output root.
-export function siteRootFor(relativeFile, roots) {
-    let best = ''
-    for (const root of roots) {
-        if (!root) continue
-        if (relativeFile.startsWith(`${root}/`) && root.length > best.length) best = root
-    }
-    return best
+    return { target: path.join(root, ...parts), overDeep: floored > 0, floored }
 }
 
 // Everything the output points at that is not there.
@@ -150,7 +140,7 @@ export async function checkReferences(outputFolder, { siteRoots = [] } = {}) {
     })
 
     const broken = new Map()
-    const overDeep = new Map()
+    const overDeepRefs = new Map()
     let checked = 0
     // Existence is the expensive part and the same target repeats across a
     // site — one lookup each.
@@ -166,7 +156,7 @@ export async function checkReferences(outputFolder, { siteRoots = [] } = {}) {
         const pageDir = path.dirname(file).slice(root.length).replace(/^\/+/, '')
 
         for (const url of extractReferences(source)) {
-            const { target, overDeep: floored } = resolveUrl(pageDir, url, { root })
+            const { target, overDeep, floored } = resolveUrl(pageDir, url, { root })
             checked++
 
             if (!exists.has(target)) {
@@ -174,14 +164,14 @@ export async function checkReferences(outputFolder, { siteRoots = [] } = {}) {
             }
             // Broken outranks over-deep: a url that resolves nowhere is the
             // failure, and adding that it is also one level too deep is noise.
-            const bucket = !exists.get(target) ? broken : (floored ? overDeep : null)
+            const bucket = !exists.get(target) ? broken : (overDeep ? overDeepRefs : null)
             if (!bucket) continue
 
             const key = `${target} ${url}`
-            if (!bucket.has(key)) bucket.set(key, { url, target, files: [] })
+            if (!bucket.has(key)) bucket.set(key, { url, target, floored, files: [] })
             bucket.get(key).files.push(file)
         }
     }
 
-    return { broken: [...broken.values()], overDeep: [...overDeep.values()], checked }
+    return { broken: [...broken.values()], overDeep: [...overDeepRefs.values()], checked }
 }

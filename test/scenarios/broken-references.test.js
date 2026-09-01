@@ -74,8 +74,12 @@ describe('references in the emitted output', () => {
 
     it('reports an over-deep reference separately from a broken one', async () => {
         const { combined } = await runMikser(workdir, ['--force'])
-        assert.match(combined, /Over-deep.*\.\.\/\.\.\/\.\.\/files\/logo\.svg/,
+        // One entry, so it is reported as a latent 404 rather than collapsed
+        // into a structural base mismatch — the two want different reactions.
+        assert.match(combined, /1 reference\(s\) climb 1 level\(s\) above the site root/,
             `expected the floored url to be reported as over-deep\n${combined}`)
+        assert.match(combined, /Examples: \.\.\/\.\.\/\.\.\/files\/logo\.svg/,
+            `expected the url to be named\n${combined}`)
         // It is not broken — it resolves. Reporting it as such would be wrong
         // and would drown the reference that genuinely resolves nowhere.
         assert.doesNotMatch(combined, /Resolves to nothing: \.\.\/\.\.\/\.\.\/files\/logo\.svg/,

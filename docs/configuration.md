@@ -75,19 +75,34 @@ export default {
 }
 ```
 
-Read only by the broken-reference check. It resolves urls the way a browser
-does, and a browser cannot climb above the origin root — it discards the
-extra `..` and loads the file. Where the site root actually is therefore
-decides whether `../../x.svg` on a given page is correct, merely over-deep,
-or broken.
+Read by the url helpers and by the broken-reference check.
+
+**It changes the output.** `asset`, `href` and `resource` build a path from the
+page to the target, and without this they measure from the output folder. When
+`out/bg` is what gets deployed, that is one directory too far — every url
+carries an extra `..` for the site segment. A browser floors a climb above the
+origin root rather than failing, so those urls load and nothing reports them.
+Declaring the roots makes the helpers measure from the site instead, and the
+urls become what they should have been.
+
+The check reads it for the same reason, and resolves urls the way a browser
+does. Where the site root is decides whether `../../x.svg` on a given page is
+correct, merely over-deep, or broken.
 
 Default is the output folder itself, which is right for the ordinary case of
-one site per build. Declare this only when a build emits several sites, as a
-per-language deploy does — resolving those against the output root instead
-misses the over-escape entirely and reports the working urls as broken.
+one site per build — and with nothing declared every url is byte-identical to
+what it was. Only a build that emits several sites moves, and it moves from
+working-by-flooring to correct.
 
-Nothing can infer it: it is a fact about where the bytes get deployed, not
-about the bytes.
+Declaring it also asserts something: **a site root is a deployable unit.** It
+is served alone, so anything its pages reference has to exist beneath it —
+share a common assets folder into each root rather than beside them. A url to
+a target in a *different* root is left as it was, because on a per-domain
+deploy no relative path reaches another origin; the check will report it, which
+is the honest answer.
+
+Nothing can infer any of this: it is a fact about where the bytes get deployed,
+not about the bytes.
 
 ## Engine Substrate
 

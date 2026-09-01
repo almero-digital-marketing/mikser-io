@@ -58,13 +58,21 @@ describe('resolveUrl', () => {
     it('resolves a relative url against the page directory', () => {
         assert.deepEqual(
             resolveUrl('aparati/hera', '../../derived/web/x.webp', { root: 'bg' }),
-            { target: 'bg/derived/web/x.webp', overDeep: false })
+            { target: 'bg/derived/web/x.webp', overDeep: false, floored: 0 })
     })
 
     it('resolves a root-absolute url against the site root, ignoring the page', () => {
         assert.deepEqual(
             resolveUrl('aparati/hera', '/derived/web/x.webp', { root: 'bg' }),
-            { target: 'bg/derived/web/x.webp', overDeep: false })
+            { target: 'bg/derived/web/x.webp', overDeep: false, floored: 0 })
+    })
+
+    it('reports how far it climbed, not merely that it did', () => {
+        // The distance is what lets N urls with one cause collapse into one
+        // warning instead of N — which is the difference between a signal and
+        // a channel someone mutes.
+        assert.equal(resolveUrl('a', '../../../x.svg', { root: 'r' }).floored, 2)
+        assert.equal(resolveUrl('a/b/c', '../../../x.svg', { root: 'r' }).floored, 0)
     })
 
     it('floors a climb above the root and says so', () => {
@@ -72,19 +80,19 @@ describe('resolveUrl', () => {
         // and loads the file. It works, and it is one level from not working.
         assert.deepEqual(
             resolveUrl('aparati', '../../../derived/web/x.webp', { root: 'bg' }),
-            { target: 'bg/derived/web/x.webp', overDeep: true })
+            { target: 'bg/derived/web/x.webp', overDeep: true, floored: 2 })
     })
 
     it('does not flag an exact climb to the root', () => {
         assert.deepEqual(
             resolveUrl('aparati', '../derived/x.webp', { root: 'bg' }),
-            { target: 'bg/derived/x.webp', overDeep: false })
+            { target: 'bg/derived/x.webp', overDeep: false, floored: 0 })
     })
 
     it('drops the query and fragment before resolving', () => {
         assert.deepEqual(
             resolveUrl('', 'x.css?v=2#top', { root: '' }),
-            { target: 'x.css', overDeep: false })
+            { target: 'x.css', overDeep: false, floored: 0 })
     })
 })
 

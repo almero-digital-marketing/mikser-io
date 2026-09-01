@@ -127,19 +127,45 @@ async function reportBrokenReferences(logger) {
             broken.length, checked, broken.length > SHOWN ? `, ${SHOWN} shown` : '')
     }
 
-    for (const { url, target, files } of overDeep.slice(0, SHOWN)) {
-        logger.warn({ code: 'reference-over-deep', url, target, files },
-            'Over-deep, loads only because the browser floors it: %s (from %s) — %s',
-            url, named(files), target)
+    // Grouped by how FAR each climbed, because a site whose every over-deep url
+    // climbs the same distance does not have N problems — it has one base that
+    // is off by a constant. Printing it N times is precisely how a real signal
+    // gets filtered out, which is the failure this check exists to prevent.
+    const byClimb = new Map()
+    for (const entry of overDeep) {
+        if (!byClimb.has(entry.floored)) byClimb.set(entry.floored, [])
+        byClimb.get(entry.floored).push(entry)
     }
+    // One distance, many urls: structural. The helper's base is wrong, the urls
+    // are not — they load at every depth, because the climb is always floored.
+    // That wants a different reaction than a hand-written `../..` that happens
+    // to be right on one page and is a 404 waiting on the next.
+    const structural = byClimb.size === 1 && overDeep.length > 1
+
+    for (const [climb, entries] of [...byClimb].sort(([a], [b]) => a - b)) {
+        const examples = entries.slice(0, 3).map(e => e.url)
+        logger.warn(
+            {
+                code: 'reference-over-deep', climbs: climb, count: entries.length,
+                structural, urls: examples,
+                files: [...new Set(entries.flatMap(e => e.files))].slice(0, 3),
+            },
+            structural
+                ? '%d references climb %d level(s) above the site root — every one of them, by the '
+                  + 'same amount. They load: a browser discards the extra `..`. What is wrong is the '
+                  + 'base they were built from, not the links. Examples: %s'
+                : '%d reference(s) climb %d level(s) above the site root and load only because a '
+                  + 'browser discards the extra `..`. Each breaks if the same markup renders one '
+                  + 'level deeper. Examples: %s',
+            entries.length, climb, examples.join(', '))
+    }
+
     if (overDeep.length) {
-        logger.warn({ code: 'reference-over-deep-summary', overDeep: overDeep.length, checked },
-            '%d of %d reference(s) climb above the site root and load only because a browser '
-            + 'discards the extra `..`%s. They break as soon as the same markup renders one '
-            + 'level deeper.%s',
-            overDeep.length, checked, overDeep.length > SHOWN ? `, ${SHOWN} shown` : '',
-            siteRoots.length ? '' : ' No siteRoots are declared, so this resolved against the '
-                + 'output root — declare runtime.config.siteRoots if a subtree is deployed as its own domain.')
+        logger.warn({ code: 'reference-over-deep-summary', overDeep: overDeep.length, checked, structural },
+            '%d of %d reference(s) resolve above the site root.%s',
+            overDeep.length, checked,
+            siteRoots.length ? '' : ' No siteRoots are declared, so this resolved against the output '
+                + 'root — declare siteRoots if a subtree is deployed as its own domain.')
     }
 
     return new Set(broken.map(b => b.target))
@@ -472,6 +498,15 @@ export async function setup(options) {
     // runtime.config) and before any plugin's onLoaded.
     onLoad(async () => {
         const logger = useLogger()
+
+        // Onto OPTIONS, not left on config: the url helpers read it, and they
+        // run in render workers, which receive the worker-safe options and
+        // never see runtime.config.
+        runtime.options.siteRoots = runtime.config?.siteRoots ?? []
+        if (runtime.options.siteRoots.length) {
+            logger.info('Site roots: %s', runtime.options.siteRoots.join(', '))
+        }
+
         const cli = runtime.options.url
         const cfg = runtime.config?.url
         const raw = cli ?? cfg
