@@ -220,13 +220,42 @@ export function setupServer() {
                    .sendFile(faviconFile)
             })
 
-            await new Promise(resolve => {
-                const httpServer = runtime.options.app.listen(runtime.options.port, () => {
+            // Why this needs an error handler AND an address() check, rather
+            // than trusting the callback:
+            //
+            // `app.listen(port, cb)` invokes cb even when the bind FAILED —
+            // observed with a squatter on the port, cb running with
+            // `address() === null` and EADDRINUSE arriving on the error event
+            // afterwards. With no error handler, the process logged
+            // "Server listening: http://localhost:3779", printed a LAN
+            // address, completed the build green, and answered nothing: every
+            // request went to whoever actually held the port, which on a dev
+            // machine is another project's site. The operator opens the
+            // address, sees somebody else's pages, and the log insists they
+            // are their own.
+            //
+            // A server that cannot bind is not a server. --server asks to
+            // BECOME the instance, which is exactly the request that cannot be
+            // satisfied by carrying on — the same reasoning that makes a second
+            // server exit 1 rather than forward.
+            await new Promise((resolve, reject) => {
+                const httpServer = runtime.options.app.listen(runtime.options.port, function onListening() {
                     // Public URL wins for operator-clickable log lines —
                     // a reverse-proxy/tunnel/ngrok setup binds locally but
                     // is reached externally at runtime.options.url. Fall
                     // back to the bind URL when no public origin is set.
-                    const externalUrl = runtime.options.url ?? `http://localhost:${runtime.options.port}`
+                    // The bind is the authority on which port answers, not
+                    // the port that was asked for. A null address means the
+                    // listen failed and the error handler below owns it — say
+                    // nothing here, or the log claims a port it does not have.
+                    // `this`, not the const above: EventEmitter calls a
+                    // listener with the emitter, and a synchronous listen
+                    // reaches here while `httpServer` is still in its
+                    // temporal dead zone.
+                    const bound = this?.address?.()
+                    if (!bound) return
+
+                    const externalUrl = runtime.options.url ?? `http://localhost:${bound.port}`
                     logger.info('Server listening: %s', externalUrl)
 
                     // The addresses that are NOT localhost.
@@ -246,11 +275,23 @@ export function setupServer() {
                         const lan = localAddresses()
                         if (lan.length) {
                             logger.info('Also on: %s', lan
-                                .map(address => `http://${address}:${runtime.options.port}`)
+                                .map(address => `http://${address}:${bound.port}`)
                                 .join('  '))
                         }
                     }
                     resolve()
+                })
+
+                httpServer.on('error', (err) => {
+                    if (err.code === 'EADDRINUSE') {
+                        reject(new Error(
+                            `port ${runtime.options.port} is already in use — something else is listening there, `
+                            + `and requests to it will reach that instead of this build. `
+                            + `Stop it, or pass --server <other port>.`))
+                        return
+                    }
+                    reject(new Error(
+                        `could not listen on port ${runtime.options.port} — ${err.code ?? err.message}`))
                 })
 
                 // Node caps a single request at 5 minutes (requestTimeout,

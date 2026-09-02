@@ -24,7 +24,17 @@ function fakeApp(calls) {
         set() {},
         use(...args) { calls.push({ kind: 'use', arg: args[0] }) },
         get(p) { calls.push({ kind: 'get', arg: p }) },
-        listen(_port, cb) { cb?.(); return { on() {}, close() {} } },
+        // Models http.Server closely enough for the bring-up: a listening
+        // listener is called BY the server (EventEmitter passes the emitter as
+        // `this`), and the server can be asked which address it actually
+        // bound. Both matter — server.js reads the bind rather than trusting
+        // the port it asked for, because listen's callback fires even when the
+        // bind failed.
+        listen(_port, cb) {
+            const server = { on() {}, close() {}, address: () => ({ port: _port }) }
+            cb?.call(server)
+            return server
+        },
     }
 }
 

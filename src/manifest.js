@@ -1289,7 +1289,36 @@ onFinalize(async () => {
     // That made "resolve the collision by deleting the stub" delete the
     // homepage, which is the opposite of what the operator asked for and the
     // exact operation the new collision reporting invites.
+    // Destinations THIS cycle's surviving renders just wrote.
+    //
+    // Their snapshot rows are not inserted until 3c below, so the
+    // by-destination query cannot see them — the same blind spot 2a already
+    // compensates for in the other direction ("recorded snapshots only
+    // describe PRIOR cycles").
+    //
+    // Without this, renaming a source's extension unlinks the output the new
+    // entity just wrote. `index.md` → `index.yml` keeps the entity NAME and
+    // the destination but changes the id, so one cycle carries a DELETE for
+    // the old id and a RENDER for the new one. The render writes the page,
+    // the delete stages the same destination, nothing surviving claims it
+    // yet, and the file goes — with `Rendered: 1`, a green build and no
+    // warning. A second build does not fix it (nothing changed), nor does
+    // touch (the input hash is the same); only a real content edit re-renders
+    // it. Only --verify ever said so, and renaming an extension is the most
+    // common action there is during a migration.
+    const claimedByThisCycle = new Set()
+    for (const { entity } of renderedEntries) {
+        if (deleted.has(entity.id) || (entity.parent && deleted.has(entity.parent))) continue
+        if (entity.destination) claimedByThisCycle.add(entity.destination)
+    }
+
     for (const { destination, reason } of filesToUnlink) {
+        // Written this cycle by an entity that is staying. Keep it, and say
+        // nothing: the snapshot recorded at 3c is this render's own, so there
+        // is no staleness to report — unlike the surviving-snapshot case
+        // below, where the bytes belong to the entity that went away.
+        if (claimedByThisCycle.has(destination)) continue
+
         // "Still claimed" means by something that SURVIVES this pass. The
         // ids going away here are not just the deleted entities: pagination
         // children staged above are removed too, and counting a child's own
