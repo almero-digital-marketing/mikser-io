@@ -130,7 +130,20 @@ export async function gateChecksum(file, id, { reload = false, priorChecksums, b
 // LRU population the scan already does, and we get rid of the 7GB JS
 // heap peak in return.
 export async function sweepDeleted(collection, scanned, onDelete, ownerPrefix) {
-    if (runtime.options.force) return 0
+    // --force does NOT skip this any more.
+    //
+    // It used to, on a stated premise — "operator wants a full rebuild;
+    // deletes still flow naturally on the rebuild" — that is not true and can
+    // be disproved in one command: delete a document, run `mikser --force`,
+    // and both the entity and its output are still there, while an ordinary
+    // build removes them. Nothing about --force wipes the catalog (that is
+    // --clear, via forceWipe), so a row for a file that no longer exists
+    // simply survives.
+    //
+    // Which made --force the one flag that could not fix what it is reached
+    // for. It defeats the checksum GATE; the scanned set is built from the
+    // glob before any gate runs, so it is exactly as complete under --force as
+    // without it, and the sweep is no less accurate for running.
     if (!ownerPrefix) {
         throw new Error(
             'sweepDeleted: ownerPrefix is required — pass the absolute folder ' +

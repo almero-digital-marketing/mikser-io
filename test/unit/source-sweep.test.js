@@ -99,9 +99,19 @@ describe('sweepDeleted: cross-emitter ownership', () => {
         assert.deepEqual(ranWithoutSlash.sort(), ['/a', '/b'])
     })
 
-    it('does not run when --force is set (operator owns the rebuild)', async () => {
+    it('runs under --force too — that flag defeats the gate, not the scan', async () => {
+        // This asserted the opposite, on the premise the old guard carried:
+        // "operator wants a full rebuild; deletes still flow naturally on the
+        // rebuild". They do not. Nothing about --force wipes the catalog (that
+        // is --clear), so a row for a file that no longer exists survived, and
+        // the flag reached for when something is stale was the one that left
+        // it stale.
+        //
+        // Safe because `scanned` is filled from the glob before any gate runs,
+        // so it is exactly as complete under --force as without it.
         const entities = [
             { id: '/orphan', collection: 'docs', uri: '/tmp/owned/orphan.md' },
+            { id: '/kept', collection: 'docs', uri: '/tmp/owned/kept.md' },
         ]
         realRuntime.catalog = {
             byId: new Map(entities.map(e => [e.id, e])),
@@ -112,9 +122,10 @@ describe('sweepDeleted: cross-emitter ownership', () => {
         realRuntime.options = { workingFolder: '/tmp', plugins: [], force: true }
 
         const deleted = []
-        const count = await sweepDeleted('docs', new Set(), async e => deleted.push(e.id), '/tmp/owned')
-        assert.equal(count, 0)
-        assert.equal(deleted.length, 0)
+        const count = await sweepDeleted(
+            'docs', new Set(['/kept']), async e => deleted.push(e.id), '/tmp/owned')
+        assert.equal(count, 1)
+        assert.deepEqual(deleted, ['/orphan'], 'and only what the scan did not find')
 
         // Clean up so the next test isn't seeing force=true.
         realRuntime.options.force = false

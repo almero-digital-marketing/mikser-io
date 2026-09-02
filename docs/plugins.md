@@ -224,9 +224,11 @@ the difference, scoped by `uri` to the files folder so entities another plugin
 emitted into this collection (a CSV, a drive, an API) are left alone. It says
 `Files removed: N no longer on disk` when it acts and nothing when it does not.
 
-`--force` skips this, as it skips the equivalent sweep for documents and
-layouts: the guard lives in `sweepDeleted`. So `--force` is not the flag that
-reconciles deletions — an ordinary build is.
+`--force` reconciles deletions too, as of 9.88.0. It used to skip this and the
+equivalent sweep for documents and layouts, which made it the one flag that
+could not fix what it is reached for — nothing about `--force` wipes the
+catalog (that is `--clear`), so a row for a file that no longer exists simply
+survived. Only `--clear` cleaned up.
 
 The matching cleanup for derivatives lives in `assets` — see below.
 
