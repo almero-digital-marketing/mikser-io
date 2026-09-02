@@ -273,3 +273,63 @@ describe('two stylesheets at different depths', () => {
         assert.doesNotMatch(combined, /social-fb\.svg/, combined)
     })
 })
+
+// The same markup has to get the same verdict on both build shapes.
+//
+// `path.dirname('index.html')` is '.', and resolveUrl counted that lone '.'
+// as a real directory segment while dropping it from the url's own segments.
+// So on a SINGLE-root build a `..` from the page at the output root popped the
+// '.' instead of flooring: the target came out right and the climb came out
+// zero, and the reference was silently exempt. On a MULTI-site build the site
+// root makes pageDir genuinely empty, the same `..` floors, and the same
+// markup was reported.
+//
+// Nothing looked wrong because the resolved path was correct either way. Only
+// the verdict differed, and only for the one page on a site that sits at its
+// root.
+
+describe('a root page climbing above the output root', () => {
+    const single = freshWorkdir('root-climb-single')
+    const multi = freshWorkdir('root-climb-multi')
+    after(async () => { await cleanup(single); await cleanup(multi) })
+
+    const LAYOUT = '<!doctype html><body>'
+        + '<img src="../media/logo.svg">'   // one `..` too many, floors onto a real file
+        + '<img src="media/logo.svg">'      // the same file, addressed correctly
+        + '</body>'
+    const SVG = '<svg xmlns="http://www.w3.org/2000/svg"/>'
+
+    it('is reported on a single-root build, as it always was on a multi-site one', async () => {
+        await setupFixture(single, {
+            'mikser.config.js': CONFIG,
+            'files/media/logo.svg': SVG,
+            'documents/index.html': '---\nlayout: page\n---\n',
+            'layouts/page.html.hbs': LAYOUT,
+        })
+        const { code, combined } = await runMikser(single)
+        assert.equal(code, 0, combined)
+        assert.match(combined, /climb 1 level/,
+            `a root page's over-deep url was silently exempt here\n${combined}`)
+        assert.match(combined, /\.\.\/media\/logo\.svg/, combined)
+    })
+
+    it('gets the same answer when the same page sits at a declared site root', async () => {
+        await setupFixture(multi, {
+            'mikser.config.js': SITE_CONFIG,
+            'files/bg/media/logo.svg': SVG,
+            'documents/bg/index.html': '---\nlayout: page\n---\n',
+            'layouts/page.html.hbs': LAYOUT,
+        })
+        const { code, combined } = await runMikser(multi)
+        assert.equal(code, 0, combined)
+        assert.match(combined, /climb 1 level/,
+            `the shape that always reported it must keep reporting it\n${combined}`)
+    })
+
+    it('does not invent a climb for the correctly addressed one', async () => {
+        const { combined } = await runMikser(single, ['--force'])
+        // Two references, one of them fine: the count is what says the fix
+        // did not simply start flagging everything at the root.
+        assert.match(combined, /1 of 2 reference\(s\) resolve above the site root/, combined)
+    })
+})

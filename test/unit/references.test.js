@@ -116,6 +116,28 @@ describe('resolveUrl', () => {
             resolveUrl('', 'x.css?v=2#top', { root: '' }),
             { target: 'x.css', overDeep: false, floored: 0 })
     })
+
+    it("does not count a root page's `.` as a directory to climb out of", () => {
+        // path.dirname('index.html') is '.', and that lone '.' used to count
+        // as a real segment: a `..` popped it instead of flooring, so the
+        // target came out right and the verdict came out wrong. A root page's
+        // over-deep url was silently exempt on a single-root build and
+        // reported on a multi-site one, where the site root makes pageDir
+        // genuinely empty. Same markup, two answers.
+        const dot = resolveUrl('.', '../media/logo.svg')
+        assert.equal(dot.target, 'media/logo.svg', 'the target was never wrong')
+        assert.equal(dot.floored, 1, 'but the climb was not counted')
+        assert.equal(dot.overDeep, true)
+
+        // An empty pageDir has always said this — the two now agree.
+        assert.deepEqual(resolveUrl('', '../media/logo.svg'), dot)
+    })
+
+    it("still resolves a root page's ordinary url without climbing", () => {
+        assert.deepEqual(
+            resolveUrl('.', 'media/logo.svg'),
+            { target: 'media/logo.svg', overDeep: false, floored: 0 })
+    })
 })
 
 describe('siteRootFor', () => {

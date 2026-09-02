@@ -120,9 +120,22 @@ export function extractReferences(rawSource) {
 export function resolveUrl(pageDir, url, { root = '' } = {}) {
     const clean = url.split('#')[0].split('?')[0]
     const absolute = clean.startsWith('/')
-    const segments = clean.split('/').filter(s => s !== '' && s !== '.')
+    // `.` is not a directory to climb out of, in either half of this.
+    //
+    // The url segments have always dropped it and the page's directory did
+    // not, which mattered for exactly one page on a site: the one at its root,
+    // where path.dirname gives '.'. That lone '.' counted as a real segment,
+    // so a `..` popped it instead of flooring, and the reference resolved to
+    // the same file a browser reaches while reporting floored: 0.
+    //
+    // The target was right and the verdict was wrong, which is why nothing
+    // noticed: a root page's over-deep url was silently exempt on a
+    // single-root build, and reported on a multi-site one where the site root
+    // makes pageDir genuinely empty. Same markup, two answers.
+    const segment = (s) => s !== '' && s !== '.'
+    const segments = clean.split('/').filter(segment)
 
-    const parts = absolute ? [] : pageDir.split('/').filter(Boolean)
+    const parts = absolute ? [] : pageDir.split('/').filter(segment)
     // How FAR above the root it climbed, not merely that it did. When every
     // over-deep url on a site climbs the same distance, that is one base
     // mismatch reported once — not N findings, which is how a real signal gets
