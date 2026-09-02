@@ -118,9 +118,13 @@ describe('several site roots in one build', () => {
     })
 
     it('a target nothing produced is still broken, from both depths', () => {
-        assert.match(out, /nothing produced it:.*ghost\.jpg.*from a\/index\.html/,
-            `expected the missing derivative reported from the shallow page\n${out}`)
-        assert.match(out, /nothing produced it:.*ghost\.jpg.*from a\/x\/y\/deep\/index\.html/,
+        // And it says WHY. The site root is stripped before the assets plugin
+        // is asked, or the answer is lost on exactly the multi-site builds
+        // where derivatives are shared into each root — the target resolves to
+        // `a/derived/...` and nothing recognises the assets folder in it.
+        assert.match(out, /No derivative was produced:.*ghost\.jpg.*from a\/index\.html.*no source file/,
+            `expected the missing derivative reported, with its cause, from the shallow page\n${out}`)
+        assert.match(out, /No derivative was produced:.*ghost\.jpg.*from a\/x\/y\/deep\/index\.html/,
             `expected it reported from the deep page too\n${out}`)
     })
 

@@ -10,7 +10,7 @@ import { instanceControl } from './instance.js'
 import { useJournal, updateEntry } from './journal.js'
 import { globby } from 'globby'
 import { OPERATION, TASKS } from './constants.js'
-import { changeExtension, formatErrorContext, projectMeta, lookupKeys } from './utils.js'
+import { changeExtension, formatErrorContext, projectMeta, lookupKeys, siteRootFor } from './utils.js'
 import { reportRendered, reportSkipped, reportError, renderErrorCount, emitReport, finishCycle, reportAssetUse, assetUse } from './report.js'
 import { checkReferences } from './references.js'
 import { toolSchemas, invokeTool, toolResultText, toolResultFailed } from './tools.js'
@@ -116,11 +116,41 @@ async function reportBrokenReferences(logger) {
     const named = (files) =>
         files.slice(0, 3).join(', ') + (files.length > 3 ? ` and ${files.length - 3} more` : '')
 
+    // Ask the assets plugin before guessing.
+    //
+    // A derivative that was never produced has its SOURCE sitting in the
+    // output — files() copies it there — so the same-name search finds it and
+    // "the file is at media/icons/logo.svg" reads as a base that is off by a
+    // folder. It is not: the base is right and the derivative does not exist,
+    // because the preset does not cover that file. Confidently naming the
+    // wrong cause is worse than naming none, so a real answer wins over the
+    // heuristic wherever there is one.
+    const explain = runtime.state?.assets?.explainMissing
+    const reasons = new Map()
+    if (explain) {
+        for (const { target } of broken.slice(0, SHOWN)) {
+            // Site-relative, because that is what the assets folder is named
+            // relative to. A build that deploys out/<lang> as its own domain
+            // root resolves this target to `a/derived/web/...`, and a plain
+            // prefix test on the assets folder sees `a` and gives up — the
+            // check goes quiet on exactly the multi-site builds where a
+            // derivative is shared into each root.
+            const root = siteRootFor(target, siteRoots)
+            const local = root ? target.slice(root.length).replace(/^\/+/, '') : target
+            try { reasons.set(target, await explain(local)) } catch { /* never break the report */ }
+        }
+    }
+
     for (const { url, target, files, elsewhere } of broken.slice(0, SHOWN)) {
+        const reason = reasons.get(target)
         // Two different problems wear the same symptom. A target whose file
         // exists elsewhere in the output is a base that is wrong, not an asset
         // that is missing — and saying which one saves the reader the search.
-        if (elsewhere?.length) {
+        if (reason) {
+            logger.warn({ code: 'reference-no-derivative', url, target, files, reason },
+                'No derivative was produced: %s (from %s) — %s',
+                url, named(files), reason)
+        } else if (elsewhere?.length) {
             logger.warn({ code: 'reference-wrong-base', url, target, files, elsewhere },
                 'Points at the wrong place: %s (from %s) — nothing at %s, but the file is at %s',
                 url, named(files), target, elsewhere.join(', '))
@@ -131,16 +161,17 @@ async function reportBrokenReferences(logger) {
         }
     }
     if (broken.length) {
-        const misplaced = broken.filter(b => b.elsewhere?.length).length
+        const explained = broken.slice(0, SHOWN).filter(b => reasons.get(b.target)).length
+        const misplaced = broken.filter(b => b.elsewhere?.length && !reasons.get(b.target)).length
         logger.warn({
             code: 'reference-broken-summary',
-            broken: broken.length, wrongBase: misplaced, checked,
+            broken: broken.length, wrongBase: misplaced, noDerivative: explained, checked,
         },
-            '%d of %d reference(s) in the output resolve to nothing%s. Wrong base (the file exists '
-            + 'elsewhere): %d. Never produced: %d. A URL helper builds the path rather than looking '
-            + 'it up, so neither kind can fail at the point it is written.',
+            '%d of %d reference(s) in the output resolve to nothing%s. No derivative produced: %d. '
+            + 'Wrong base (the file exists elsewhere): %d. Never produced: %d. A URL helper builds the '
+            + 'path rather than looking it up, so none of them can fail at the point it is written.',
             broken.length, checked, broken.length > SHOWN ? `, ${SHOWN} shown` : '',
-            misplaced, broken.length - misplaced)
+            explained, misplaced, broken.length - misplaced - explained)
     }
 
     // Grouped by how FAR each climbed, because a site whose every over-deep url
@@ -215,10 +246,19 @@ async function reportMissingAssets(logger, alreadyReported = new Set()) {
     // every page on the site, and a thousand lines of it buries whatever else
     // the build said.
     const SHOWN = 10
+    const explain = runtime.state?.assets?.explainMissing
     for (const [destination, ids] of missing.slice(0, SHOWN)) {
-        logger.warn({ code: 'asset-missing', destination, referencedBy: ids },
-            'Linked but not in the output: %s — referenced by %s', destination,
-            ids.slice(0, 3).join(', ') + (ids.length > 3 ? ` and ${ids.length - 3} more` : ''))
+        // Same question, same answer, wherever the symptom surfaces. This path
+        // sees urls that never reach an html file at all — a sitemap, a feed —
+        // which the output scan cannot look at.
+        let reason = null
+        if (explain) {
+            try { reason = await explain(destination) } catch { /* never break the report */ }
+        }
+        logger.warn({ code: 'asset-missing', destination, referencedBy: ids, reason },
+            'Linked but not in the output: %s — referenced by %s%s', destination,
+            ids.slice(0, 3).join(', ') + (ids.length > 3 ? ` and ${ids.length - 3} more` : ''),
+            reason ? `. ${reason[0].toUpperCase()}${reason.slice(1)}` : '')
     }
     logger.warn({ code: 'asset-missing-summary', missing: missing.length, checked: used.length },
         '%d of %d linked file(s) are not in the output%s. A URL helper builds the path rather than looking it '

@@ -97,19 +97,100 @@ export function assets(options = {}) {
     // reported once per process at onFinalize.
     const matchTally = { evaluated: 0, matched: new Set(), reported: false }
 
-    async function getEntityPresets(entity) {
-        const entityPresets = []
-        matchTally.evaluated++
-        for (let preset in (options.presets || {})) {
+    // Which presets select this entity. No counters, no side effects.
+    //
+    // Split out because the same question gets asked twice for different
+    // reasons: once as files enter the catalog, where the answer drives the
+    // render and feeds the unmatched-preset tally, and once after the cycle to
+    // explain a derivative that is not there. The second must not move the
+    // counters the first reports on.
+    //
+    // `some`, not a push per matching pattern. Two patterns that both cover a
+    // file used to name their preset twice in the list; the second render was
+    // gated by the checksum, so nothing rendered twice — but "which presets
+    // cover this file" is a question with one answer, and the explainer below
+    // puts that answer in front of a reader.
+    function presetsSelecting(entity) {
+        const selected = []
+        for (const preset in (options.presets || {})) {
             const { matches } = normalizePresetConfig(options.presets[preset])
-            for (let match of matches) {
-                if (matchEntity(entity, match)) {
-                    entityPresets.push(preset)
-                    matchTally.matched.add(preset)
-                }
+            if (matches.some(match => matchEntity(entity, match))) selected.push(preset)
+        }
+        return selected
+    }
+
+    async function getEntityPresets(entity) {
+        matchTally.evaluated++
+        const selected = presetsSelecting(entity)
+        for (const preset of selected) matchTally.matched.add(preset)
+        return selected
+    }
+
+    // Why a linked derivative is not in the output.
+    //
+    // The engine detects the CONSEQUENCE — it knows what the output points at
+    // and what exists on disk — but it cannot name the cause, because whether
+    // a preset covers a file is decided by `match` against the entity id and
+    // none of that is visible from a url. So one sentence covered a mistyped
+    // preset name, a preset that did not run, and a file no preset was ever
+    // asked to cover. The last is the common one, the only one whose fix is in
+    // the config rather than in the template, and the one the reader is least
+    // likely to guess.
+    //
+    // Answered here rather than in the helper: `asset()` takes a path, not an
+    // entity, and it is the hottest call in a render. Nothing is looked up
+    // when the url is built. This runs at most a handful of times, after
+    // everything has settled, and only when something is already wrong.
+    let sourceIndex = null
+    let sourceIndexCycle
+    async function explainMissing(destination) {
+        const assetsName = runtime.options.assets
+        const parts = String(destination).replace(/^\/+/, '').split('/')
+        if (!assetsName || parts[0] !== assetsName || parts.length < 3) return null
+        const preset = parts[1]
+        const name = parts.slice(2).join('/')
+
+        const configured = Object.keys(options.presets || {}).sort()
+        if (!options.presets?.[preset]) {
+            return `no preset named '${preset}' is configured (configured: ${configured.join(', ') || 'none'})`
+        }
+
+        // The derivative wears the PRESET's extension, so the source is found
+        // by stem — `media/hero.webp` came from `media/hero.jpg`.
+        const stem = (value) => value.slice(0, value.length - path.extname(value).length)
+
+        // Built once per cycle and only on this path: a build with nothing
+        // broken never walks the catalog for it.
+        const cycle = runtime.state?.cycle?.id ?? null
+        if (sourceIndexCycle !== cycle) { sourceIndex = null; sourceIndexCycle = cycle }
+        if (!sourceIndex) {
+            sourceIndex = new Map()
+            for await (const candidate of iterateEntities({ collection: { $ne: collection } })) {
+                if (typeof candidate.name !== 'string') continue
+                const key = stem(candidate.name)
+                if (!sourceIndex.has(key)) sourceIndex.set(key, [])
+                sourceIndex.get(key).push(candidate)
             }
         }
-        return entityPresets
+
+        const source = (sourceIndex.get(stem(name)) ?? [])[0]
+        if (!source) {
+            return `no source file is named '${stem(name)}' — nothing would produce this derivative `
+                + 'under any preset'
+        }
+
+        const owns = presetsSelecting(source)
+        if (owns.includes(preset)) {
+            return `preset '${preset}' does cover ${source.id}, so the derivative should be there — it was `
+                + 'not produced this cycle (the preset render failed, or the preset changed and only '
+                + '--render-presets re-derives what is already in the catalog)'
+        }
+        const { matches } = normalizePresetConfig(options.presets[preset])
+        return `preset '${preset}' does not cover ${source.id} — its match is `
+            + `${matches.join(', ') || '(none)'}`
+            + (owns.length
+                ? `. Presets that do cover it: ${owns.join(', ')}`
+                : '. No configured preset covers it')
     }
 
     // Report presets that matched none of the entities this run evaluated.
@@ -315,6 +396,11 @@ export function assets(options = {}) {
         runtime.state.assets = {
             presets: {},
             assetsMap: {},
+            // The engine asks this when a linked derivative is not on disk.
+            // Published on state rather than imported, so the engine keeps
+            // knowing nothing about presets and says nothing when this plugin
+            // is not loaded.
+            explainMissing,
             assetsFolder: options.outputFolder
                 ? path.join(options.outputFolder, assetsName)
                 : assetsName,

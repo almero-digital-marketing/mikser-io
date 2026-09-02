@@ -928,16 +928,38 @@ surfaces that turn silence into a statement:
   - **The emitted output**, read back and resolved the way a browser
     would — `src`, `href`, `poster`, `srcset` and CSS `url()` across
     html and css. This one sees paths written by hand, not just helper
-    output, and it separates two problems that share a symptom:
-    `reference-wrong-base` when the file exists elsewhere in the output
-    (the url was built from the wrong root, and the report names where
-    the file actually is), `reference-broken` when nothing produced it
-    at all.
+    output, and it separates three problems that share a symptom:
+    `reference-no-derivative` when the assets plugin can say why the file
+    is not there, `reference-wrong-base` when the file exists elsewhere in
+    the output (the url was built from the wrong root, and the report names
+    where the file actually is), `reference-broken` when nothing produced
+    it at all.
   - **The render track**, which records every `asset()` / `resource()`
     call and tests the destination it built. This catches a url that
     never reaches an html file at all — one emitted into a feed or a
     sitemap — and warns under `asset-missing`. Where both can see the
     same file, the output scan reports it and this one stays quiet.
+
+  A url under the assets folder gets a cause rather than a guess. Whether a
+  preset covers a file is decided by `match` against the entity id, which is
+  not visible from a url, so the assets plugin is asked and the answer is one
+  of four: the preset name is not configured; the preset does not cover this
+  file (with the `match` that decided it, and any preset that *does* cover it,
+  since the fix is then in the template); the preset covers it and the
+  derivative still is not there, so a render failed; or there is no source
+  file under that name at all. It travels into `--json` as `reason`.
+
+  This matters most where it looks least like itself. `files()` copies the
+  source into the output, so a derivative that was never produced leaves a
+  file of the same name sitting elsewhere — and the wrong-base search finds
+  it and reports a misplaced file with complete confidence. The base is
+  right; the derivative does not exist. A real answer wins over the
+  heuristic wherever there is one.
+
+  `asset()` looks nothing up. It takes a path rather than an entity and is
+  the hottest call in a render, so it stays a string operation; the question
+  is answered once per missing destination after the cycle, and only when
+  something is already wrong.
 - **A link that works only by accident** — a url with one `..` too many
   still loads, because a browser discards a climb above the origin root
   rather than failing. Reported under `reference-over-deep`, separately
