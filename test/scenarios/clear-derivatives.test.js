@@ -59,13 +59,17 @@ describe('--clear and derivatives', () => {
         assert.ok(existsSync(derivative('doomed.jpg')))
     })
 
-    it('an orphan survives an ordinary build — the gap this does not close', async () => {
-        // Stated so the narrower fix is not mistaken for the whole one.
+    it('an ordinary build now removes the orphan too, so --clear is not the only route', async () => {
+        // This used to assert the opposite, stated so the narrower fix would
+        // not be mistaken for the whole one. The gap is closed: the scan
+        // reconciles the deleted file and the assets pass removes the
+        // derivative that lost its source, so --clear is a convenience here
+        // rather than the only cleanup that works.
         await rm(path.join(workdir, 'files/media/doomed.jpg'))
-        const { code } = await runMikser(workdir)
-        assert.equal(code, 0)
-        assert.ok(existsSync(derivative('doomed.jpg')),
-            'a plain build still leaves it — see the files-plugin delete sweep')
+        const { code, combined } = await runMikser(workdir)
+        assert.equal(code, 0, combined)
+        assert.equal(existsSync(derivative('doomed.jpg')), false,
+            `a plain build reconciles it now\n${combined}`)
     })
 
     it('--clear removes it', async () => {

@@ -141,8 +141,32 @@ export function assets(options = {}) {
     // entity, and it is the hottest call in a render. Nothing is looked up
     // when the url is built. This runs at most a handful of times, after
     // everything has settled, and only when something is already wrong.
+    // A derivative wears the PRESET's extension, so a source is found by stem:
+    // `media/hero.webp` came from `media/hero.jpg`.
+    const stemOf = (value) => value.slice(0, value.length - path.extname(value).length)
+
+    // stem(entity.name) -> entities, built once per cycle.
+    //
+    // Two callers ask the same question from opposite directions — "why is
+    // this derivative missing" and "does this derivative still have a source"
+    // — so they share one index rather than each walking the catalog.
     let sourceIndex = null
     let sourceIndexCycle
+    async function sourceByStem() {
+        const cycle = runtime.state?.cycle?.id ?? null
+        if (sourceIndexCycle !== cycle) { sourceIndex = null; sourceIndexCycle = cycle }
+        if (!sourceIndex) {
+            sourceIndex = new Map()
+            for await (const candidate of iterateEntities({ collection: { $ne: collection } })) {
+                if (typeof candidate.name !== 'string') continue
+                const key = stemOf(candidate.name)
+                if (!sourceIndex.has(key)) sourceIndex.set(key, [])
+                sourceIndex.get(key).push(candidate)
+            }
+        }
+        return sourceIndex
+    }
+
     async function explainMissing(destination) {
         const assetsName = runtime.options.assets
         const parts = String(destination).replace(/^\/+/, '').split('/')
@@ -155,27 +179,12 @@ export function assets(options = {}) {
             return `no preset named '${preset}' is configured (configured: ${configured.join(', ') || 'none'})`
         }
 
-        // The derivative wears the PRESET's extension, so the source is found
-        // by stem — `media/hero.webp` came from `media/hero.jpg`.
-        const stem = (value) => value.slice(0, value.length - path.extname(value).length)
-
-        // Built once per cycle and only on this path: a build with nothing
-        // broken never walks the catalog for it.
-        const cycle = runtime.state?.cycle?.id ?? null
-        if (sourceIndexCycle !== cycle) { sourceIndex = null; sourceIndexCycle = cycle }
-        if (!sourceIndex) {
-            sourceIndex = new Map()
-            for await (const candidate of iterateEntities({ collection: { $ne: collection } })) {
-                if (typeof candidate.name !== 'string') continue
-                const key = stem(candidate.name)
-                if (!sourceIndex.has(key)) sourceIndex.set(key, [])
-                sourceIndex.get(key).push(candidate)
-            }
-        }
-
-        const source = (sourceIndex.get(stem(name)) ?? [])[0]
+        // Built only on this path: a build with nothing broken never walks
+        // the catalog for it.
+        const index = await sourceByStem()
+        const source = (index.get(stemOf(name)) ?? [])[0]
         if (!source) {
-            return `no source file is named '${stem(name)}' — nothing would produce this derivative `
+            return `no source file is named '${stemOf(name)}' — nothing would produce this derivative `
                 + 'under any preset'
         }
 
@@ -726,25 +735,79 @@ export function assets(options = {}) {
         } catch { /* a count is not worth failing a build over */ }
 
         let revisions = await globby('**/*.md5', { cwd: runtime.options.assetsFolder })
+
+        // Is the catalog answerable at all?
+        //
+        // Every check below concludes "no source, therefore orphan", and an
+        // EMPTY catalog answers that for every derivative on the site. A
+        // failed import or a scan that has not run yet would then delete the
+        // whole assets folder — a rebuild of every derivative at best, and at
+        // worst it happens on the machine that serves them. So the sweep only
+        // runs when there is something to be absent from.
+        const catalogSize = countEntities({ collection: { $ne: collection } })
+        const orphaned = []
+
         for (let revision of revisions) {
             const [preset] = revision.split(path.sep)
             const [assetsRevision] = revision.split('.').slice(-2, -1)
 
             if (!presets[preset]) {
                 const assetsPresetFolder = path.join(runtime.options.assetsFolder, preset)
-                const assetsPresetRemoved = false
+                // `let`. This was `const` with an assignment inside the try,
+                // so removing a preset folder threw TypeError into the empty
+                // catch on every pass and the log line was unreachable — the
+                // rm had already happened, so nothing looked wrong.
+                let assetsPresetRemoved = false
                 try {
                     await rm(assetsPresetFolder, { recursive: true, force: true })
                     assetsPresetRemoved = true
-                } catch { }
+                } catch { /* already gone, or not ours to remove */ }
                 if (assetsPresetRemoved) {
                     logger.debug('Assets preset removed: %s', assetsPresetFolder)
                 }
-            } else {
-                if (Number.parseInt(assetsRevision) < presets[preset].checksum) {
-                    await unlink(path.join(runtime.options.assetsFolder, revision))
-                }
+                continue
             }
+
+            if (Number.parseInt(assetsRevision) < presets[preset].checksum) {
+                await unlink(path.join(runtime.options.assetsFolder, revision))
+            }
+
+            // A derivative whose source is gone, or which this preset no
+            // longer covers.
+            //
+            // Deleting the source removed its catalog row and its published
+            // file, and left the derivative — the delete handler dropped the
+            // in-memory mapping and nothing on disk, so the only cleanup was
+            // --clear or doing it by hand. Narrowing a preset's `match` left
+            // one the same way, with nothing said.
+            //
+            // Answered from the catalog rather than from the delete event: a
+            // delete entry is sparse ({ id, type, collection }) by convention
+            // in every source plugin, so it cannot say where the derivative
+            // went. What still HAS a source is a question the catalog answers
+            // whatever route the orphan arrived by.
+            if (!catalogSize) continue
+            const derivative = revision.replace(/\.[^.]+\.md5$/, '')
+            const name = derivative.split(path.sep).slice(1).join('/')
+            const index = await sourceByStem()
+            const source = (index.get(stemOf(name)) ?? [])[0]
+            if (source && presetsSelecting(source).includes(preset)) continue
+            orphaned.push({
+                derivative,
+                marker: revision,
+                reason: source ? `preset '${preset}' no longer covers ${source.id}` : 'its source is gone',
+            })
+        }
+
+        for (const { derivative, marker } of orphaned) {
+            await unlink(path.join(runtime.options.assetsFolder, derivative)).catch(() => { /* already gone */ })
+            await unlink(path.join(runtime.options.assetsFolder, marker)).catch(() => { /* already gone */ })
+        }
+        if (orphaned.length) {
+            logger.info('Assets removed: %d derivative(s) with no source — %s',
+                orphaned.length,
+                orphaned.slice(0, 3).map(o => `${o.derivative} (${o.reason})`).join(', ')
+                + (orphaned.length > 3 ? ` and ${orphaned.length - 3} more` : ''))
         }
     })
 

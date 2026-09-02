@@ -228,6 +228,8 @@ emitted into this collection (a CSV, a drive, an API) are left alone. It says
 layouts: the guard lives in `sweepDeleted`. So `--force` is not the flag that
 reconciles deletions — an ordinary build is.
 
+The matching cleanup for derivatives lives in `assets` — see below.
+
 ---
 
 ### `layouts` *(sibling: `mikser-io-layouts`)*
@@ -439,6 +441,26 @@ The assets plugin processes whatever's on disk. Source files don't have to start
 #### Watch support
 
 Yes — the plugin watches both the source files and the preset modules. Editing a preset re-processes every input that matches it; editing a source re-processes just that input.
+
+
+**Derivatives with no source are removed.** A derivative outlived its source:
+deleting a file removed its catalog row and its published copy and left the
+derived file, because the delete handler dropped the in-memory mapping and
+nothing on disk. Narrowing a preset's `match` left one the same way. A stale
+derivative passes every check — the url resolves and the bytes are there —
+so the only cleanup was `--clear`, or deleting it by hand.
+
+The post-cycle pass that already walks the revision markers now also asks, per
+derivative, whether it still has a source that this preset still covers. It is
+answered from the **catalog**, not from the delete event: a delete entry is
+sparse (`{ id, type, collection }`) in every source plugin, so it cannot say
+where the derivative went, while the catalog answers whatever route the orphan
+arrived by — including ones that predate the fix. Reported as
+`Assets removed: N derivative(s) with no source`.
+
+It does nothing when the catalog is empty. Every check concludes "no source,
+therefore orphan", and an empty catalog answers that for every derivative on
+the site, so a failed import would otherwise delete the whole assets folder.
 
 ---
 
