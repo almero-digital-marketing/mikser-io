@@ -291,6 +291,28 @@ export function assets(options = {}) {
         runtime.options.assets = options.assetsFolder || 'assets'
         runtime.options.assetsFolder = path.join(runtime.options.workingFolder, runtime.options.assets)
         logger.debug('Assets folder: %s', runtime.options.assetsFolder)
+
+        // --clear means "throw away what was derived and build it again", and
+        // derivatives are derived — but this folder sits at the working-folder
+        // root, outside both outputFolder and runtimeFolder, so the engine's
+        // clear never reached it. Anything here whose source had gone stayed
+        // forever: still on disk, still SERVED through the symlink below, and
+        // invisible to `find out -type f` because that tree is reached through
+        // a link. The only way out was deleting the folder by hand.
+        //
+        // Cleared here rather than in the engine because the path is not known
+        // until this plugin resolves it — the engine's clear runs before any
+        // plugin's onLoaded.
+        //
+        // Whole folder, not a sweep of orphans: identifying an orphan means
+        // mapping a derivative back to a source, which is the id/name mapping
+        // that has bitten this plugin twice. --clear already accepts a full
+        // rebuild, so re-deriving is the honest cost of asking for one.
+        if (runtime.options.clear) {
+            await rm(runtime.options.assetsFolder, { recursive: true, force: true })
+            logger.info('Assets cleared: %s', runtime.options.assetsFolder)
+        }
+
         await mkdir(runtime.options.assetsFolder, { recursive: true })
 
         let link = path.join(runtime.options.outputFolder, runtime.options.assets)

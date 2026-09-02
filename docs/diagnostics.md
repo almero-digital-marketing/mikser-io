@@ -882,6 +882,14 @@ surfaces that turn silence into a statement:
 - **A plugin that appears to do nothing** — `No plugins loaded` with a
   config present is a warning naming the file. A config that fails to
   load now exits non-zero rather than loading as empty.
+- **A derivative for a source that is gone.** The assets folder sits at
+  the working-folder root, outside both `outputFolder` and the runtime
+  folder, and it is symlinked INTO the output — so an orphaned derivative
+  is still served, and `find out -type f` cannot see it (that tree is
+  reached through a link; use `find -L`). `--clear` removes the folder and
+  re-derives what still has a source. An ordinary build does not: the
+  files plugin performs no delete sweep, so a source deleted from disk
+  stays in the catalog and its derivative stays with it.
 - **A postprocess that could not run** — a stage whose external
   dependency is absent (no chrome for a PDF, no binary for a conversion)
   reports a fault naming the subsystem, and each page that wanted that
