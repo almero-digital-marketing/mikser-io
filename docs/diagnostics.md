@@ -14,12 +14,12 @@ engine source, the entry point is missing and belongs on this page.
 | --- | --- |
 | Why didn't this page rebuild? | [`--explain`](#--explain-entity) |
 | What did this build actually change? | [`--json`](#--json) |
-| Does the output folder match what mikser thinks it wrote? | [`--verify`](#--verify) |
+| Does the output folder match what mikser thinks it wrote? | [`--audit-output`](#--audit-output) |
 | What happened during the last cycle, in order? | [`mikser_journal`](#mikser_journal) |
 | What depends on this entity? | [`runtime.refs`](#runtimerefs) |
 | Which layout claimed this document, and why that one? | [`layouts.inspect()`](#layoutsinspect) |
 | Why does this page's output look stale? | [`runtime.manifest`](#runtimemanifest) |
-| Two files seem to fight over one output | [`--explain`](#--explain-entity), [`--verify`](#--verify) |
+| Two files seem to fight over one output | [`--explain`](#--explain-entity), [`--audit-output`](#--audit-output) |
 | Which source file produced this built output? | [`runtime.manifest`](#runtimemanifest), `mikser_which` |
 | Where was this VALUE written — file, field, line? | [`runtime.provenance`](#runtimeprovenance) |
 | What would break if I changed this file? | [`runtime.manifest`](#runtimemanifest) `affectedBy` |
@@ -203,8 +203,8 @@ make that readable — "broke just now" and "broken for an hour" are
 different situations. The marker clears itself on the first success.
 
 **A one-shot build with render errors exits `1`.** That is the signal a CI
-gate needs, because `mikser && mikser --verify` would otherwise pass a
-build in which nothing rendered: `--verify` compares the output against the
+gate needs, because `mikser && mikser --audit-output` would otherwise pass a
+build in which nothing rendered: `--audit-output` compares the output against the
 manifest, both of which still describe the last good render. Watch mode
 keeps running — a failed render there is a state to fix on the next cycle,
 not a reason to tear down the watcher.
@@ -274,7 +274,7 @@ Warnings carry a stable `code` alongside their prose, so a test can
 assert "this build produced no preset-no-match" without grepping a
 sentence someone may later reword.
 
-### `--verify`
+### `--audit-output`
 
 Walks the output folder against the recorded snapshots and reports drift
 instead of building. Four categories, and the split matters:
@@ -299,7 +299,7 @@ missing or mismatched, `1` if only warnings, `0` when clean, and `2` when
 there is no manifest to check against.
 
 ```bash
-npx mikser --verify || echo "output folder has drifted"
+npx mikser --audit-output || echo "output folder has drifted"
 ```
 
 A destination is resolved against the output folder first and, when that
@@ -313,14 +313,24 @@ it. That is normal for anything written without a render snapshot (the
 `files` and `data` plugins), and a real signal for a page whose layout
 stopped producing it.
 
-**What a pass means, and what it does not.** Verify compares each output file
+**What a pass means, and what it does not.** It compares each output file
 against the hash *its own render recorded*. Every render rewrites that
 snapshot, so a render whose output changed records the new bytes and then
-matches them — a rendering regression verifies clean, by construction. It is
-a tampering check: files edited, truncated or removed outside mikser. It is
-not a regression check, and the name promises more than it delivers. To catch
-a regression you need snapshots from a build you trust, which mikser does not
-currently keep.
+matches them. It is a tampering check — files edited, truncated or removed
+outside mikser — and it cannot, by construction, tell you a render changed.
+
+That question is answered by **`output-drift`** instead, reported by the build
+itself rather than by a check afterwards: at the moment a snapshot is
+replaced, the row being overwritten is still readable, so an output that moved
+while its `inputHash` stood still is knowable exactly once — before the
+evidence is gone. Unchanged inputs and changed bytes means the cause was not
+the content: an upgraded renderer, a changed helper, a dependency that shifted
+under the build.
+
+Only entities that actually rendered can drift, so an ordinary build reports
+on what moved. Under `--force` everything re-renders with unchanged inputs,
+which makes it a full sweep — **`mikser --force` after a package upgrade is
+the regression check**.
 
 ### The rest, briefly
 
@@ -353,16 +363,16 @@ npx mikser --tools
 npx mikser --tool which --tool-args '{"destination":"/bg/index.html","text":"Контакти"}'
 ```
 
-Tool names are **bare** here — `explain`, `verify`, `sources`, `which`. The
+Tool names are **bare** here — `explain`, `audit_output`, `sources`, `which`. The
 `mikser_` prefix belongs to MCP, where tool names share one flat namespace
-across every server a client has connected to and an unprefixed `verify`
+across every server a client has connected to and an unprefixed `audit_output`
 would collide with anyone else's. The engine has no such problem, and
 `mikser --tool mikser_explain` says mikser twice. The prefix is added at
 the session boundary, so an MCP client sees exactly the names it always
 did. Either form is accepted on the CLI, because an agent reading MCP
 documentation should not have to know which surface stripped what.
 
-A report-and-exit run — `--explain`, `--verify`, `--tools`, `--tool` —
+A report-and-exit run — `--explain`, `--audit-output`, `--tools`, `--tool` —
 never wipes the cache, even when the config or the schema version has
 moved. Wiping for one destroys the state it was asked to describe and
 then answers from the empty result as though that were the answer;
@@ -405,7 +415,7 @@ language, which the engine has no business owning. A tool needing real
 validation registers through `runtime.options.mcp` with zod, which is
 what every tool in that plugin does.
 
-**`explain`, `verify`, `sources` and `build_report` are the engine's own**,
+**`explain`, `audit_output`, `sources` and `build_report` are the engine's own**,
 registered in `src/builtin-tools.js` rather than by a plugin. `sources`
 is the reverse lookup — what produced this destination, each source
 tagged with how it got there — reading the `refClosure` through
@@ -413,16 +423,16 @@ tagged with how it got there — reading the `refClosure` through
 `mikser-io-mcp`'s `which`, which reports each occurrence's line and
 whether the string begins it: a declaration usually does and a use
 usually does not, which separates the two in any text format without a
-per-language grammar. That is what makes `--tool mikser_verify` work on a bare engine,
-the same as `--verify` — before, the engine's diagnostics needed an agent
+per-language grammar. That is what makes `--tool mikser_audit_output` work on a bare engine,
+the same as `--audit-output` — before, the engine's diagnostics needed an agent
 surface configured to be reachable as tools, which is backwards.
 
-`--explain` and `--verify` stay as flags rather than becoming `--tool`
+`--explain` and `--audit-output` stay as flags rather than becoming `--tool`
 invocations. They are not a second implementation: the flag and the tool
-both call `explain()` and `manifest.verify()`. Routing the flag through
+both call `explain()` and `manifest.auditOutput()`. Routing the flag through
 the tool would add a JSON serialize-and-reparse for nothing. What the
 flags carry that the tool cannot is presentation and exit status —
-`formatExplain`'s aligned columns are for a person, and `--verify` exits
+`formatExplain`'s aligned columns are for a person, and `--audit-output` exits
 `0` / `1` / `2` for OK / WARN / FAIL, a CI gate contract that `--tool`'s
 `0` / `1` cannot express without lying about one of the three.
 
@@ -432,7 +442,7 @@ Everything above assumes a shell on the machine. Three of these questions
 are also answerable from a running server, which is what CI, a dashboard,
 an SDK, or an agent speaking MCP actually has.
 
-**MCP** — `mikser_explain`, `mikser_build_report`, `mikser_verify`,
+**MCP** — `mikser_explain`, `mikser_build_report`, `mikser_audit_output`,
 alongside the existing `mikser_refs_*`, `mikser_layouts_inspect` and the
 `mikser://logs/recent` resource. Four more answer the questions a shell
 would otherwise be needed for: `mikser_search` finds a string across
@@ -622,7 +632,7 @@ What was rendered and whether it needs redoing.
 | `sourcesBehind(snapshot)` | the source entities that fed one render, each with `via` naming HOW it got there (layout, partial, ref, or the recorded query it matched) |
 | `sourcesOf(destination)` | the same across every entity claiming a destination, unioned — what `mikser_which` answers from |
 | `affectedBy(entity)` | which destinations would re-render if this entity changed, each with the same `reason` the build report uses |
-| `verify({outputFolder})` | `{ verdict, missing, mismatched, unverifiable, orphaned, collisions }` — what `--verify` reports; pure, no mutations |
+| `verify({outputFolder})` | `{ verdict, missing, mismatched, unverifiable, orphaned, collisions }` — what `--audit-output` reports; pure, no mutations |
 | `collisions()` | destinations claimed by more than one entity, with the ids claiming each |
 | `writerOf(destination, outputHash)` | which of several claimants wrote the bytes now on disk, when the hashes can tell them apart |
 | `size()` | snapshot count |
@@ -773,10 +783,10 @@ There is no opt-out. A flag for running a second engine on a held folder
 only ever enabled the accident this surface prevents, and stopping the
 instance serves every case it was reached for.
 
-`--tool`, `--tools`, `--verify` and `--explain` forward as well, and for a
+`--tool`, `--tools`, `--audit-output` and `--explain` forward as well, and for a
 different reason than builds do. They only read, so running one locally never
 damaged anything — it just could not be trusted: on a large site a local
-`--verify` reads a catalogue the instance is halfway through writing and
+`--audit-output` reads a catalogue the instance is halfway through writing and
 reports drift that is a cycle in progress. The instance has the settled state
 and the config that produced it. Exit codes cross the socket unchanged, so
 `--explain` still answers 3 for an entity that is not there.

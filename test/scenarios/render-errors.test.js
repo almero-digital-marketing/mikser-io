@@ -4,9 +4,9 @@
 // all three machine-readable channels at once: the report had no error
 // bucket, failed entities sat in `rendered` (so `rendered: 12` beside zero
 // written files), and the exit code was 0. Only the human log knew, which
-// makes `mikser && mikser --verify` in CI pass with every page stale.
+// makes `mikser && mikser --audit-output` in CI pass with every page stale.
 //
-// --verify is NOT the place to fix it, and is correct as it stands: a failed
+// --audit-output is NOT the place to fix it, and is correct as it stands: a failed
 // render writes no snapshot, so the manifest still describes the previous
 // good render and the previous good bytes are still on disk. Not clobbering
 // good output on a failed render is what makes the failure survivable — and
@@ -64,7 +64,7 @@ describe('a build with render errors', () => {
     })
 
     it('exits non-zero when renders throw', async () => {
-        // The signal a CI gate needs. `mikser && mikser --verify` must not
+        // The signal a CI gate needs. `mikser && mikser --audit-output` must not
         // pass a build in which nothing rendered.
         await rm(path.join(workdir, 'layouts', 'partials', 'btn.hbs'))
         const { code } = await build()

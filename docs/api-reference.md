@@ -41,7 +41,7 @@ await runtime.start()
 | `watch` | boolean | `false` | Watch mode |
 | `force` | boolean | `false` | Rebuild everything; disable incremental dispatch |
 | `resume` | boolean | `false` | Continue from journal left by a previous interrupted run; skip the initial filesystem scan |
-| `verify` | boolean | `false` | Verify output folder against manifest; report drift instead of building |
+| `auditOutput` | boolean | `false` | Audit the output folder against the snapshots the last build recorded — detects files changed or removed outside mikser, not a render that changed |
 | `debug` | boolean | `false` | Debug logging |
 | `trace` | boolean | `false` | Trace logging |
 | `threads` | number | `4` | Worker thread count |

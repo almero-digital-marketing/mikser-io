@@ -1,4 +1,4 @@
-// manifest.verify() — what `mikser --verify` reports.
+// manifest.auditOutput() — what `mikser --audit-output` reports.
 //
 // `destination` arrives in two shapes and both are legitimate:
 //
@@ -47,7 +47,7 @@ function makeDb() {
     return db
 }
 
-describe('manifest.verify()', () => {
+describe('manifest.auditOutput()', () => {
     let root, outputFolder, derivedFolder, db, manifest
 
     beforeEach(async () => {
@@ -87,7 +87,7 @@ describe('manifest.verify()', () => {
         await writeFile(path.join(outputFolder, 'page.html'), 'page bytes')
         record('/documents/page.md', '/page.html', 'page bytes')
 
-        const diff = await manifest.verify({ outputFolder })
+        const diff = await manifest.auditOutput({ outputFolder })
         assert.deepEqual(diff.missing, [])
         assert.deepEqual(diff.mismatched, [])
     })
@@ -97,7 +97,7 @@ describe('manifest.verify()', () => {
         await writeFile(abs, 'webp bytes')
         record('/files/hero.jpg', abs, 'webp bytes')
 
-        const diff = await manifest.verify({ outputFolder })
+        const diff = await manifest.auditOutput({ outputFolder })
         assert.deepEqual(
             diff.missing, [],
             'a file that exists at the recorded absolute path is not missing',
@@ -108,7 +108,7 @@ describe('manifest.verify()', () => {
         const abs = path.join(derivedFolder, 'gone.webp')
         record('/files/gone.jpg', abs, 'never written')
 
-        const diff = await manifest.verify({ outputFolder })
+        const diff = await manifest.auditOutput({ outputFolder })
         assert.equal(diff.missing.length, 1)
         assert.equal(diff.missing[0].destination, abs)
     })
@@ -119,7 +119,7 @@ describe('manifest.verify()', () => {
         record('/files/changed.jpg', abs, 'original')
         await writeFile(abs, 'edited outside mikser')
 
-        const diff = await manifest.verify({ outputFolder })
+        const diff = await manifest.auditOutput({ outputFolder })
         assert.deepEqual(diff.missing, [])
         assert.equal(diff.mismatched.length, 1)
         assert.equal(diff.mismatched[0].destination, abs)
@@ -134,7 +134,7 @@ describe('manifest.verify()', () => {
         await writeFile(abs, 'webp bytes')
         record('/files/hero.jpg', abs, 'webp bytes')
 
-        const diff = await manifest.verify({ outputFolder })
+        const diff = await manifest.auditOutput({ outputFolder })
         assert.deepEqual(diff.missing, [])
         assert.deepEqual(
             diff.orphaned, [],
@@ -144,7 +144,7 @@ describe('manifest.verify()', () => {
 
     it('reports a real orphan', async () => {
         await writeFile(path.join(outputFolder, 'stray.html'), 'nobody claims this')
-        const diff = await manifest.verify({ outputFolder })
+        const diff = await manifest.auditOutput({ outputFolder })
         assert.deepEqual(diff.orphaned.map(o => o.path), ['stray.html'])
     })
 
@@ -155,7 +155,7 @@ describe('manifest.verify()', () => {
         record('/documents/page.md', '/page.html', 'page bytes')
         record('/files/hero.jpg', abs, 'webp bytes')
 
-        const diff = await manifest.verify({ outputFolder })
+        const diff = await manifest.auditOutput({ outputFolder })
         assert.deepEqual(diff.missing, [])
         assert.deepEqual(diff.mismatched, [])
         assert.deepEqual(diff.orphaned, [])

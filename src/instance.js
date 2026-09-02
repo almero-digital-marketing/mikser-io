@@ -70,7 +70,7 @@ export function socketPath(workingFolder) {
 // ship together, so there is nothing to negotiate and no version to carry.
 //
 //   → { type: 'build',  config, clear }
-//   → { type: 'report', config, tool, tools, toolArgs, explain, verify, json }
+//   → { type: 'report', config, tool, tools, toolArgs, explain, auditOutput, json }
 //   ← { type: 'log', chunk }        (zero or more, in order)
 //   ← { type: 'done', code }
 //   ← { type: 'refused', reason, detail }
@@ -255,7 +255,7 @@ async function configStale() {
 // Report-only commands, answered from the live catalogue.
 //
 // These read; they do not write, so running them locally was safe for the
-// FILES. It was not safe for the ANSWER. A local --verify at ten thousand
+// FILES. It was not safe for the ANSWER. A local --audit-output at ten thousand
 // pages reads a catalogue the instance is in the middle of writing and reports
 // drift that is a half-finished cycle, and a local --tool answers from
 // whatever the last build left rather than from what is true now.

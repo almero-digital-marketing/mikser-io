@@ -81,13 +81,13 @@ describe('destination collisions', () => {
     })
 
     it('verify names both claimants and exits non-zero', async () => {
-        const result = await runMikser(workdir, ['--verify'])
+        const result = await runMikser(workdir, ['--audit-output'])
         const text = (result.stdout + result.stderr).replace(/\x1b\[[0-9;]*m/g, '')
 
         assert.match(text, /Collision:\s+\/bg\/index\.html/, 'names the destination')
         assert.match(text, /index\.md/, 'names one claimant')
         assert.match(text, /index\.yml/, 'names the other')
-        assert.match(text, /Verify WARN/, 'a discarded output is not an OK verdict')
+        assert.match(text, /Audit WARN/, 'a discarded output is not an OK verdict')
         assert.equal(result.code, 1,
             'WARN exits 1 — visible to a gate, distinct from the 2 that means real drift')
     })
@@ -114,7 +114,7 @@ describe('destination collisions', () => {
         assert.match((rebuild.stdout + rebuild.stderr).replace(/\x1b\[[0-9;]*m/g, ''),
             /keeping the file/, 'and the build must say why it is stale')
 
-        const result = await runMikser(workdir, ['--verify'])
+        const result = await runMikser(workdir, ['--audit-output'])
         const text = (result.stdout + result.stderr).replace(/\x1b\[[0-9;]*m/g, '')
         assert.doesNotMatch(text, /Collision:/, 'one claimant left, so no collision')
         assert.match(text, /Orphan:\s+bg\/index\.html/, 'but the file is unclaimed and says so')

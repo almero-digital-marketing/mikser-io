@@ -356,7 +356,7 @@ onFinalize(async () => {
     await applyJournalMutations()
 
     // Checkpoint the WAL so the main file size stays representative
-    // and external tools (mikser --verify on a separate run, debug
+    // and external tools (mikser --audit-output on a separate run, debug
     // scripts) see committed state. PASSIVE never blocks readers or
     // writers; it only catches up what it can.
     if (!db?.isOpen) return

@@ -312,7 +312,7 @@ brevity.
   EINVAL`. chmod 0600, so the filesystem permission is the access
   decision. A forwarded build RESCANS (`runtime.rebuild()`), never
   drains: a client can beat the inotify event for the file it just
-  wrote. Report-only commands (`--tool`, `--tools`, `--verify`,
+  wrote. Report-only commands (`--tool`, `--tools`, `--audit-output`,
   `--explain`) forward too — they read, so a local run damaged nothing,
   but a catalogue another process is mid-write in is not one anyone can
   answer from. `runReportOnly()` in engine.js is the one implementation
@@ -345,9 +345,9 @@ brevity.
   Dispatched at `onImport`, not `onLoaded` — the engine's own onLoaded is
   registered during setup(), ahead of the plugins that register the tools.
 - `builtin-tools.js` — the engine's own diagnostics as tools
-  (`mikser_explain`, `mikser_verify`, `mikser_build_report`). Registered
-  by the engine, not by mcp, so `--tool mikser_verify` works on a bare
-  engine exactly as `--verify` does. Schemas use a neutral
+  (`mikser_explain`, `mikser_audit_output`, `mikser_build_report`). Registered
+  by the engine, not by mcp, so `--tool mikser_audit_output` works on a bare
+  engine exactly as `--audit-output` does. Schemas use a neutral
   `{ type, required?, description? }` vocabulary; mcp converts to zod at
   bind time, because the registry must not depend on one transport's
   schema library.
@@ -521,7 +521,7 @@ Test coverage: `test/unit/source-sweep.test.js`.
   it, not a reserved prefix. Follow the eight, do not invent a ninth
   shape.
 - **Tool names**: the registry (`src/tools.js`) holds BARE names —
-  `explain`, `verify`, `sources`, `search`. The `mikser_` prefix is MCP's
+  `explain`, `audit_output`, `sources`, `search`. The `mikser_` prefix is MCP's
   namespacing, because its tool names are flat across every connected
   server; `mikser-io-mcp` strips it when mirroring a registration into the
   engine and re-adds it when binding into a session. `invokeTool` accepts
@@ -790,7 +790,7 @@ the consumer's own project tree — no duplication, no bug.
 ## Reference
 
 - `docs/diagnostics.md` — "why did it do that?" — `--explain`,
-  `--json`, `--verify`, the sqlite tables, and every introspection
+  `--json`, `--audit-output`, the sqlite tables, and every introspection
   surface, indexed by the question it answers. Start here when
   debugging rather than reading engine source.
 - `docs/architecture.md` — module map (audit before relying

@@ -964,10 +964,10 @@ export function api(options = {}) {
 
             // ── Diagnostics ────────────────────────────────────────
             //
-            // The three questions --explain, --json and --verify answer, for
+            // The three questions --explain, --json and --audit-output answer, for
             // a RUNNING server: CI asking "did that deploy actually rebuild
             // anything", a dashboard, an SDK, anything not speaking MCP.
-            // `mikser && mikser --verify` becomes a request against the
+            // `mikser && mikser --audit-output` becomes a request against the
             // instance that is actually serving.
             //
             // Gated on their own `diagnostics` operation, which is in NEITHER
@@ -1006,9 +1006,9 @@ export function api(options = {}) {
                 }
             })
 
-            router.get('/verify', auth, allow('diagnostics'), async (req, res) => {
+            router.get('/audit-output', auth, allow('diagnostics'), async (req, res) => {
                 try {
-                    if (!runtime.manifest?.verify) {
+                    if (!runtime.manifest?.auditOutput) {
                         return res.status(503).json({ error: 'No manifest available — nothing to verify against' })
                     }
                     // 200 either way — the check ran and this is its answer. A
@@ -1017,7 +1017,7 @@ export function api(options = {}) {
                     // would conflate "drift found" with "request failed". The
                     // verdict comes from the manifest so this route cannot
                     // disagree with the CLI about what counts as a failure.
-                    const diff = await runtime.manifest.verify()
+                    const diff = await runtime.manifest.auditOutput()
                     return res.json({ snapshots: runtime.manifest.size?.() ?? null, ...diff })
                 } catch (err) {
                     logger.error('Api verify error: %s', err.message)

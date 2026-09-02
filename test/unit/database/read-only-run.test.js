@@ -7,7 +7,7 @@ import path from 'node:path'
 import runtime from '../../../src/runtime.js'
 import { createSqliteDatabase } from '../../../src/database/index.js'
 
-// A report-and-exit invocation — --explain, --verify, --tools, --tool — never
+// A report-and-exit invocation — --explain, --audit-output, --tools, --tool — never
 // runs a build. Wiping the cache for one therefore destroys the state it was
 // asked to describe and then answers from the empty result as though that were
 // the answer.
@@ -23,13 +23,13 @@ let dir
 before(async () => { dir = await mkdtemp(path.join(tmpdir(), 'mikser-readonly-')) })
 after(async () => {
     await rm(dir, { recursive: true, force: true })
-    runtime.options = { ...runtime.options, explain: undefined, verify: undefined, tool: undefined, tools: undefined }
+    runtime.options = { ...runtime.options, explain: undefined, auditOutput: undefined, tool: undefined, tools: undefined }
 })
 
 beforeEach(() => {
     runtime.options = {
         ...runtime.options,
-        explain: undefined, verify: undefined, tool: undefined, tools: undefined,
+        explain: undefined, auditOutput: undefined, tool: undefined, tools: undefined,
     }
 })
 
@@ -55,7 +55,7 @@ function seedAndClose({ configChecksum }) {
 }
 
 describe('a read-only run does not wipe the cache it was asked to describe', () => {
-    for (const flag of ['explain', 'verify', 'tool', 'tools']) {
+    for (const flag of ['explain', 'auditOutput', 'tool', 'tools']) {
         it(`--${flag} keeps the cache when the config checksum moved`, () => {
             seedAndClose({ configChecksum: 'config-a' })
             runtime.options[flag] = flag === 'explain' ? '/documents/x.md'

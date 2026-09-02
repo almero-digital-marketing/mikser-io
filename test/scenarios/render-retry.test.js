@@ -5,7 +5,7 @@
 //
 //   - the entity's own source has not changed, so it is gated at import and
 //     never re-dispatched
-//   - the manifest still describes the last good render, so --verify is clean
+//   - the manifest still describes the last good render, so --audit-output is clean
 //   - --explain reports `[current]` and `would be SKIPPED` for a page whose
 //     render is throwing, which is the one tool whose entire job is "why is
 //     this not rebuilding"

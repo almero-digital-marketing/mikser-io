@@ -53,7 +53,7 @@ These options are part of `runtime.options` and apply to the engine itself.
 | `watch` | `-w, --watch` | boolean | `false` | Watch source folders for changes and rebuild incrementally. |
 | `force` | `-f, --force` | boolean | `false` | Rebuild everything; disable incremental dispatch. |
 | `resume` | `-R, --resume` | boolean | `false` | Continue from journal entries left by a previous interrupted run; skip the initial filesystem scan. The journal table survives crashes, so an interrupted cycle can be picked up by re-running with `--resume`. |
-| `verify` | `--verify` | boolean | `false` | Verify the output folder against the manifest snapshot — report drift instead of building. |
+| `verify` | `--audit-output` | boolean | `false` | Verify the output folder against the manifest snapshot — report drift instead of building. |
 | `debug` | `-d, --debug` | boolean | `false` | Enable debug-level logging. |
 | `trace` | `-t, --trace` | boolean | `false` | Enable trace-level logging (very verbose). |
 | `threads` | — | number | `4` | Worker thread count for the Piscina pools (`renderWorkers`, `postprocessWorkers`). Both pools are lazy (`minThreads: 0` + `idleTimeout: 30_000`) so INLINE-only workloads spin up zero workers. |

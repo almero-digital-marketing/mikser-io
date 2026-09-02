@@ -3,7 +3,7 @@
 // The url helpers BUILD paths rather than resolving entities, so a wrong
 // preset, a wrong extension, or a derivative that silently failed all ship a
 // well-formed url pointing at nothing on a green build. Nothing else catches
-// it: --verify compares snapshots against what was rendered, not against what
+// it: --audit-output compares snapshots against what was rendered, not against what
 // those renders point at, and refs tracking covers document-to-document refs,
 // not urls.
 //

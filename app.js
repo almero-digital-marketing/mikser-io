@@ -35,14 +35,14 @@ function locate(argv) {
     // What to ask the instance for. Report-only commands go over the same
     // socket as a build: they read, so running them locally never damaged
     // anything, but a catalogue being written by another process is not a
-    // catalogue anyone can answer from — a --verify against a half-finished
+    // catalogue anyone can answer from — a --audit-output against a half-finished
     // cycle reports drift that is not there.
     const tool = value('--tool')
     const explain = value('--explain')
     const request = has('--tools') ? { type: 'report', tools: true, json: has('--json') }
         : tool                    ? { type: 'report', tool, toolArgs: value('--tool-args'), json: has('--json') }
         : explain                 ? { type: 'report', explain, json: has('--json') }
-        : has('--verify')         ? { type: 'report', verify: true, json: has('--json') }
+        : has('--audit-output')   ? { type: 'report', auditOutput: true, json: has('--json') }
         : { type: 'build', clear: has('--clear') }
 
     return {

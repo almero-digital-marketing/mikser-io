@@ -80,7 +80,7 @@ export function whenCycleCompletes(id) {
     // and cannot tell whether the work happened.
     if (isReportOnlyRun()) {
         return Promise.reject(new Error(
-            'No build runs in a --tool/--explain/--verify invocation, so there is no cycle to wait '
+            'No build runs in a --tool/--explain/--audit-output invocation, so there is no cycle to wait '
             + 'for. The write itself has landed. Run `mikser` to build it, or use --server with the '
             + 'MCP endpoint, where a watch cycle exists to await.'))
     }

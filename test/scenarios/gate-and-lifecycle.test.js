@@ -295,7 +295,7 @@ describe('layout & partial deletion while mikser off', () => {
         // Loud means non-zero. This asserted exit 0 — "should not crash" —
         // which conflated crashing with reporting: a build whose renders
         // threw is a failed build, and a CI gate chaining `mikser && mikser
-        // --verify` needs to see that. It still completes cleanly rather
+        // --audit-output` needs to see that. It still completes cleanly rather
         // than aborting, which is what the sweep assertions below check.
         assert.equal(code, 1, 'a build whose renders threw must exit non-zero')
         assert.match(combined, /Mikser completed with \d+ render error/,
@@ -333,7 +333,7 @@ describe('layout & partial deletion while mikser off', () => {
         // This asserted 0 renders, on the reasoning that nothing in the graph
         // had changed. True, and it left the output from the failed cycle in
         // place with every signal reporting success — the claim in the old
-        // comment that `--verify` would detect it does not hold, because a
+        // comment that `--audit-output` would detect it does not hold, because a
         // failed render writes no snapshot and the manifest stays consistent
         // with the last good one.
         assertRendered(combined, 2)
@@ -351,8 +351,8 @@ describe('layout & partial deletion while mikser off', () => {
     })
 })
 
-describe('mikser --verify', () => {
-    const workdir = freshWorkdir('verify')
+describe('mikser --audit-output', () => {
+    const workdir = freshWorkdir('audit-output')
     after(() => cleanup(workdir))
 
     before(async () => {
@@ -365,10 +365,10 @@ describe('mikser --verify', () => {
         await runMikser(workdir)
     })
 
-    it('exit 0 + Verify OK on a clean build', async () => {
-        const { code, combined } = await runMikser(workdir, ['--verify'])
+    it('exit 0 + Audit OK on a clean build', async () => {
+        const { code, combined } = await runMikser(workdir, ['--audit-output'])
         assert.equal(code, 0)
-        assert.match(combined, /Verify OK/)
+        assert.match(combined, /Audit OK/)
     })
 
     it('exit 2 + Mismatched when an output file is tampered with', async () => {
@@ -379,10 +379,10 @@ describe('mikser --verify', () => {
         const filePath = path.join(workdir, 'out', snap.destination)
         await appendFile(filePath, '<!-- tampered -->')
 
-        const { code, combined } = await runMikser(workdir, ['--verify'])
+        const { code, combined } = await runMikser(workdir, ['--audit-output'])
         assert.equal(code, 2, 'tampered file should produce exit 2')
         assert.match(combined, /Mismatched/)
-        assert.match(combined, /Verify FAIL/)
+        assert.match(combined, /Audit FAIL/)
     })
 
     it('exit 2 + Missing when an output file is deleted', async () => {
@@ -390,7 +390,7 @@ describe('mikser --verify', () => {
         const snap = m.find(e => e.id === '/documents/hello.html')
         await rm(path.join(workdir, 'out', snap.destination))
 
-        const { code, combined } = await runMikser(workdir, ['--verify'])
+        const { code, combined } = await runMikser(workdir, ['--audit-output'])
         assert.equal(code, 2)
         assert.match(combined, /Missing/)
     })

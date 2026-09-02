@@ -7,7 +7,7 @@
 //     own bytes are identical to last cycle AND none of its tracked
 //     dependencies (layout, partials, $-refs, queries) mutated, the
 //     render is short-circuited
-//   - `mikser --verify` walks output folder against recorded snapshots
+//   - `mikser --audit-output` walks output folder against recorded snapshots
 //
 // Storage: `mikser_snapshots` table in the engine's sqlite database,
 // alongside `mikser_entities` and `mikser_refs`. Composite primary key
@@ -106,7 +106,7 @@ registerSchema('mikser_snapshots', SNAPSHOTS_SCHEMA)
 // consequences all follow from that one absence: the entity is gated at
 // import next cycle (its own source did not change), so it is never
 // re-dispatched; the manifest still describes the last good render, so
-// --verify is clean; and --explain reports `[current]` and `would be
+// --audit-output is clean; and --explain reports `[current]` and `would be
 // SKIPPED` for a page whose render is throwing — the one tool whose job is
 // "why is this not rebuilding", answering "because there is nothing to do".
 //
@@ -1063,8 +1063,8 @@ export function createManifest(db) {
 
         // Walk the output folder against recorded snapshots, returning
         // a diff describing missing / mismatched / orphaned /
-        // unverifiable. Backs `mikser --verify`. Pure: no mutations.
-        async verify({ outputFolder } = {}) {
+        // unverifiable. Backs `mikser --audit-output`. Pure: no mutations.
+        async auditOutput({ outputFolder } = {}) {
             outputFolder = outputFolder || runtime.options.outputFolder
             const missing = []
             const mismatched = []
@@ -1160,6 +1160,7 @@ export function createManifest(db) {
         _stmtSelectByDestination: stmtSelectByDestination,
         _stmtDeleteByDestination: stmtDeleteByDestination,
         _stmtDeleteByPK:         stmtDeleteByPK,
+        _stmtLookup:             stmtLookup,
         _stmtUpsert:             stmtUpsert,
     }
     return manifest
@@ -1284,7 +1285,7 @@ onFinalize(async () => {
     // `index.yml` — and deleting one of them was taking the shared output
     // with it: the file vanished while the survivor's snapshot still said it
     // was there, the survivor's own source had not changed so nothing
-    // re-rendered it, and --verify reported it missing.
+    // re-rendered it, and --audit-output reported it missing.
     //
     // That made "resolve the collision by deleting the stub" delete the
     // homepage, which is the opposite of what the operator asked for and the
@@ -1304,7 +1305,7 @@ onFinalize(async () => {
     // yet, and the file goes — with `Rendered: 1`, a green build and no
     // warning. A second build does not fix it (nothing changed), nor does
     // touch (the input hash is the same); only a real content edit re-renders
-    // it. Only --verify ever said so, and renaming an extension is the most
+    // it. Only --audit-output ever said so, and renaming an extension is the most
     // common action there is during a migration.
     const claimedByThisCycle = new Set()
     for (const { entity } of renderedEntries) {
@@ -1366,6 +1367,9 @@ onFinalize(async () => {
     // `parent` is checked too, mirroring _stmtDeleteByIdOrParent — a deleted
     // parent takes its paginated children's snapshots with it.
     const recordedSnapshots = []
+    // Entities whose output moved while their inputs did not — collected
+    // inside the transaction, reported by the caller once it commits.
+    const drifted = []
     for (const { entity, deps, metaReads, consumedReads } of renderedEntries) {
         if (deleted.has(entity.id) || (entity.parent && deleted.has(entity.parent))) continue
         const outputHash = await hashOutputFile(entity.destination)
@@ -1383,8 +1387,59 @@ onFinalize(async () => {
             m._stmtDeleteByPK.run(id, destination)
         }
         // 3c. Record successful renders.
+        //
+        // Drift: the same inputs produced different output.
+        //
+        // The row about to be replaced is still readable here, and it carries
+        // both hashes — so an output that moved while its inputHash stood
+        // still is knowable at the moment it happens, for the cost of one
+        // lookup. That is a rendering change nobody asked for: an upgraded
+        // renderer, a changed helper, a dependency that shifted under the
+        // build. Every entity input is in inputHash by construction, so if
+        // that did not move, the cause was not the content.
+        //
+        // Recorded here rather than checked later because later is too late —
+        // the render rewrites its own snapshot, so by the time anything asks,
+        // the evidence has been replaced by the new bytes agreeing with
+        // themselves. That is why --audit-output reported OK on a regression.
+        //
+        // Only entities that actually rendered can drift. Under an ordinary
+        // build the unchanged ones are skipped and never reach here, so this
+        // reports on what moved; under --force everything re-renders with
+        // unchanged inputs, which makes it a full sweep.
         for (const snap of recordedSnapshots) {
+            const prior = m._stmtLookup.get(snap.id, snap.destination)
+            if (prior
+                && prior.inputHash
+                && prior.inputHash === snap.inputHash
+                && prior.outputHash
+                && snap.outputHash
+                && prior.outputHash !== snap.outputHash) {
+                drifted.push({ id: snap.id, destination: snap.destination })
+            }
             m._stmtUpsert.run(snapToRow(snap))
         }
     })
+
+    // Reported after the transaction, so the log never describes a commit
+    // that did not happen.
+    //
+    // A warning, not an error: identical inputs CAN legitimately produce
+    // different bytes — a template that prints a timestamp, an id drawn at
+    // random. Those are worth knowing about once, and then worth fixing,
+    // because a render that is not a function of its inputs cannot be
+    // cached, compared or trusted to be reproducible.
+    if (drifted.length) {
+        const SHOWN = 10
+        for (const { id, destination } of drifted.slice(0, SHOWN)) {
+            logger.warn({ code: 'output-drift', entity: id, destination },
+                'Output changed with unchanged inputs: %s → %s', id, destination)
+        }
+        logger.warn({ code: 'output-drift-summary', drifted: drifted.length },
+            '%d render(s) produced different bytes from the same inputs%s. Nothing about the content '
+            + 'moved, so the cause is outside it — an upgraded renderer, a changed helper, a dependency '
+            + 'that shifted under the build. This is the check --audit-output structurally cannot make: '
+            + 'a render rewrites its own snapshot, so afterwards the new bytes agree with themselves.',
+            drifted.length, drifted.length > SHOWN ? `, ${SHOWN} shown` : '')
+    }
 })

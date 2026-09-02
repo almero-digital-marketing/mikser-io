@@ -112,7 +112,7 @@ mikser [options]
   -f, --force                      Rebuild everything; disable incremental dispatch
   -R, --resume                     Continue from journal entries left by a previous
                                    interrupted run; skip the initial filesystem scan
-      --verify                     Verify output folder against manifest; report
+      --audit-output                     Audit output against recorded snapshots; report
                                    drift instead of building
   -d, --debug                      Show debug log statements
   -t, --trace                      Show trace log statements

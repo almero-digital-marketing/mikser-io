@@ -7,7 +7,7 @@
 // read plugin source and hand-query runtime/mikser.sqlite — which works, and
 // needs knowledge a user of the tool should not need.
 //
-// Follows --verify's shape: report and exit, no build phases run.
+// Follows --audit-output's shape: report and exit, no build phases run.
 import { inputHashOf, inputPartsOf, diffInputParts, lookupKeys, checksum as fileChecksum } from './utils.js'
 import { filterKey } from './track.js'
 import { findEntity, findEntities, findById } from './catalog.js'

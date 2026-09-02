@@ -116,12 +116,12 @@ describe('toolResultText — printing what a tool returned', () => {
 describe('isReportOnlyRun', () => {
     const withOptions = (options, fn) => {
         const saved = runtime.options
-        runtime.options = { ...saved, explain: undefined, verify: undefined, tool: undefined, tools: undefined, ...options }
+        runtime.options = { ...saved, explain: undefined, auditOutput: undefined, tool: undefined, tools: undefined, ...options }
         try { fn() } finally { runtime.options = saved }
     }
 
     it('recognises every report-and-exit flag', () => {
-        for (const options of [{ explain: '/x.md' }, { verify: true }, { tool: 'mikser_ping' }, { tools: true }]) {
+        for (const options of [{ explain: '/x.md' }, { auditOutput: true }, { tool: 'mikser_ping' }, { tools: true }]) {
             withOptions(options, () => assert.equal(isReportOnlyRun(), true, JSON.stringify(options)))
         }
     })

@@ -129,14 +129,14 @@ describe('a second invocation forwards to the running one', () => {
         assert.equal(fixed.code, 0, fixed.combined)
     })
 
-    it('answers --verify from the live catalogue', async () => {
+    it('answers --audit-output from the live catalogue', async () => {
         // These read, so running them locally never damaged anything — and
         // never made them correct either. At ten thousand pages a local
-        // --verify reads a catalogue the instance is mid-way through writing
+        // --audit-output reads a catalogue the instance is mid-way through writing
         // and reports drift that is a half-finished cycle.
-        const { code, combined } = await runMikser(workdir, ['--verify'])
+        const { code, combined } = await runMikser(workdir, ['--audit-output'])
         assert.equal(code, 0, combined)
-        assert.match(combined, /Verify OK/)
+        assert.match(combined, /Audit OK/)
     })
 
     it('keeps --explain\'s not-found exit code across the socket', async () => {
@@ -149,11 +149,11 @@ describe('a second invocation forwards to the running one', () => {
     })
 
     it('refuses a report against the wrong config too', async () => {
-        // A --verify with the wrong config is the incident this project
+        // A --audit-output with the wrong config is the incident this project
         // already wrote a rule about. It answers against a manifest a
         // different config produced, which is wrong whether or not it writes.
         await writeFile(path.join(workdir, 'mikser.config.prod.js'), CONFIG)
-        const { code, combined } = await runMikser(workdir, ['--verify', '-c', 'mikser.config.prod.js'])
+        const { code, combined } = await runMikser(workdir, ['--audit-output', '-c', 'mikser.config.prod.js'])
         assert.equal(code, 1)
         assert.match(combined, /this instance is running/)
     })

@@ -6,7 +6,7 @@
 // never asks whether that file exists. A wrong preset name, a wrong extension,
 // or a source whose derivative silently failed to render all produce a
 // well-formed url pointing at nothing, and every existing surface stays green:
-// nothing threw, --verify compares snapshots against what was rendered rather
+// nothing threw, --audit-output compares snapshots against what was rendered rather
 // than against what those renders point at, and mikser_refs_broken tracks
 // document-to-document refs, not urls.
 //

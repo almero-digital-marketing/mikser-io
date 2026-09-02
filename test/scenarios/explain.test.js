@@ -111,7 +111,7 @@ describe('--explain', () => {
     })
 
     it('exits 3 with a hint when the entity is not in the catalog', async () => {
-        // Distinct from --verify's 1/2: "no such entity" is neither a clean
+        // Distinct from --audit-output's 1/2: "no such entity" is neither a clean
         // build nor a corrupt one, it is a question that could not be answered.
         const { code, stdout } = await explain(['/documents/nope'])
         assert.equal(code, 3)

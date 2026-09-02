@@ -9,7 +9,7 @@
 // green build and no warning.
 //
 // Neither a second build nor a touch recovered it (nothing changed, and the
-// input hash is the same); only a real content edit did. Only --verify ever
+// input hash is the same); only a real content edit did. Only --audit-output ever
 // said so. Renaming an extension is the most common action there is during a
 // migration, which is where this was found.
 

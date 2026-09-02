@@ -1,10 +1,10 @@
 // The engine's own diagnostics, registered as tools.
 //
-// `explain()`, `manifest.verify()` and `buildReport()` are engine functions,
+// `explain()`, `manifest.auditOutput()` and `buildReport()` are engine functions,
 // but the tools wrapping them were registered by the mcp plugin — so
 // `--tool mikser_explain` needed an agent surface configured while `--explain`
 // did not. That is backwards for the engine's own diagnostics, and it is why
-// `--verify` and `--explain` could not simply become `--tool` invocations.
+// `--audit-output` and `--explain` could not simply become `--tool` invocations.
 //
 // Registering them here fixes the direction: they exist on a bare engine, the
 // CLI flags become renderings of them rather than parallel implementations,
@@ -12,7 +12,7 @@
 //
 // Names are BARE — `explain`, not `mikser_explain`. The prefix exists because
 // MCP tool names share one flat namespace across every server a client has
-// connected to, so an unprefixed `verify` would collide with any other server
+// connected to, so an unprefixed `audit_output` would collide with any other server
 // offering one. That is the protocol's constraint, not the engine's: on the CLI
 // `mikser --tool mikser_explain` says mikser twice. So the registry holds the
 // bare name and `mikser-io-mcp` adds the prefix when it binds a tool into a
@@ -70,7 +70,7 @@ export function registerBuiltinTools() {
     )
 
     registerTool(
-        'verify',
+        'audit_output',
         {
             description:
                 'Check the output folder against what the manifest recorded: files missing, files whose bytes no '
@@ -81,14 +81,14 @@ export function registerBuiltinTools() {
         },
         async () => {
             try {
-                if (!runtime.manifest?.verify) return fail('No manifest available — nothing to verify against')
+                if (!runtime.manifest?.auditOutput) return fail('No manifest available — nothing to audit against')
                 // The verdict comes FROM the manifest, which is the single
                 // place that rule lives. Three consumers deriving it from
                 // counts is how one of them silently stopped counting
                 // collisions.
                 return ok({
                     snapshots: runtime.manifest.size?.() ?? null,
-                    ...(await runtime.manifest.verify()),
+                    ...(await runtime.manifest.auditOutput()),
                 })
             } catch (err) {
                 return fail(err.message)

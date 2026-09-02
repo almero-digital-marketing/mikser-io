@@ -231,7 +231,7 @@ export async function runReportOnly(request = {}) {
         toolArgs = runtime.options.toolArgs,
         json = runtime.options.json,
         explain = runtime.options.explain,
-        verify = runtime.options.verify,
+        auditOutput = runtime.options.auditOutput,
     } = request
 
     if (tools) {
@@ -292,7 +292,7 @@ export async function runReportOnly(request = {}) {
     if (explain) {
         // Exit codes:
         //   0 — the entity was found and described
-        //   3 — not in the catalog (distinct from --verify's 1/2, which are
+        //   3 — not in the catalog (distinct from --audit-output's 1/2, which are
         //       about output drift; "no such entity" is neither clean nor
         //       corrupt, it is a question that could not be answered)
         const { explain: explainEntity, formatExplain } = await import('./explain.js')
@@ -301,13 +301,13 @@ export async function runReportOnly(request = {}) {
         return report.found ? 0 : 3
     }
 
-    if (verify) {
+    if (auditOutput) {
         if (!runtime.manifest) {
             logger.error('Verify: no manifest available — nothing to check against')
             return 2
         }
         const { verdict, missing, mismatched, unverifiable, orphaned, collisions } =
-            await runtime.manifest.verify()
+            await runtime.manifest.auditOutput()
         const total = runtime.manifest.size()
 
         for (const e of missing)      logger.error('Missing:    %s (entity %s)', e.destination, e.id)
@@ -325,7 +325,7 @@ export async function runReportOnly(request = {}) {
         // reads as success at a glance even though the exit code is right.
         const report = verdict === 'FAIL' ? logger.error : verdict === 'WARN' ? logger.warn : logger.notice
         report.call(logger,
-            'Verify %s: %d snapshots, %d missing, %d mismatched, %d unverifiable, %d orphaned, %d collisions',
+            'Audit %s: %d snapshots, %d missing, %d mismatched, %d unverifiable, %d orphaned, %d collisions',
             verdict, total, missing.length, mismatched.length, unverifiable.length, orphaned.length, collisions.length)
 
         // Say what a pass means, because the name promises more than the check
@@ -343,9 +343,9 @@ export async function runReportOnly(request = {}) {
         // message, and this would bury them.
         if (verdict === 'OK') {
             logger.info(
-                'Verify compares each output against the hash its own render recorded, so it catches files '
-                + 'changed or removed outside mikser — not a render that changed. A regression rewrites its '
-                + 'own snapshot and passes. To catch that, compare against snapshots from a build you trust.')
+                'Audit compares each output against the hash its own render recorded, so it catches files '
+                + 'changed or removed outside mikser — not a render that changed. A render that changed is '
+                + 'reported as it happens, under `output-drift`.')
         }
         return verdict === 'FAIL' ? 2 : verdict === 'WARN' ? 1 : 0
     }
@@ -393,8 +393,8 @@ export async function setup(options) {
     }
     runtime.state = {}
     // The engine's own diagnostics, as tools. Registered here rather than by a
-    // plugin so they exist on a bare engine — `--tool mikser_verify` must not
-    // need an agent surface configured when `--verify` does not.
+    // plugin so they exist on a bare engine — `--tool mikser_audit_output` must not
+    // need an agent surface configured when `--audit-output` does not.
     registerBuiltinTools()
 
     // One engine per working folder: publish the control socket when this
@@ -412,7 +412,7 @@ export async function setup(options) {
             .option('-w --watch', 'watch entities for changes', false)
             .option('-f --force', 'rebuild everything; disable incremental dispatch', false)
             .option('-R --resume', 'continue from journal entries left by a previous interrupted run; skip the initial filesystem scan', false)
-            .option('--verify', 'verify output folder against manifest; report drift instead of building', false)
+            .option('--audit-output', 'audit the output folder against the snapshots the last build recorded — detects files changed or removed outside mikser, NOT a render that changed', false)
             .option('--explain <entity>', 'explain one entity — layout, destination, hashes, refClosure, and whether a build would re-render it. Accepts an id, a meta.href, or an id without its extension. Reports instead of building.')
             .option('--json', 'machine-readable output (with --explain, --tool, and for a build\'s render/skip/warning report)', false)
             .option('--tools', 'list the tools this build exposes, then exit', false)
@@ -561,7 +561,7 @@ export async function setup(options) {
         // Listing from there returned exactly one, the tool the mcp substrate
         // creates for itself. By `import` every onLoaded has run and the
         // registry is complete. Nothing is imported, because this exits first,
-        // the same way --explain and --verify do.
+        // the same way --explain and --audit-output do.
         if (runtime.options.tools || runtime.options.tool) {
             const code = await runReportOnly()
             if (code !== null) process.exit(code)
@@ -572,7 +572,7 @@ export async function setup(options) {
         const logger = useLogger()
         logger.debug(runtime.options, 'Mikser options')
 
-        // --verify is a standalone read-only mode. Manifest has already
+        // --audit-output is a standalone read-only mode. Manifest has already
         // loaded in its own onLoaded (registered earlier at module
         // import). We diff disk against snapshots, print the report,
         // and exit. No build phases run.
@@ -583,16 +583,16 @@ export async function setup(options) {
         //                 corruption, but state is messy)
         //   2 — errors   (missing or mismatched files — output is
         //                 actually wrong on disk)
-        // --explain: report on one entity and exit, like --verify. Placed
+        // --explain: report on one entity and exit, like --audit-output. Placed
         // before it because a caller reaching for both means the explain.
         //
         // Exit codes:
         //   0 — the entity was found and described
-        //   3 — not in the catalog (distinct from --verify's 1/2, which are
+        //   3 — not in the catalog (distinct from --audit-output's 1/2, which are
         //       about output drift; "no such entity" is neither clean nor
         //       corrupt, it is a question that could not be answered)
         // The same three commands the instance answers over the socket —
-        // one implementation, so a forwarded --verify cannot disagree with a
+        // one implementation, so a forwarded --audit-output cannot disagree with a
         // local one about what it checked.
         const code = await runReportOnly()
         if (code !== null) process.exit(code)
@@ -989,13 +989,13 @@ export async function setup(options) {
 
         // Two entities writing one destination in the same cycle: one
         // silently overwrote the other, and every other signal reads clean.
-        // Reported per cycle rather than only by --verify because this is
+        // Reported per cycle rather than only by --audit-output because this is
         // the moment it happened, and because a build that discards half its
         // output must not report warnings: 0.
         //
         // Derived from the destinations THIS cycle rendered, so an
         // established collision the operator already knows about does not
-        // re-warn on every unrelated build; --verify is where the standing
+        // re-warn on every unrelated build; --audit-output is where the standing
         // state lives.
         for (const [destination, ids] of renderedTo) {
             if (ids.size < 2) continue
@@ -1269,7 +1269,7 @@ export async function setup(options) {
         // document is the only thing on it and can be piped to jq.
         emitReport()
 
-        // Non-zero for a one-shot build, so `mikser && mikser --verify` cannot
+        // Non-zero for a one-shot build, so `mikser && mikser --audit-output` cannot
         // pass with every page in the site stale. `exitCode` rather than
         // process.exit so the report above is flushed and shutdown runs.
         //
@@ -1279,7 +1279,7 @@ export async function setup(options) {
         // past between two green builds — so the exit code is precisely the
         // signal CI needs and the one interactive use must not have.
         //
-        // 1, not 2: --verify already uses 2 for output drift and --explain 3
+        // 1, not 2: --audit-output already uses 2 for output drift and --explain 3
         // for not-found. "The build ran and some renders threw" is its own
         // thing.
         if (failed && !runtime.options.watch) process.exitCode = 1

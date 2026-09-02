@@ -1614,8 +1614,8 @@ describe('api plugin: principal-bound scope (ADR-0012)', () => {
 })
 
 describe('api plugin: diagnostics endpoints', () => {
-    // /explain, /report and /verify — the three questions --explain, --json
-    // and --verify answer, for a RUNNING server. Everything built to make the
+    // /explain, /report and /audit-output — the three questions --explain, --json
+    // and --audit-output answer, for a RUNNING server. Everything built to make the
     // engine legible landed on the CLI first, which meant it needed a shell
     // on the box: CI, a dashboard, or an agent speaking only HTTP could
     // author content and read entities but could not ask why the engine did
@@ -1662,7 +1662,7 @@ describe('api plugin: diagnostics endpoints', () => {
         // hand out engine internals.
         await withServer({ endpoints: { admin: { token: 't', operations: ['list', 'update'] } } },
             async (port) => {
-                for (const path of ['/explain?reference=/a.md', '/report', '/verify']) {
+                for (const path of ['/explain?reference=/a.md', '/report', '/audit-output']) {
                     const res = await fetch(`http://127.0.0.1:${port}/api/admin${path}`, {
                         headers: { Authorization: 'Bearer t' },
                     })
@@ -1676,7 +1676,7 @@ describe('api plugin: diagnostics endpoints', () => {
         // to that list would turn every existing token endpoint into one that
         // serves absolute paths, silently, on upgrade.
         await withServer({ endpoints: { admin: { token: 't' } } }, async (port) => {
-            const res = await fetch(`http://127.0.0.1:${port}/api/admin/verify`, {
+            const res = await fetch(`http://127.0.0.1:${port}/api/admin/audit-output`, {
                 headers: { Authorization: 'Bearer t' },
             })
             assert.equal(res.status, 403)
@@ -1690,7 +1690,7 @@ describe('api plugin: diagnostics endpoints', () => {
         // asserts on a bad token rather than on no token at all.
         await withServer({ endpoints: { ops: { token: 'secret', operations: ['diagnostics'] } } },
             async (port) => {
-                for (const path of ['/verify', '/report', '/explain?reference=/a.md']) {
+                for (const path of ['/audit-output', '/report', '/explain?reference=/a.md']) {
                     const res = await fetch(`http://127.0.0.1:${port}/api/ops${path}`, {
                         headers: { Authorization: 'Bearer wrong' },
                     })
@@ -1699,13 +1699,13 @@ describe('api plugin: diagnostics endpoints', () => {
             })
     })
 
-    it('/verify reports the manifest verdict', async () => {
+    it('/audit-output reports the manifest verdict', async () => {
         // The verdict comes from the manifest now, so the route cannot
         // disagree with the CLI about what counts as a failure — the stub
-        // returns what a real verify returns.
+        // returns what a real audit returns.
         const manifest = {
             size: () => 3,
-            verify: async () => ({
+            auditOutput: async () => ({
                 verdict: 'FAIL',
                 missing: [{ id: '/a.md', destination: '/a.html' }],
                 mismatched: [], unverifiable: [], orphaned: [{ path: 'stray.html' }],
@@ -1714,7 +1714,7 @@ describe('api plugin: diagnostics endpoints', () => {
         }
         await withServer({ endpoints: { ops: { token: 't', operations: ['diagnostics'] } }, manifest },
             async (port) => {
-                const res = await fetch(`http://127.0.0.1:${port}/api/ops/verify`, {
+                const res = await fetch(`http://127.0.0.1:${port}/api/ops/audit-output`, {
                     headers: { Authorization: 'Bearer t' },
                 })
                 // 200 even for FAIL: the check ran, and this is its answer. A
@@ -1729,10 +1729,10 @@ describe('api plugin: diagnostics endpoints', () => {
             })
     })
 
-    it('/verify says so when there is no manifest to check against', async () => {
+    it('/audit-output says so when there is no manifest to check against', async () => {
         await withServer({ endpoints: { ops: { token: 't', operations: ['diagnostics'] } } },
             async (port) => {
-                const res = await fetch(`http://127.0.0.1:${port}/api/ops/verify`, {
+                const res = await fetch(`http://127.0.0.1:${port}/api/ops/audit-output`, {
                     headers: { Authorization: 'Bearer t' },
                 })
                 assert.equal(res.status, 503, 'no manifest is a service state, not a bad request')

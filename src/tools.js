@@ -82,7 +82,7 @@ export function toolSchemas() {
 export async function invokeTool(name, args = {}) {
     // Names in this registry are BARE. The `mikser_` prefix belongs to MCP,
     // where tool names share one flat namespace across every connected server
-    // and an unprefixed `verify` would collide with anyone else's — a
+    // and an unprefixed `audit_output` would collide with anyone else's — a
     // constraint of that protocol, not of the engine. `mikser --tool
     // mikser_explain` says mikser twice.
     //
@@ -129,5 +129,5 @@ export function toolResultFailed(result) {
 // settle and Node drained the loop and left.
 export function isReportOnlyRun() {
     const options = runtime.options ?? {}
-    return Boolean(options.explain || options.verify || options.tool || options.tools)
+    return Boolean(options.explain || options.auditOutput || options.tool || options.tools)
 }
