@@ -668,6 +668,15 @@ export async function setup(options) {
                     // A postprocessor consumes the intermediate rendered
                     // file, so skipping would leave its input missing.
                     ? { skip: false, reason: 'postprocessor' }
+                    // Scheduled BECAUSE the thing that renders it moved. The
+                    // manifest cannot see that: an asset's input hash is its
+                    // own source, and a preset's revision is not part of it,
+                    // so the skip was correct about the entity and wrong about
+                    // the render. Bumping a preset's `revision` — the
+                    // documented way to force a rebuild — therefore deleted
+                    // the stale marker and left the derivative untouched.
+                    : options.rendererChanged
+                    ? { skip: false, reason: 'renderer-changed' }
                     : runtime.manifest?.skipDecision(entity, mutatedRefs, currentHashes, mutatedEntities)
                         ?? { skip: false, reason: 'no-manifest' }
                 if (decision.skip) {

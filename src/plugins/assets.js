@@ -81,6 +81,7 @@ export function assets(options = {}) {
         onSync,
         onFinalize,
         findEntity,
+        iterateEntities,
         matchEntity,
         changeExtension,
         constants: { ACTION, OPERATION },
@@ -223,7 +224,7 @@ export function assets(options = {}) {
         return result
     }
 
-    async function renderPresets(entities) {
+    async function renderPresets(entities, { rendererChanged = new Set() } = {}) {
         const { presets, assetsMap } = runtime.state.assets
 
         const tasks = []
@@ -257,6 +258,10 @@ export function assets(options = {}) {
                         ...entity.preset.options,    // module defaults
                         ...configOptions,             // config overrides
                         renderer: 'preset',
+                        // The preset itself moved this cycle, so the manifest's
+                        // "its source is unchanged" is true and beside the
+                        // point. See the skip decision in engine.js.
+                        rendererChanged: rendererChanged.has(entityToRender.id),
                         ignore
                     }
                 })
@@ -453,16 +458,41 @@ export function assets(options = {}) {
         }
 
         const entitiesToRender = new Map()
+        // Entities scheduled because their PRESET changed, not their source.
+        const presetMoved = new Set()
         await map(useJournal('Assets provision', [OPERATION.CREATE, OPERATION.UPDATE], signal), async ({ entity }) => {
             if (entity.collection == collection) {
-                for (let entityId in assetsMap) {
-                    if (assetsMap[entityId].find(preset => preset == entity.name)) {
-                        const entityToRender = await findEntity({
-                            id: entityId
-                        })
-                        if (!entitiesToRender.has(entityToRender.id)) {
-                            entitiesToRender.set(entityToRender.id, entityToRender)
-                        }
+                // A preset moved — its `revision` was bumped, or its module
+                // changed. Everything that uses it has to re-render.
+                //
+                // Asked of the CATALOG, not of assetsMap. That map is built
+                // from this cycle's journal, so on a build where only the
+                // preset moved it is empty and this fan-out reached nothing:
+                // no asset was scheduled, the reuse check that would have
+                // said "the marker is too old" was never consulted, and the
+                // startup sweep deleted the old markers anyway because it
+                // walks the folder rather than the entities.
+                //
+                // The result was the worst available shape. Bumping `revision`
+                // — the documented way to force a rebuild — removed the marker
+                // and left the derivative at its old bytes. It looked like it
+                // had worked, nothing in the report said otherwise, and where
+                // the derived folder is gitignored the deployment served stale
+                // images until someone deleted the folder by hand.
+                //
+                // getEntityPresets is the same matcher the per-entity path
+                // uses, so there is one implementation of "does this entity
+                // use this preset" rather than a second one here that can
+                // drift.
+                for await (const candidate of iterateEntities({ collection: { $ne: collection } })) {
+                    const candidatePresets = await getEntityPresets(candidate)
+                    if (!candidatePresets.includes(entity.name)) continue
+                    // renderPresets reads the presets to render off this map,
+                    // and on a preset-only build nothing else populated it.
+                    assetsMap[candidate.id] ??= candidatePresets
+                    presetMoved.add(candidate.id)
+                    if (!entitiesToRender.has(candidate.id)) {
+                        entitiesToRender.set(candidate.id, candidate)
                     }
                 }
             } else {
@@ -472,7 +502,7 @@ export function assets(options = {}) {
             }
         }, { concurrency: 10, signal })
 
-        await renderPresets(entitiesToRender.values())
+        await renderPresets(entitiesToRender.values(), { rendererChanged: presetMoved })
     })
 
     onComplete(async ({ entity, options }) => {
