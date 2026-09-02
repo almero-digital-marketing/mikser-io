@@ -882,6 +882,15 @@ surfaces that turn silence into a statement:
 - **A plugin that appears to do nothing** — `No plugins loaded` with a
   config present is a warning naming the file. A config that fails to
   load now exits non-zero rather than loading as empty.
+- **A derivative that did not re-render.** A preset is re-evaluated when
+  its definition moves — its `revision`, its module, or its `match`
+  patterns, all of which the preset entity now carries. Nothing else
+  schedules it: an entity whose source and preset both stood still is
+  skipped, which is what keeps a no-op build from scanning the corpus.
+  When the cause is outside all of that — a preset edited without bumping
+  `revision`, an image library upgraded under the build, a marker deleted
+  by hand — `--render-presets [name]` re-derives regardless. It fails
+  loudly if no assets plugin is loaded to act on it.
 - **A derivative for a source that is gone.** The assets folder sits at
   the working-folder root, outside both `outputFolder` and the runtime
   folder, and it is symlinked INTO the output — so an orphaned derivative

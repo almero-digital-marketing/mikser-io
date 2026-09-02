@@ -99,13 +99,25 @@ describe('a preset revision bump', () => {
             `an unbumped preset must not rebuild\n${combined}`)
     })
 
-    it('rebuilds and restores a marker deleted by hand', async () => {
+    it('a marker deleted by hand is recovered by --render-presets, not by a plain build', async () => {
+        // This used to happen on any build, but only because the preset
+        // fan-out was scanning the whole catalog every cycle — a full scan per
+        // rebuild, including no-op ones. Gating that scan on the preset
+        // actually moving is worth more than recovering a marker nobody
+        // deletes by accident, and --render-presets makes the recovery
+        // explicit rather than incidental.
         await rm(path.join(workdir, 'assets/web/media/hero.jpg.2.md5'))
-        const { code, combined } = await runMikser(workdir)
-        assert.equal(code, 0, combined)
+
+        const plain = await runMikser(workdir)
+        assert.equal(plain.code, 0, plain.combined)
+        assert.equal(existsSync(path.join(workdir, 'assets/web/media/hero.jpg.2.md5')), false,
+            'nothing schedules an entity whose source and preset both stood still')
+
+        const forced = await runMikser(workdir, ['--render-presets'])
+        assert.equal(forced.code, 0, forced.combined)
         assert.equal(await readFile(derivative(), 'utf8'), 'THIRD-NOT-APPLIED',
-            `a missing marker means the derivative is not known-current\n${combined}`)
+            `--render-presets must re-derive regardless of markers\n${forced.combined}`)
         assert.ok(existsSync(path.join(workdir, 'assets/web/media/hero.jpg.2.md5')),
-            'and the marker comes back, rather than staying absent')
+            'and the marker comes back')
     })
 })

@@ -69,7 +69,7 @@ export function socketPath(workingFolder) {
 // Newline-delimited JSON, one object per line. Deliberately boring: both ends
 // ship together, so there is nothing to negotiate and no version to carry.
 //
-//   → { type: 'build',  config, clear }
+//   → { type: 'build',  config, clear, renderPresets }
 //   → { type: 'report', config, tool, tools, toolArgs, explain, auditOutput, json }
 //   ← { type: 'log', chunk }        (zero or more, in order)
 //   ← { type: 'done', code }
@@ -316,7 +316,17 @@ async function serveBuild(socket, request, logger) {
         // change that prompted the request — the watermark bug wearing a
         // different hat. Rescanning makes a forwarded build mean what a
         // one-shot means, which is what every existing caller assumes.
-        await runtime.rebuild()
+        // Applied for THIS cycle only. A flag the forwarded path drops is a
+        // silent no-op, which is the failure this surface exists to remove —
+        // and restoring it after keeps the watcher from forcing every later
+        // rebuild.
+        const priorRenderPresets = runtime.options.renderPresets
+        if (request.renderPresets !== undefined) runtime.options.renderPresets = request.renderPresets
+        try {
+            await runtime.rebuild()
+        } finally {
+            runtime.options.renderPresets = priorRenderPresets
+        }
 
         // From the render-error count, NOT from process.exitCode.
         //

@@ -408,6 +408,7 @@ export async function setup(options) {
             .option('-c --config <file>', 'set mikser mikser.config.js location', './mikser.config.js')
             .option('-m --mode <mode>', 'set mikser runtime mode', 'development')
             .option('-r --clear', 'clear current state before execution', false)
+            .option('--render-presets [name]', 're-render preset derivatives whose sources and revisions are unchanged; with a name, only that preset')
             .option('-o --output-folder <folder>', 'set mikser output folder relative to working folder', 'out')
             .option('-w --watch', 'watch entities for changes', false)
             .option('-f --force', 'rebuild everything; disable incremental dispatch', false)
@@ -1261,6 +1262,20 @@ export async function setup(options) {
         // Checked at the end of the cycle because that is the first moment the
         // answer is stable: derivatives are produced during the cycle, so
         // asking any earlier would report files that were about to appear.
+        // --render-presets with nothing to consume it.
+        //
+        // The flag is implemented by the assets plugin, so without that plugin
+        // it reaches nobody: the build runs normally, nothing is re-derived,
+        // and the operator is left to notice. Checked here rather than at
+        // onLoaded because the engine's own onLoaded is registered first and
+        // runs before any plugin has set itself up.
+        if (runtime.options.renderPresets && !runtime.state?.assets?.renderPresetsHandled) {
+            useLogger().error({ code: 'render-presets-unhandled' },
+                '--render-presets was passed, but no assets plugin is loaded to act on it. '
+                + 'Nothing was re-derived. Add assets() to the plugins array, or drop the flag.')
+            process.exitCode = 1
+        }
+
         const brokenTargets = await reportBrokenReferences(useLogger())
         await reportMissingAssets(useLogger(), brokenTargets)
 

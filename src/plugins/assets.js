@@ -173,9 +173,30 @@ export function assets(options = {}) {
     // the (revision, format, options) export contract so onImport and
     // onSync stay in sync. Cache-busts local presets so watch-mode edits
     // reload; npm presets import once (their version is the cache key).
+    // Presets whose effective definition moved this cycle: a bumped revision,
+    // an edited module, or widened patterns.
+    //
+    // The fan-out this gates is a full catalog scan, and onImport writes every
+    // preset entity on every build — so gating on "a preset is in the journal"
+    // ran that scan every cycle, including a no-op watch rebuild, where
+    // responsiveness matters most.
+    const changedPresets = new Set()
+
+    async function notePresetChange(preset) {
+        const prior = await findEntity({ id: preset.id })
+        const moved = !prior
+            || prior.checksum !== preset.checksum
+            || JSON.stringify(prior.matches ?? null) !== JSON.stringify(preset.matches ?? null)
+        if (moved) changedPresets.add(preset.name)
+        return moved
+    }
+
     async function buildPreset({ name, uri, watchable }) {
         const cacheBust = watchable ? `?stamp=${Date.now()}` : ''
-        const { revision = 1, format, options } = await import(`${uri}${cacheBust}`)
+        // `options` here would SHADOW the plugin's own config, which the
+        // patterns below need. The module's export and the factory argument
+        // are two different things that were both called options.
+        const { revision = 1, format, options: moduleOptions } = await import(`${uri}${cacheBust}`)
         return {
             id: `/presets/${name}`,
             collection,
@@ -185,7 +206,17 @@ export function assets(options = {}) {
             source: uri,
             format,
             checksum: revision,
-            options,
+            // The patterns this preset selects by, carried on the entity.
+            //
+            // They are half of what decides which files a preset owns, and
+            // they live in CONFIG rather than in the module — so `revision`
+            // alone cannot say the preset's effective definition moved.
+            // Widening a pattern was a silent no-op: match is evaluated as a
+            // file ENTERS the catalog, so a wider one left everything already
+            // in it alone, the build stayed green and the derivative never
+            // appeared.
+            matches: normalizePresetConfig(options.presets?.[name]).matches,
+            options: moduleOptions,
         }
     }
 
@@ -251,7 +282,13 @@ export function assets(options = {}) {
                     destination = changeExtension(destination, entity.preset.format)
                 }
                 entity.destination = path.join(runtime.options.assetsFolder, entityPreset, destination)
-                const ignore = await isPresetRendered(entity)
+                // Two gates sit between a scheduled entity and a render: the
+                // manifest's "its source did not change", and this plugin's
+                // marker. A forced render clears both — a marker at the
+                // current revision is exactly what --render-presets exists to
+                // disregard.
+                const forced = rendererChanged.has(entityToRender.id)
+                const ignore = forced ? false : await isPresetRendered(entity)
                 tasks.push({
                     entity,
                     options: {
@@ -261,7 +298,7 @@ export function assets(options = {}) {
                         // The preset itself moved this cycle, so the manifest's
                         // "its source is unchanged" is true and beside the
                         // point. See the skip decision in engine.js.
-                        rendererChanged: rendererChanged.has(entityToRender.id),
+                        rendererChanged: forced,
                         ignore
                     }
                 })
@@ -397,6 +434,7 @@ export function assets(options = {}) {
             const uri = path.join(runtime.options.presetsFolder, relativePath)
             try {
                 const preset = await buildPreset({ name, uri, watchable: true })
+                await notePresetChange(preset)
                 await createEntity(preset)
                 presets[name] = preset
             } catch (err) {
@@ -421,6 +459,7 @@ export function assets(options = {}) {
             }
             try {
                 const preset = await buildPreset({ name, uri: resolved.uri, watchable: resolved.watchable })
+                await notePresetChange(preset)
                 await createEntity(preset)
                 presets[name] = preset
                 logger.debug('Preset loaded from npm: mikser-io-preset-%s', name)
@@ -480,10 +519,49 @@ export function assets(options = {}) {
         }
 
         const entitiesToRender = new Map()
-        // Entities scheduled because their PRESET changed, not their source.
+        // Entities that must render regardless of markers or manifest: their
+        // preset moved, or --render-presets asked for them.
         const presetMoved = new Set()
+
+        // --render-presets [name]: re-derive though nothing moved.
+        //
+        // The escape hatch for what the incremental machinery cannot see — a
+        // preset edited without bumping `revision`, a marker deleted by hand,
+        // an image library upgraded underneath the build. --clear reaches the
+        // same end only by rebuilding the whole site, and only at startup, so
+        // it cannot be asked of a running watcher at all.
+        const wanted = runtime.options.renderPresets
+        if (wanted) {
+            // Consumed here and nowhere else. The engine checks this at the
+            // end of the cycle: a flag that reaches no plugin has to say so,
+            // rather than building normally and leaving the operator to
+            // notice nothing was re-derived.
+            runtime.state.assets.renderPresetsHandled = true
+
+            const known = Object.keys(runtime.state.assets.presets)
+            const names = wanted === true ? known : [wanted]
+            for (const name of names.filter(n => !known.includes(n))) {
+                useLogger().warn({ code: 'preset-unknown', preset: name },
+                    '--render-presets asked for %j, which is not configured. Known: %s',
+                    name, known.join(', ') || '(none)')
+            }
+            const selected = names.filter(n => known.includes(n))
+            if (selected.length) {
+                for await (const candidate of iterateEntities({ collection: { $ne: collection } })) {
+                    const candidatePresets = await getEntityPresets(candidate)
+                    if (!candidatePresets.some(n => selected.includes(n))) continue
+                    assetsMap[candidate.id] ??= candidatePresets
+                    presetMoved.add(candidate.id)
+                    entitiesToRender.set(candidate.id, candidate)
+                }
+                useLogger().info('Presets re-rendering: %s (%d source(s))',
+                    selected.join(', '), entitiesToRender.size)
+            }
+        }
         await map(useJournal('Assets provision', [OPERATION.CREATE, OPERATION.UPDATE], signal), async ({ entity }) => {
             if (entity.collection == collection) {
+                // Only when this preset's definition actually moved.
+                if (!changedPresets.has(entity.name)) return
                 // A preset moved — its `revision` was bumped, or its module
                 // changed. Everything that uses it has to re-render.
                 //
