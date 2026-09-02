@@ -79,8 +79,12 @@ describe('files plugin', () => {
             await h.runSync('files', { action: 'create', context: { relativePath: 'main.css' } })
 
             const e = h.journal.find(j => j.operation === 'create').entity
-            assert.equal(e.uri, path.join(outputFolder, 'public', 'main.css'))
+            // The LINK moves with options.outputFolder; the uri does not,
+            // because it names the source. `name` and meta.url carry the
+            // served location.
+            assert.equal(e.uri, path.join(filesFolder, 'main.css'))
             assert.equal(e.name, path.join('public', 'main.css'))
+            assert.equal(e.meta.url, '/public/main.css')
         })
     })
 

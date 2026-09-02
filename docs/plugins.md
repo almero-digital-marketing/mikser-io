@@ -198,14 +198,35 @@ files({
 ```
 
 **Entity properties set:**
-- `id`: `/{folder}/{relativePath}`
+- `id`: `/files/{relativePath}` — never carries the `outputFolder` prefix
 - `collection`: `'files'`
 - `type`: `'file'`
 - `format`: File extension
-- `destination`: Target path in output folder
+- `uri`: the **source** file, the same meaning it has in every other
+  collection. It named the published symlink until 9.86.0, which made `uri`
+  mean the source for a document and the destination for a file — see below
+- `source`: the same path; kept because presets read it
+- `name` / `meta.url`: where the file is **published**, carrying the
+  `outputFolder` prefix when one is configured
 - `checksum`: MD5 checksum
+- `link`: the resolved target, when the source is itself a symlink
 
 **Watch support:** Yes.
+
+**Deleted files are reconciled by the scan**, not only by the watcher. A file
+removed while nothing was watching used to leave a dangling symlink in the
+deployed output, its catalog row, and anything derived from it — on every
+later build. Neither a plain rebuild nor `--force` removed them; only
+`--clear` did.
+
+The scan now compares what it found against what the catalog holds and removes
+the difference, scoped by `uri` to the files folder so entities another plugin
+emitted into this collection (a CSV, a drive, an API) are left alone. It says
+`Files removed: N no longer on disk` when it acts and nothing when it does not.
+
+`--force` skips this, as it skips the equivalent sweep for documents and
+layouts: the guard lives in `sweepDeleted`. So `--force` is not the flag that
+reconciles deletions — an ordinary build is.
 
 ---
 

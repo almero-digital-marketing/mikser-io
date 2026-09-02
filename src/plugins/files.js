@@ -3,6 +3,7 @@ import { mkdir, symlink, unlink, lstat, realpath } from 'fs/promises'
 import { globby } from 'globby'
 import pMap from 'p-map'
 import { checksumsByCollection } from '../catalog.js'
+import { sweepDeleted } from '../source.js'
 
 export function files(options = {}) {
     return ({
@@ -38,10 +39,18 @@ export function files(options = {}) {
             return { uri, source }
         }
 
+        // The goal state is "the link is not there", so a link that is
+        // already gone is success, not an error. It genuinely happens: someone
+        // deletes a stale one by hand, and before this the next reconciliation
+        // threw on it.
         async function removeLink(relativePath) {
             let uri = path.join(runtime.options.outputFolder, relativePath)
             if (options.outputFolder) uri = path.join(runtime.options.outputFolder, options.outputFolder, relativePath)
-            await unlink(path.resolve(uri))
+            try {
+                await unlink(path.resolve(uri))
+            } catch (err) {
+                if (err.code !== 'ENOENT') throw err
+            }
         }
 
         async function link(source) {
@@ -58,12 +67,24 @@ export function files(options = {}) {
             const source = path.join(runtime.options.filesFolder, relativePath)
             const format = path.extname(relativePath).substring(1).toLowerCase()
             const id = path.join(`/${collection}`, relativePath)
-            let uri = path.join(runtime.options.outputFolder, relativePath)
             let name = relativePath
             if (options.outputFolder) {
-                uri = path.join(runtime.options.outputFolder, options.outputFolder, relativePath)
                 name = path.join(options.outputFolder, relativePath)
             }
+            // The SOURCE file, as in every other collection.
+            //
+            // It used to be the symlink in the output, which made `uri` mean
+            // one thing for documents and layouts and the opposite here — and
+            // three separate pieces of code carry scars from it: the render
+            // file helper keys its edges on `id` with a comment explaining
+            // that a uri edge "matches nothing" for files, locateEntityFile
+            // rejected every file entity as living outside its own collection
+            // folder, and sweepDeleted could not be called at all because it
+            // scopes by uri rooted at the folder a source owns.
+            //
+            // Where the bytes are PUBLISHED is meta.url, which every consumer
+            // already reads (ADR-0011).
+            const uri = source
 
             let synced = true
             switch (action) {
@@ -145,6 +166,7 @@ export function files(options = {}) {
         })
 
         onImport(async () => {
+            const logger = useLogger()
             await mkdir(runtime.options.outputFolder, { recursive: true })
             if (options.outputFolder) await mkdir(path.join(runtime.options.outputFolder, options.outputFolder), { recursive: true })
 
@@ -167,13 +189,19 @@ export function files(options = {}) {
             // repair path short of deleting them.
             const forced = runtime.options.force || runtime.catalog?.cacheInvalidated
             const priorChecksums = checksumsByCollection(collection)
+            const scanned = new Set()
             await pMap(paths, async relativePath => {
-                const { uri, source } = await ensureLink(relativePath)
+                const { source } = await ensureLink(relativePath)
+                const uri = source
                 let name = relativePath
                 if (options.outputFolder) {
                     name = path.join(options.outputFolder, relativePath)
                 }
                 const id = path.join(`/${collection}`, relativePath)
+                // Recorded before the checksum gate. The gate decides whether
+                // to re-emit; the sweep asks what still EXISTS, and a file
+                // skipped for being unchanged very much exists.
+                scanned.add(id)
                 const newChecksum = await checksum(source)
                 updateProgress()
                 // Gate: if the catalog already has this entity with the same
@@ -196,6 +224,31 @@ export function files(options = {}) {
                     link: await link(source),
                 })
             }, { concurrency: 16 })
+
+            // What the catalog holds that the disk no longer does.
+            //
+            // The scan enumerates what exists and never asked the opposite
+            // question, so deleting a file with nothing watching left three
+            // things behind on every subsequent build: a DANGLING SYMLINK in
+            // the deployed output, the catalog row, and anything derived from
+            // it. Neither a plain rebuild nor --force removed them; only
+            // --clear did, or a watcher that happened to be running at the
+            // moment the file disappeared.
+            //
+            // ownerPrefix is the files folder, which is only a meaningful
+            // scope now that `uri` names the source. It keeps the sweep off
+            // entities another plugin emitted into this collection — a CSV, a
+            // drive, an API — which is the accident the parameter exists to
+            // prevent.
+            //
+            // Skipped under --force, like every other sweep: that guard lives
+            // in sweepDeleted and is shared with documents and layouts.
+            const deleted = await sweepDeleted(collection, scanned, async (entity) => {
+                await removeLink(path.relative(runtime.options.filesFolder, entity.uri))
+                await deleteEntity(entity)
+                logger.debug('files removed (file gone): %s', entity.name)
+            }, runtime.options.filesFolder)
+            if (deleted) logger.info('Files removed: %d no longer on disk', deleted)
         })
 
         return {

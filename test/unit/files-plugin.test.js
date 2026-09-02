@@ -95,20 +95,22 @@ describe('files() sync path', () => {
         )
     })
 
-    // `id` and `uri` mean DIFFERENT things here, and the difference is
-    // load-bearing for anything asking "which file is this?".
+    // `uri` names the SOURCE file, the same as in every other collection.
     //
-    // A file entity is served by symlinking the source into the output
-    // folder, and `uri` is that symlink — under outputFolder, moving when
-    // `options.outputFolder` changes. For a document or a layout `uri` is the
-    // source file, so the meaning is not consistent across collections and
-    // `uri` cannot be used to identify a source.
+    // It used to be the symlink in the output — so `uri` meant the source for
+    // a document and the destination for a file, and three separate places
+    // carry scars from that. The render helpers key their dependency edges on
+    // `id` with a comment explaining that a uri edge "matches nothing" for
+    // exactly the case they are most used for; locateEntityFile rejected every
+    // file entity as living outside its own collection folder; and
+    // sweepDeleted could not be called at all, because it scopes by uri rooted
+    // at the folder a source owns, which left deleted files in the catalog and
+    // dangling symlinks in the output forever.
     //
-    // `id` can: it is always `/<collection>/<path under the source folder>`.
-    // The render helpers (readFile / glob in src/plugins/render/file.js) key
-    // their dependency edges on it for exactly this reason — keyed on uri they
-    // recorded edges that matched nothing, on a green build.
-    it('ids the source, uris the served copy — they are not interchangeable', async () => {
+    // `id` is still the stable key — `/<collection>/<path under the source
+    // folder>`, unmoved by output layout. Where the bytes are PUBLISHED is
+    // meta.url.
+    it('uris the source, and names the published copy in meta.url', async () => {
         const h = install(root, OPTIONS)
         await h.runSync('files', {
             action: h.constants.ACTION.CREATE,
@@ -118,17 +120,19 @@ describe('files() sync path', () => {
 
         assert.equal(entity.id, '/files/' + RELATIVE.split(path.sep).join('/'),
             'the id names the file under its source folder')
-        assert.ok(entity.uri.includes('media'),
-            'the uri is the served copy, under the configured output prefix')
-        assert.notEqual(entity.id, entity.uri)
-        assert.equal(entity.uri.includes(path.join('files', RELATIVE)), false,
-            'and it is NOT the source path — an edge matching on uri finds nothing')
+        assert.ok(entity.uri.includes(path.join('files', RELATIVE)),
+            `the uri is the source file, so a uri-scoped sweep can own it: ${entity.uri}`)
+        assert.equal(entity.uri.includes(path.join('out', 'media')), false,
+            'and it is NOT the served copy any more')
+        assert.equal(entity.uri, entity.source, 'source and uri agree')
+        assert.equal(entity.meta.url, '/media/' + RELATIVE.split(path.sep).join('/'),
+            'the published location is meta.url, which is what consumers read')
     })
 
-    it('keeps the same id when the served location moves', async () => {
-        // Changing outputFolder relocates the symlink and therefore the uri.
-        // Anything that identified the file by uri breaks; the id does not
-        // move, which is what makes it the safe key.
+    it('keeps both id and uri stable when the served location moves', async () => {
+        // Changing outputFolder relocates the symlink and the served url. It
+        // does not move the source, so neither the id nor the uri moves —
+        // which is what makes a uri-scoped sweep safe across output layouts.
         const plain = install(root, {})
         await plain.runSync('files', {
             action: plain.constants.ACTION.CREATE,
@@ -144,7 +148,8 @@ describe('files() sync path', () => {
         const moved = prefixed.journal.at(-1).entity
 
         assert.equal(bare.id, moved.id, 'the id is stable across output layouts')
-        assert.notEqual(bare.uri, moved.uri, 'the uri is not')
+        assert.equal(bare.uri, moved.uri, 'and so is the uri, now that it names the source')
+        assert.notEqual(bare.meta.url, moved.meta.url, 'what moves is the published url')
     })
 
     it('UPDATE skips when the checksum is unchanged', async () => {
