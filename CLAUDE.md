@@ -520,6 +520,13 @@ Test coverage: `test/unit/source-sweep.test.js`.
   page; the accepted answer is a predictable name plus a way to change
   it, not a reserved prefix. Follow the eight, do not invent a ninth
   shape.
+- **`verify` in `src/auth.js` is a different word.** It is the credential
+  check — the cross-package contract `{ verify(req) }` that `mikser-io-auth`
+  and any custom verifier implement, and the same term jwt/passport/WebAuthn
+  use. It has nothing to do with checking output, which is `--audit-output`
+  and was called `--verify` until 9.78.0. A blanket rename across the repo
+  breaks authentication in two packages; the rename that happened had to skip
+  twelve references here deliberately.
 - **Tool names**: the registry (`src/tools.js`) holds BARE names —
   `explain`, `audit_output`, `sources`, `search`. The `mikser_` prefix is MCP's
   namespacing, because its tool names are flat across every connected
