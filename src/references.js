@@ -38,6 +38,9 @@ const ATTR = /(?:src|href|poster|data-bg)\s*=\s*["']([^"']*)["']/gi
 const SRCSET = /(?:img|image)?srcset\s*=\s*["']([^"']*)["']/gi
 // css url(), in a stylesheet and in an inline style attribute alike.
 const CSS_URL = /url\(\s*(['"]?)([^'")]*)\1\s*\)/gi
+// The same, but inside a CUSTOM PROPERTY declaration — which resolves from a
+// different place, see below.
+const CUSTOM_PROP_URL = /--[\w-]+\s*:\s*[^;{}]*?url\(\s*(['"]?)([^'")]*)\1\s*\)/gi
 
 // A url this check has nothing to say about: another origin, an inline
 // payload, a fragment or an in-page action. `//host/path` is protocol-relative
@@ -88,6 +91,10 @@ export { siteRootFor }
 export function extractReferences(rawSource) {
     const source = decodeEntities(rawSource)
     const found = new Set()
+    // Collected first, so a url that appears in a custom property is known to
+    // be one however else it is matched — CSS_URL sees it too.
+    const custom = new Set()
+    for (const [, , url] of source.matchAll(CUSTOM_PROP_URL)) custom.add(url)
     for (const [, url] of source.matchAll(ATTR)) found.add(url)
     for (const [, , url] of source.matchAll(CSS_URL)) found.add(url)
     for (const [, list] of source.matchAll(SRCSET)) {
@@ -96,7 +103,9 @@ export function extractReferences(rawSource) {
             if (url) found.add(url)
         }
     }
-    return [...found].filter(u => !isExternal(u))
+    return [...found]
+        .filter(u => !isExternal(u))
+        .map(url => ({ url, customProperty: custom.has(url) }))
 }
 
 // Resolve the way a browser does, which is the whole point.
@@ -133,9 +142,18 @@ export function resolveUrl(pageDir, url, { root = '' } = {}) {
 // { url, target, files } — the target with the pages that named it, because
 // "this is missing" is only actionable next to "and these link it".
 export async function checkReferences(outputFolder, { siteRoots = [] } = {}) {
+    // Following symlinks, because that is what gets served.
+    //
+    // files() emits by symlinking the source into the output, so a stylesheet
+    // is usually a link rather than a copy — and skipping links meant no
+    // symlinked html or css was ever read. Every `url()` inside a bundle went
+    // unchecked on any site built that way, silently, while the check reported
+    // a confident total. The same-name index below has always followed them,
+    // which is how a file could be FOUND elsewhere by a scan that would not
+    // READ it.
     const files = await globby(SCANNED, {
         cwd: outputFolder,
-        followSymbolicLinks: false,
+        followSymbolicLinks: true,
         suppressErrors: true,
     })
 
@@ -146,6 +164,30 @@ export async function checkReferences(outputFolder, { siteRoots = [] } = {}) {
     // site — one lookup each.
     const exists = new Map()
 
+    // Where a `url()` inside a CUSTOM PROPERTY resolves from.
+    //
+    // Not the page. A custom property is substituted where it is USED, and the
+    // url resolves against the stylesheet doing the substituting — so
+    //
+    //     <span style="--icon-btn-src:url(&quot;../media/icons/x.svg&quot;)">
+    //
+    // on a page three directories deep is CORRECT when the bundle that reads
+    // var(--icon-btn-src) sits at styles/. Resolving it from the page reports
+    // a base problem for markup that ships and works, and fifteen such lines
+    // are how the reader learns to skim past this check entirely.
+    //
+    // Which stylesheet substitutes it is not knowable from the bytes — any
+    // rule using the variable does — so every emitted stylesheet is a
+    // candidate base, and one that resolves is enough to stay quiet. A url
+    // that resolves from none of them is still reported: it is missing
+    // wherever it is read from.
+    const styleBases = files
+        .filter(file => file.endsWith('.css'))
+        .map((file) => {
+            const root = siteRootFor(file, siteRoots)
+            return { root, dir: path.dirname(file).slice(root.length).replace(/^\/+/, '') }
+        })
+
     for (const file of files) {
         let source
         try { source = await readFile(path.join(outputFolder, file), 'utf8') }
@@ -155,13 +197,23 @@ export async function checkReferences(outputFolder, { siteRoots = [] } = {}) {
         // The page's directory, relative to its own site root.
         const pageDir = path.dirname(file).slice(root.length).replace(/^\/+/, '')
 
-        for (const url of extractReferences(source)) {
+        for (const { url, customProperty } of extractReferences(source)) {
             const { target, overDeep, floored } = resolveUrl(pageDir, url, { root })
             checked++
 
             if (!exists.has(target)) {
                 exists.set(target, existsSync(path.join(outputFolder, target)))
             }
+
+            // Resolved from a stylesheet instead, and correct there.
+            if (!exists.get(target) && customProperty && styleBases.some((base) => {
+                const from = resolveUrl(base.dir, url, { root: base.root }).target
+                if (!exists.has(from)) {
+                    exists.set(from, existsSync(path.join(outputFolder, from)))
+                }
+                return exists.get(from)
+            })) continue
+
             // Broken outranks over-deep: a url that resolves nowhere is the
             // failure, and adding that it is also one level too deep is noise.
             const bucket = !exists.get(target) ? broken : (overDeep ? overDeepRefs : null)

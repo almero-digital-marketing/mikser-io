@@ -128,7 +128,15 @@ async function reportBrokenReferences(logger) {
     const explain = runtime.state?.assets?.explainMissing
     const reasons = new Map()
     if (explain) {
-        for (const { target } of broken.slice(0, SHOWN)) {
+        // Every broken entry, not the ones that happen to sort first. The cap
+        // below is about how much gets PRINTED; asking only within it made the
+        // answer depend on the position of the entry that had one, so a site
+        // with ten unrelated broken urls reported "No derivative produced: 0"
+        // while holding the cause of the eleventh. Cheap to ask: anything not
+        // under the assets folder is rejected on the first path segment, and
+        // the catalog index behind it is built once and only if something gets
+        // past that.
+        for (const { target } of broken) {
             // Site-relative, because that is what the assets folder is named
             // relative to. A build that deploys out/<lang> as its own domain
             // root resolves this target to `a/derived/web/...`, and a plain
@@ -141,7 +149,14 @@ async function reportBrokenReferences(logger) {
         }
     }
 
-    for (const { url, target, files, elsewhere } of broken.slice(0, SHOWN)) {
+    // A stated cause outranks a guess in what gets printed, not only in how it
+    // is worded. The cap exists so one broken preset cannot bury the rest of
+    // the build — it must not bury the answer instead.
+    const ordered = reasons.size
+        ? [...broken].sort((a, b) => (reasons.get(b.target) ? 1 : 0) - (reasons.get(a.target) ? 1 : 0))
+        : broken
+
+    for (const { url, target, files, elsewhere } of ordered.slice(0, SHOWN)) {
         const reason = reasons.get(target)
         // Two different problems wear the same symptom. A target whose file
         // exists elsewhere in the output is a base that is wrong, not an asset
@@ -161,7 +176,7 @@ async function reportBrokenReferences(logger) {
         }
     }
     if (broken.length) {
-        const explained = broken.slice(0, SHOWN).filter(b => reasons.get(b.target)).length
+        const explained = broken.filter(b => reasons.get(b.target)).length
         const misplaced = broken.filter(b => b.elsewhere?.length && !reasons.get(b.target)).length
         logger.warn({
             code: 'reference-broken-summary',

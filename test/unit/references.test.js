@@ -15,21 +15,25 @@ import assert from 'node:assert/strict'
 
 import { extractReferences, resolveUrl, siteRootFor } from '../../src/references.js'
 
+// extractReferences reports where each url's base is, not just the url:
+// a `url()` in a custom property does not resolve against the page.
+const urls = (source) => extractReferences(source).map(r => r.url)
+
 describe('extractReferences', () => {
     it('takes src, href, poster and css url()', () => {
-        const refs = extractReferences(
+        const refs = urls(
             '<img src="a.jpg"><a href="/b/"><video poster="c.png">'
             + '<div style="background-image:url(\'d.webp\')">')
         assert.deepEqual(refs.sort(), ['/b/', 'a.jpg', 'c.png', 'd.webp'].sort())
     })
 
     it('splits srcset into its candidate urls, dropping descriptors', () => {
-        const refs = extractReferences('<img srcset="a.jpg 1x, b.jpg 2x, c.jpg 640w">')
+        const refs = urls('<img srcset="a.jpg 1x, b.jpg 2x, c.jpg 640w">')
         assert.deepEqual(refs.sort(), ['a.jpg', 'b.jpg', 'c.jpg'])
     })
 
     it('skips other origins, inline payloads, fragments and actions', () => {
-        const refs = extractReferences(
+        const refs = urls(
             '<a href="https://x.test/y"><a href="//cdn.test/z"><a href="#top">'
             + '<a href="mailto:a@b.c"><a href="tel:+123"><img src="data:image/gif;base64,AAA">')
         assert.deepEqual(refs, [])
@@ -39,7 +43,7 @@ describe('extractReferences', () => {
         // How a maps link is built when the target is a query parameter: it has
         // no scheme until decoded, so a naive check resolves the whole encoded
         // string as a path segment.
-        const refs = extractReferences(
+        const refs = urls(
             '<a href="https%3A%2F%2Fmaps.test%2F%3Fq%3D10%20Silistra%20St.">')
         assert.deepEqual(refs, [])
     })
@@ -48,9 +52,27 @@ describe('extractReferences', () => {
         // A CSS custom property in a style attribute is the common source. Left
         // encoded, the captured url is the entity text, which resolves nowhere
         // and reports as broken — false positives that bury the real ones.
-        const refs = extractReferences(
+        const refs = urls(
             '<i style="--icon-src:url(&quot;../media/raw/icons/x.svg&quot;)"></i>')
         assert.deepEqual(refs, ['../media/raw/icons/x.svg'])
+    })
+
+    it('marks a url that came from a custom property', () => {
+        // Its base is the stylesheet that substitutes the variable, not the
+        // page that declared it — so the caller has to be able to tell.
+        const refs = extractReferences(
+            '<i style="--icon-btn-src:url(&quot;../media/icons/x.svg&quot;)"></i>')
+        assert.deepEqual(refs, [{ url: '../media/icons/x.svg', customProperty: true }])
+    })
+
+    it('does not mark an ordinary url() as one', () => {
+        const refs = extractReferences('<div style="background-image:url(\'d.webp\')">')
+        assert.deepEqual(refs, [{ url: 'd.webp', customProperty: false }])
+    })
+
+    it('marks it in a stylesheet too, not only in a style attribute', () => {
+        const refs = extractReferences(':root{--icon-btn-src:url("../media/icons/x.svg")}')
+        assert.deepEqual(refs, [{ url: '../media/icons/x.svg', customProperty: true }])
     })
 })
 
