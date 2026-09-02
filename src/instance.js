@@ -19,10 +19,12 @@
 // new to learn and no watermark to reason about — which matters, because a
 // design that needs discipline from the caller is the one that gets violated.
 //
-// `--no-attach` opts out, for when a fresh process IS the point: checking that
-// a cold start works, that startup ordering hides nothing. Named for what it
-// switches off rather than for a property of the process — the default is to
-// attach, and the flag should say which behaviour is being declined.
+// There is no opt-out. A flag for "run a second engine here anyway" only ever
+// enabled the accident this file exists to prevent — two engines sharing one
+// catalogue and one output tree with no lock between them — and no caller had
+// a reason to want it that a stopped instance would not serve better. An
+// option whose only use is the wrong one is not an escape hatch, it is a trap
+// with a name.
 
 import net from 'node:net'
 import { createHash } from 'node:crypto'
@@ -280,7 +282,7 @@ function refuseConfig(socket, request, wrongConfig) {
         type: 'refused',
         reason: `this instance is running ${wrongConfig}, and you asked for ${path.resolve(request.config)}.`,
         detail: 'Answering would use the wrong config — the accident this refusal exists to prevent. '
-            + 'Stop that instance, or pass --no-attach to run your own.',
+            + 'Stop that instance and run this again.',
     })
 }
 
@@ -341,7 +343,6 @@ async function serveBuild(socket, request, logger) {
 export function serveInstance() {
     onLoaded(async () => {
         if (!runtime.options.watch && !runtime.options.server) return
-        if (runtime.options.attach === false) return
         const logger = runtime.engine?.logger
         const endpoint = socketPath(runtime.options.workingFolder)
 
@@ -402,53 +403,7 @@ export function serveInstance() {
 
 // Say so when a private engine is starting in a folder someone else holds.
 //
-// The local counterpart of the rule already written down for deployments —
-// "never run a one-shot mikser command against the deployment" — which existed
-// because there was no alternative. There is one now, so this covers what is
-// left: --no-attach, and the report-only runs that stay local by design.
-//
-// A warning rather than a refusal. --no-attach is how you deliberately check
-// that a cold start works, and refusing it would take away the escape hatch
-// this design depends on having.
-export async function warnIfHeld({ workingFolder, attached }) {
-    const endpoint = socketPath(workingFolder)
-    if (process.platform !== 'win32' && !existsSync(endpoint)) return false
-
-    const live = await new Promise((resolve) => {
-        const probe = net.connect(endpoint)
-        const done = (answer) => { try { probe.destroy() } catch { /* already gone */ } resolve(answer) }
-        probe.on('connect', () => done(true))
-        probe.on('error', () => done(false))
-        setTimeout(() => done(false), 250).unref?.()
-    })
-    if (!live) return false
-
-    const logger = runtime.engine?.logger
-    const message = attached === false
-        ? 'Another mikser is already running in this folder, and --no-attach means this one will not talk to '
-          + 'it. Two engines share the catalogue and the output tree with no lock between them; a --clear from '
-          + 'either is what produces a cold rebuild that renders nothing.'
-        : 'Another mikser is already running in this folder. This command reads and does not write, so it is '
-          + 'safe — but it may see a catalogue mid-cycle.'
-    logger?.warn?.({ code: 'instance-already-running' }, message)
-    return true
-}
-
 // Registered at setup so both halves are wired from one call.
 export function instanceControl() {
     serveInstance()
-    onLoaded(async () => {
-        // Only --no-attach reaches this now. Everything else either forwarded
-        // (a build, a report) or refused before setup ran (a second server or
-        // watcher), so a process that is still here and not attaching is one
-        // that deliberately opted out — and that is exactly the case worth
-        // saying something about, long-running or not. The earlier gate
-        // skipped watch and server, which excluded `--no-attach --server`:
-        // the very command that puts two engines on one folder.
-        if (runtime.options.attach !== false) return
-        await warnIfHeld({
-            workingFolder: runtime.options.workingFolder,
-            attached: false,
-        })
-    })
 }

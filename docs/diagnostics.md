@@ -760,8 +760,9 @@ Three things it refuses or reports rather than guessing:
   to *become* the instance, which is not something a running one can do for
   you — it would have to open a port in your process. They exit 1 and say so,
   rather than building and leaving nothing on the port.
-- **A folder held by someone else.** `--no-attach` runs a private engine
-  anyway — for checking that a cold start works — and says the folder is held.
+There is no opt-out. A flag for running a second engine on a held folder
+only ever enabled the accident this surface prevents, and stopping the
+instance serves every case it was reached for.
 
 `--tool`, `--tools`, `--verify` and `--explain` forward as well, and for a
 different reason than builds do. They only read, so running one locally never

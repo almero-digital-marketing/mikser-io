@@ -49,8 +49,6 @@ function locate(argv) {
         longRunning,
         workingFolder: value('--working-folder', '-i') ?? '.',
         config: value('--config', '-c') ?? 'mikser.config.js',
-        // Commander's negated form: `attach` is true unless --no-attach said so.
-        attach: has('--no-attach') ? false : true,
         request,
     }
 }
@@ -62,18 +60,17 @@ async function main() {
     // A second server or watcher is the hazard this whole surface exists to
     // remove, and it is the one shape that cannot be answered by forwarding.
     // So it stops, rather than silently doing something else.
-    if (where.attach !== false && where.longRunning) {
+    if (where.longRunning) {
         if (await isInstanceLive(workingFolder)) {
             process.stderr.write(
                 'mikser: another mikser is already running in this folder, and a server or watcher cannot be '
                 + 'forwarded to it — it would have to open a port on your behalf.\n'
-                + 'Stop that one, or pass --no-attach to run a second engine here (two engines share the '
-                + 'catalogue and the output tree, with no lock between them).\n')
+                + 'Stop that one first.\n')
             process.exit(1)
         }
     }
 
-    if (where.attach !== false && !where.longRunning) {
+    if (!where.longRunning) {
         const code = await forward({
             workingFolder,
             config: path.resolve(where.workingFolder, where.config),

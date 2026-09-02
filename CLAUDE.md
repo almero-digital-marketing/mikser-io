@@ -302,8 +302,11 @@ brevity.
   Strings produce a v9 migration error pointing at the new shape.
 - `instance.js` — one engine per working folder. A second `mikser` in a
   folder a watcher holds FORWARDS its build over a unix socket and wears
-  the instance's log output and exit code; `--no-attach` opts out and
-  warns. Socket lives in `os.tmpdir()` keyed by a hash of the resolved
+  the instance's log output and exit code. There is NO opt-out: a flag for
+  starting a second engine on a held folder only ever enabled the accident
+  this file prevents — two engines on one catalogue and one output tree
+  with no lock — and every case it was reached for is served by stopping
+  the instance. Socket lives in `os.tmpdir()` keyed by a hash of the resolved
   working folder — NOT under `runtime/`, because sun_path caps a socket
   path at ~107 bytes and a nested working folder fails as `listen
   EINVAL`. chmod 0600, so the filesystem permission is the access

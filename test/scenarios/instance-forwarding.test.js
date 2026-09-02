@@ -165,7 +165,7 @@ describe('a second invocation forwards to the running one', () => {
         const { code, combined } = await runMikser(workdir, ['-c', 'mikser.config.prod.js'])
         assert.equal(code, 1)
         assert.match(combined, /this instance is running/)
-        assert.match(combined, /--no-attach/, 'and says how to get a private engine')
+        assert.match(combined, /Stop that instance/, 'and says what to do about it')
     })
 
     it('refuses a second server rather than forwarding it', async () => {
@@ -177,7 +177,7 @@ describe('a second invocation forwards to the running one', () => {
         const { code, combined } = await runMikser(workdir, ['--server', '3999'])
         assert.equal(code, 1, `a server that cannot start must not report success\n${combined}`)
         assert.match(combined, /cannot be forwarded/)
-        assert.match(combined, /--no-attach/, 'and says how to run one anyway')
+        assert.match(combined, /Stop that one first/, 'and says what to do about it')
     })
 
     it('refuses a second watcher for the same reason', async () => {
@@ -185,10 +185,21 @@ describe('a second invocation forwards to the running one', () => {
         assert.equal(code, 1, combined)
     })
 
-    it('--no-attach runs its own engine, and says the folder is held', async () => {
+    it('has no opt-out: the old flag cannot produce a second engine', async () => {
+        // --no-attach used to start a private engine on the same folder. Its
+        // only effect was to enable the accident this surface exists to
+        // prevent — two engines sharing one catalogue and one output tree with
+        // no lock between them — and no caller had a reason to want it that
+        // stopping the instance would not serve better.
+        //
+        // Removed, not deprecated. app.js pre-parses argv and forwards before
+        // commander sees the flag, so here it is simply carried along and the
+        // build is forwarded like any other. What matters is the property: no
+        // argument reaches a second engine.
         const { code, combined } = await runMikser(workdir, ['--no-attach'])
         assert.equal(code, 0, combined)
-        assert.match(combined, /Another mikser is already running/)
+        assert.doesNotMatch(combined, /Another mikser is already running/,
+            `it must forward, not start its own engine\n${combined}`)
     })
 })
 
@@ -202,6 +213,15 @@ describe('when there is nobody to forward to', () => {
             'layouts/page.hbs': LAYOUT,
             'documents/index.html': doc('Alone', '/index.html'),
         })
+    })
+
+    it('rejects the removed opt-out flag outright when running locally', async () => {
+        // The other half: with nobody to forward to, commander parses the
+        // arguments and an option that no longer exists is an error. Anyone
+        // reaching for it is told, rather than quietly getting something else.
+        const { code, combined } = await runMikser(workdir, ['--no-attach'])
+        assert.equal(code, 1, `an unknown option must not be ignored\n${combined}`)
+        assert.match(combined, /unknown option/)
     })
 
     it('builds locally, exactly as before', async () => {

@@ -386,7 +386,6 @@ export async function setup(options) {
         runtime.engine.commander?.version(packageInfo.version)
             .option('-i --working-folder <folder>', 'set mikser working folder', './')
             .option('-c --config <file>', 'set mikser mikser.config.js location', './mikser.config.js')
-            .option('--no-attach', 'start a private engine instead of forwarding to the one already running here')
             .option('-m --mode <mode>', 'set mikser runtime mode', 'development')
             .option('-r --clear', 'clear current state before execution', false)
             .option('-o --output-folder <folder>', 'set mikser output folder relative to working folder', 'out')
