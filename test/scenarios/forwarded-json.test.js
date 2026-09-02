@@ -133,3 +133,55 @@ describe('--json across the forwarding boundary', () => {
         assert.match(stdout, /Mikser completed/, `a forwarded build logs to stdout\n${stderr}`)
     })
 })
+
+// One document per request, even when the instance is still starting.
+//
+// The control socket opens in onLoaded, before the instance's own first build
+// has finished. A client that connects into that window turns on the json
+// contract — and the INSTANCE's startup cycle then writes its report into the
+// client's stdout, followed by the requested build's. Two documents in a
+// stream that promises one, which fails a caller exactly as badly as emitting
+// none: `JSON.parse` throws on the whole thing.
+//
+// Widened deliberately here with a plugin that spends time in onImport, so the
+// window is reliably open when the request lands rather than occasionally.
+
+const SLOW = `
+export function slow(ms) {
+    return ({ onImport }) => {
+        onImport(async () => { await new Promise(r => setTimeout(r, ms)) })
+        return { collection: 'slow', type: 'slow' }
+    }
+}
+`
+
+describe('a request that lands while the instance is still booting', () => {
+    const workdir = freshWorkdir('forwarded-json-boot')
+    let instance
+    after(async () => { instance?.kill(); await cleanup(workdir) })
+
+    it('still answers with exactly one document', async () => {
+        await setupFixture(workdir, {
+            'mikser.config.js': `
+import { documents, frontMatter, renderHbs } from 'mikser-io'
+import { layouts } from 'mikser-io-layouts'
+import { slow } from './slow.js'
+export default { plugins: [documents(), frontMatter(), layouts(), renderHbs(), slow(600)] }
+`,
+            'slow.js': SLOW,
+            'layouts/page.hbs': '<!doctype html><title>x</title>',
+            'documents/index.html': '---\nlayout: page\n---\n',
+        })
+        // No warm-up build: the instance starts cold, so its first cycle is
+        // still running when the socket appears.
+        instance = await startInstance(workdir)
+
+        const { code, stdout } = await runMikser(workdir, ['--json'])
+        assert.equal(code, 0)
+        // The whole stream, not a brace-hunt: a second document appended to
+        // the first is exactly what this guards against, and only parsing the
+        // entire thing catches it.
+        const report = JSON.parse(stdout)
+        assert.equal(typeof report.summary, 'object')
+    })
+})

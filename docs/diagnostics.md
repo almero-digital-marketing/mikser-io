@@ -135,6 +135,41 @@ when the entity cannot be found.
 
 ### `--json`
 
+The report carries `timings`: what each phase COST, in milliseconds, for the
+cycle being reported.
+
+```
+"timings": {
+  "total": 114,              // the phases below, summed — this cycle
+  "processUptime": 415.5,    // how long THIS PROCESS has been alive
+  "phases": [
+    { "phase": "load",   "ms": 80.5, "calls": 1 },
+    { "phase": "import", "ms": 17.5, "calls": 1 }
+  ]
+}
+```
+
+Ordered slowest first, so a diff between two versions leads with what moved.
+This exists because the report said what was *done* and never what it *took*: a
+preset fan-out that scanned the whole catalog every cycle shipped and ran for
+four releases, with byte-identical output and every check passing, while the
+build was twice as slow. An upgrade check could prove no bytes moved and could
+not prove the speed had not halved.
+
+`finishedAt - startedAt` is not this — it spans the processing cycle only,
+measured at 12ms of a 443ms run, leaving boot, the config graph, the plugin
+load and the import scan with no number anywhere.
+
+`processUptime` is deliberately not called "elapsed". For a one-shot it is the
+whole run, and subtracting `total` gives what the phases do not cover — module
+loading and engine construction, which happen before any hook. For a build
+forwarded to a watcher it is the *instance's* age, which says nothing about the
+build.
+
+Milliseconds because the console's progress lines round to whole seconds, so a
+phase that doubled from 400ms to 800ms prints `0s` both times — and they are
+suppressed off a TTY, which is every CI run and every `--json` invocation.
+
 A build report on stdout, as JSON. Logs and the banner move to stderr
 under this flag, so stdout parses whole.
 

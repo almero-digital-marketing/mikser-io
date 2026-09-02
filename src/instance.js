@@ -37,6 +37,7 @@ import runtime from './runtime.js'
 import { onLoaded } from './lifecycle.js'
 import { renderErrorCount } from './report.js'
 import { runReportOnly } from './engine.js'
+import { emitReport } from './report.js'
 
 // Where the endpoint lives.
 //
@@ -429,7 +430,20 @@ async function serveBuild(socket, request, logger) {
             // rebuild() — the same call a one-shot makes. Nothing here
             // re-implements it: the contract is what decides whether it
             // writes, so setting the contract is the whole fix.
-            await withRequestOutput(request, () => runtime.rebuild())
+            await withRequestOutput(request, async () => {
+                // Suppressed for the duration of the cycle and emitted once
+                // after it: any cycle already in flight when this request
+                // arrived would otherwise write a second document into a
+                // stream that promises one.
+                runtime.state ??= {}
+                runtime.state.suppressReport = true
+                try {
+                    await runtime.rebuild()
+                } finally {
+                    runtime.state.suppressReport = false
+                }
+                emitReport()
+            })
         } finally {
             runtime.options.renderPresets = priorRenderPresets
         }

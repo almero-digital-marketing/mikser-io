@@ -119,6 +119,13 @@ export function resetReport() {
     // time was not re-checked, and claiming otherwise would be the kind of
     // completeness this codebase keeps having to walk back.
     runtime.state.assetUse = new Map()
+    // Per cycle, like everything else here. Accumulating for the life of the
+    // process would make a watcher's second build report what the instance has
+    // spent since boot — a number that only grows, and never answers "what did
+    // this cycle cost", which is the question someone comparing builds is
+    // asking. The boot phases therefore appear in the first cycle's report and
+    // not in later ones, which is what actually happened.
+    runtime.state.timings = {}
 }
 
 // Published on the runtime so runtime.js can start a fresh cycle for a
@@ -433,6 +440,32 @@ function invalidation() {
     }
 }
 
+// Phase durations, rounded to a tenth of a millisecond and ordered slowest
+// first — so a diff between two versions leads with what moved.
+function phaseTimings() {
+    const timings = runtime.state?.timings ?? {}
+    const entries = Object.entries(timings)
+        .map(([phase, { ms, calls }]) => ({ phase, ms: Math.round(ms * 10) / 10, calls }))
+        .sort((a, b) => b.ms - a.ms)
+    return {
+        // This cycle, summed. The phases below add up to it.
+        total: Math.round(entries.reduce((sum, e) => sum + e.ms, 0) * 10) / 10,
+        // How long THIS PROCESS has been alive, which is not the same thing
+        // and is named so nobody reads it as one.
+        //
+        // For a one-shot it is the whole run, and subtracting `total` gives
+        // what the phases do not cover: module loading and engine
+        // construction, which happen before any hook and on a small site are
+        // most of the elapsed time. For a build forwarded to a watcher it is
+        // the INSTANCE's age — minutes or days — and says nothing about the
+        // build. Reported either way, because a caller that knows which case
+        // it is in can use it, and a caller that does not would have been
+        // misled by a name like "elapsed".
+        processUptime: Math.round(process.uptime() * 1000 * 10) / 10,
+        phases: entries,
+    }
+}
+
 export function buildReport() {
     const report = store()
     const cycle = runtime.state?.cycle
@@ -442,6 +475,17 @@ export function buildReport() {
         cycleId: cycle?.id ?? null,
         startedAt: cycle?.startedAt ?? null,
         finishedAt: cycle?.finishedAt ?? null,
+        // What the run COST, per phase, in milliseconds.
+        //
+        // `finishedAt - startedAt` is not this. It spans the processing cycle
+        // only — measured on a small site, 12ms of a 443ms run — so boot, the
+        // config graph, the plugin load and the import scan, which is most of
+        // where a regression lands, had no number anywhere. A caller could
+        // prove an upgrade moved no bytes and not that it halved the speed.
+        //
+        // Milliseconds, because the console's whole-second rounding reports a
+        // phase that doubled from 400ms to 800ms as "0s" both times.
+        ...(runtime.state?.timings ? { timings: phaseTimings() } : {}),
         rendered: report.rendered,
         skipped: report.skipped,
         unchanged: report.unchanged,
@@ -494,5 +538,15 @@ export function emitReport() {
     // questions: a server with the mcp plugin records so a tool can read it,
     // and must not write a document to stdout.
     if (!runtime.options?.json) return
+    // Not while a forwarded request owns the stream.
+    //
+    // The control socket opens in onLoaded, before the instance's own first
+    // build has finished, so a client can connect into that window — turn on
+    // the json contract, and have the INSTANCE's startup cycle write its
+    // report into the client's stdout, followed by the requested build's.
+    // Two documents in a stream promising one, which is the same broken
+    // contract as emitting none. The request emits exactly once, after the
+    // cycle it asked for.
+    if (runtime.state?.suppressReport) return
     process.stdout.write(JSON.stringify(buildReport(), null, 2) + '\n')
 }

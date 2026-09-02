@@ -62,18 +62,52 @@ const runtime = {
         completed: [],
     },
 
+    // What each phase COST, not only what it did.
+    //
+    // A build report says what was done and never what it took, so a
+    // regression is invisible to the one caller that would catch it. The
+    // preset fan-out shipped scanning the whole catalog every cycle and ran
+    // for four releases before anyone happened to time a rebuild by hand:
+    // output was byte-identical, every check passed, and the build was twice
+    // as slow.
+    //
+    // Recorded here because this is the one place every phase passes through,
+    // so nothing has to be instrumented plugin by plugin and no phase can be
+    // added later without being counted. The console's progress lines are not
+    // this: they are per-collection, rounded to whole seconds — so a phase
+    // that doubled from 400ms to 800ms prints "0s" either way — and they are
+    // suppressed entirely off a TTY, which is every CI run and every --json
+    // invocation, meaning the numbers did not exist where a script could read
+    // them.
+    //
+    // Accumulated per phase rather than assigned, because a phase runs more
+    // than once in a watch process and a cycle can re-enter one.
+    recordPhase(phaseName, ms) {
+        if (!phaseName) return
+        this.state ??= {}
+        const timings = (this.state.timings ??= {})
+        const entry = (timings[phaseName] ??= { ms: 0, calls: 0 })
+        entry.ms += ms
+        entry.calls++
+    },
+
     async callHooks(hooks, signal, phaseName) {
         // Lifecycle methods below pass `phaseName` so introspection
         // tools (mikser-io-mcp's mikser://lifecycle resource, debuggers)
         // can see what's running. Direct callers (tests, plugins driving
         // sub-flows) can omit it.
         if (phaseName) this.phase = phaseName
+        const started = performance.now()
         try {
             for (let hook of hooks) {
                 if (signal?.aborted) throw new AbortError()
                 await hook(signal)
             }
         } finally {
+            // In `finally`, so a phase that threw still reports what it spent
+            // before throwing — which is exactly the phase someone is about to
+            // go looking at.
+            this.recordPhase(phaseName, performance.now() - started)
             if (phaseName) this.phase = null
         }
     },
