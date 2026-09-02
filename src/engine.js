@@ -327,6 +327,26 @@ export async function runReportOnly(request = {}) {
         report.call(logger,
             'Verify %s: %d snapshots, %d missing, %d mismatched, %d unverifiable, %d orphaned, %d collisions',
             verdict, total, missing.length, mismatched.length, unverifiable.length, orphaned.length, collisions.length)
+
+        // Say what a pass means, because the name promises more than the check
+        // can deliver.
+        //
+        // This compares each output file against the hash its OWN render
+        // recorded. Every render rewrites that snapshot, so a render whose
+        // output changed records the new bytes and then matches them: a
+        // rendering regression verifies clean, by construction, and no amount
+        // of care in the comparison changes that. It is a tampering check —
+        // files edited, truncated or removed outside mikser — not a
+        // regression check.
+        //
+        // Said on a PASS only. On a failure the listed differences are the
+        // message, and this would bury them.
+        if (verdict === 'OK') {
+            logger.info(
+                'Verify compares each output against the hash its own render recorded, so it catches files '
+                + 'changed or removed outside mikser — not a render that changed. A regression rewrites its '
+                + 'own snapshot and passes. To catch that, compare against snapshots from a build you trust.')
+        }
         return verdict === 'FAIL' ? 2 : verdict === 'WARN' ? 1 : 0
     }
 

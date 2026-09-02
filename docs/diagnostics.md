@@ -313,6 +313,15 @@ it. That is normal for anything written without a render snapshot (the
 `files` and `data` plugins), and a real signal for a page whose layout
 stopped producing it.
 
+**What a pass means, and what it does not.** Verify compares each output file
+against the hash *its own render recorded*. Every render rewrites that
+snapshot, so a render whose output changed records the new bytes and then
+matches them — a rendering regression verifies clean, by construction. It is
+a tampering check: files edited, truncated or removed outside mikser. It is
+not a regression check, and the name promises more than it delivers. To catch
+a regression you need snapshots from a build you trust, which mikser does not
+currently keep.
+
 ### The rest, briefly
 
 | Flag | Use |
