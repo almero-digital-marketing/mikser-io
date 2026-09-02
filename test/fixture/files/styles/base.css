@@ -63,3 +63,14 @@ footer {
     font-size: .8rem;
     color: var(--dim);
 }
+
+/* Local references, read through a symlink.
+   files() emits by symlinking the source into the output, so this file is a
+   link rather than a copy — and until the scan followed links, no url() in any
+   stylesheet was ever read while the summary reported a confident total. */
+.mark { background: url('../media/icons/mark.svg') no-repeat; }
+/* A custom property resolves against the stylesheet that substitutes it, not
+   against the page that declares it. Judged from a page it reads as a wrong
+   base, or as a climb above the site root when the discarded `..` happens to
+   land on a real file. */
+:root { --mark-src: url('../media/icons/mark.svg'); }

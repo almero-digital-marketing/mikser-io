@@ -125,7 +125,7 @@ async function reportBrokenReferences(logger) {
     // because the preset does not cover that file. Confidently naming the
     // wrong cause is worse than naming none, so a real answer wins over the
     // heuristic wherever there is one.
-    const explain = runtime.state?.assets?.explainMissing
+    const explain = runtime.engine?.assets?.explainMissing
     const reasons = new Map()
     if (explain) {
         // Every broken entry, not the ones that happen to sort first. The cap
@@ -261,7 +261,7 @@ async function reportMissingAssets(logger, alreadyReported = new Set()) {
     // every page on the site, and a thousand lines of it buries whatever else
     // the build said.
     const SHOWN = 10
-    const explain = runtime.state?.assets?.explainMissing
+    const explain = runtime.engine?.assets?.explainMissing
     for (const [destination, ids] of missing.slice(0, SHOWN)) {
         // Same question, same answer, wherever the symptom surfaces. This path
         // sees urls that never reach an html file at all — a sitemap, a feed —

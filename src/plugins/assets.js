@@ -405,15 +405,25 @@ export function assets(options = {}) {
         runtime.state.assets = {
             presets: {},
             assetsMap: {},
-            // The engine asks this when a linked derivative is not on disk.
-            // Published on state rather than imported, so the engine keeps
-            // knowing nothing about presets and says nothing when this plugin
-            // is not loaded.
-            explainMissing,
             assetsFolder: options.outputFolder
                 ? path.join(options.outputFolder, assetsName)
                 : assetsName,
         }
+
+        // The engine asks this when a linked derivative is not on disk.
+        //
+        // On runtime.engine, NOT on runtime.state. State is structured-cloned
+        // into render and postprocess workers, and a function cannot be
+        // cloned: putting it there made every worker-dispatched render fail
+        // with DataCloneError on any build that loads this plugin, reported as
+        // a render error whose message was this function's own source. Options
+        // already had workerSafeOptions for exactly this hazard; state had no
+        // equivalent, so state is the wrong place to publish anything callable.
+        //
+        // Still published rather than imported, so the engine keeps knowing
+        // nothing about presets and says nothing when this plugin is absent.
+        runtime.engine ??= {}
+        runtime.engine.assets = { explainMissing }
 
         runtime.options.presets = options.presetsFolder || collection
         runtime.options.presetsFolder = path.join(runtime.options.workingFolder, runtime.options.presets)

@@ -19,6 +19,17 @@ try {
 } catch {}
 
 export default async ({ options }) => ({
+    // Deliberately NO siteRoots. This fixture is ONE site with language
+    // folders — out/bg and out/en share a root, which is what its language
+    // switcher (`../en/index.html`) and its shared out/styles both rely on.
+    // Declaring siteRoots here would claim each language is deployed as its
+    // own domain, and the reference check correctly reports twelve broken urls
+    // when it is: the claim would be the bug, not the finding.
+    //
+    // The multi-domain shape has its own scenario — see
+    // test/scenarios/deployment-shape.test.js — where shares() puts the assets
+    // under each root and nothing links across them, which is what a real
+    // per-domain deployment does.
     plugins: [
         documents(),
         frontMatter(),
