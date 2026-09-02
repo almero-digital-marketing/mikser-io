@@ -381,6 +381,33 @@ export async function runReportOnly(request = {}) {
             await runtime.manifest.auditOutput()
         const total = runtime.manifest.size()
 
+        // The document, under --json.
+        //
+        // This is the check a deploy script wants and it was the one that
+        // could not be read programmatically: it reported through the log and
+        // wrote nothing to stdout, so `--audit-output --json` returned zero
+        // bytes and exit 0 or 2 — a caller had to parse prose, or trust the
+        // exit code and lose every detail behind it.
+        //
+        // Emitted here and returned immediately, because the log lines below
+        // are the human rendering of exactly this and printing both would put
+        // the prose on stderr for no one.
+        if (json) {
+            process.stdout.write(JSON.stringify({
+                verdict,
+                snapshots: total,
+                summary: {
+                    missing: missing.length,
+                    mismatched: mismatched.length,
+                    unverifiable: unverifiable.length,
+                    orphaned: orphaned.length,
+                    collisions: collisions.length,
+                },
+                missing, mismatched, unverifiable, orphaned, collisions,
+            }, null, 2) + '\n')
+            return verdict === 'FAIL' ? 2 : 0
+        }
+
         for (const e of missing)      logger.error('Missing:    %s (entity %s)', e.destination, e.id)
         for (const e of mismatched)   logger.error('Mismatched: %s (entity %s)%s', e.destination, e.id,
             e.writtenBy ? ` — the bytes on disk are ${e.writtenBy}'s` : '')
@@ -494,6 +521,58 @@ export async function setup(options) {
             .option('-t --trace', 'display trace statements')
             .option('-e --runtime-folder <folder>', 'set mikser runtime folder relative to working folder', 'runtime')
         attachServerCliOptions(runtime.engine.commander)
+
+        // Which check answers which question.
+        //
+        // The boundaries between these are real and none of them is redundant,
+        // but that knowledge lived only in commit messages — which are the
+        // wrong place for it, because nobody reads them before they need the
+        // answer. A caller choosing how to verify a build was left to learn it
+        // by experiment, one release at a time.
+        //
+        // On --help rather than in a doc alone: this is read at the moment the
+        // question is being asked.
+        runtime.engine.commander.addHelpText('after', `
+Which check answers which question:
+
+  Did this build write what it thought it wrote?
+      --audit-output        compares the output on disk against the manifest.
+                            Catches tampering, truncation and a file deleted
+                            behind the build's back. Structurally CANNOT catch
+                            a render that changed, because a render rewrites
+                            its own snapshot — afterwards the new bytes agree
+                            with themselves.
+
+  Did an upgrade change what a render produces?
+      --force               re-renders everything and reports output-drift:
+                            same inputs, different bytes. This is the one that
+                            catches a renderer, helper or dependency moving
+                            under the build. It also reconciles deletions.
+
+  Do the URLs in the output point at anything?
+      (runs every build)    reads the emitted html and css and resolves each
+                            reference the way a browser would. Reports what
+                            resolves to nothing, what a preset never produced,
+                            and what loads only because a browser discarded a
+                            climb above the site root.
+
+  Are the derivatives current?
+      --render-presets [n]  re-derives every preset, or one by name, without
+                            touching anything else. For a preset edited without
+                            bumping its revision.
+
+  Start over.
+      --clear               removes the output folder and reopens the cache.
+                            A boot operation: it is refused while an instance
+                            is running in the same folder.
+
+  What did this build do, and cost?
+      --json                the whole report as one document on stdout, with
+                            every warning carrying a stable code, and per-phase
+                            timings in milliseconds so two releases can be
+                            compared.
+
+The full version, with what each code means: docs/diagnostics.md`)
 
         Object.assign(runtime.options, options || runtime.engine.commander.parse(process.argv).opts())
         // runtime.options.info gates the progress bar — gauge stays

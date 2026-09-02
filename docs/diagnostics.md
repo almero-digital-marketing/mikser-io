@@ -133,6 +133,28 @@ anything.
 Add `--json` for the whole report as a machine-readable object. Exits `3`
 when the entity cannot be found.
 
+Every coded warning and fault prints its code on the console, in brackets
+before the sentence:
+
+```
+🟡 [output-drift] Output changed with unchanged inputs: /documents/index.html → /index.html
+🟡 [reference-wrong-base] Points at the wrong place: ...
+```
+
+The code is added, not substituted: the sentence is what a person reads and the
+code is what a script matches. Both come from the same field on the same
+record, so the console and the report cannot drift apart — which they had. The
+report called it `output-drift` and the console said "produced different bytes
+from the same inputs", so anything watching the build had to match prose, the
+half that is free to be reworded, while the stable identifier appeared only in
+this document.
+
+`--audit-output --json` writes its verdict as a document — `verdict`,
+`snapshots`, a `summary` of the five counts, and the entries behind each. It
+reported through the log and wrote nothing to stdout before, which made the
+check a deploy script most wants the one it could not read. Exit codes are
+unchanged: 2 for FAIL.
+
 ### `--json`
 
 The report carries `timings`: what each phase COST, in milliseconds, for the

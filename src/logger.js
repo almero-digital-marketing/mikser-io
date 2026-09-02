@@ -178,9 +178,28 @@ export function createMikserLogger(level = 'info') {
         customPrettifiers: {
             level: () => '',
         },
+        // The CODE, on the line a person is reading.
+        //
+        // A finding had two names: the report called it `output-drift` and the
+        // console said "produced different bytes from the same inputs", and
+        // nothing on the console contained the string someone reading
+        // docs/diagnostics.md would grep for. So a script watching the build
+        // matched prose — the half that is free to be reworded — while the
+        // stable identifier existed only in a document that script was not
+        // reading.
+        //
+        // Printed here because this is the one function every line passes
+        // through, so the code cannot be attached to the record and missing
+        // from the terminal: they come from the same field. `hideObject` still
+        // suppresses the rest of the structured fields, which belong in the
+        // report and would turn a one-line warning into a block.
+        //
+        // Only where there is a code. An ordinary info line has no identity to
+        // print and gains nothing from a bracket.
         messageFormat: (log, key) => {
             const icon = ICONS[LEVEL_LABELS[log.level]] ?? ''
-            return icon + (log[key] ?? '')
+            const code = typeof log.code === 'string' && log.code ? `[${log.code}] ` : ''
+            return icon + code + (log[key] ?? '')
         },
     })
 
