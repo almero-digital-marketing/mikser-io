@@ -43,7 +43,16 @@ function locate(argv) {
         : tool                    ? { type: 'report', tool, toolArgs: value('--tool-args'), json: has('--json') }
         : explain                 ? { type: 'report', explain, json: has('--json') }
         : has('--audit-output')   ? { type: 'report', auditOutput: true, json: has('--json') }
-        : { type: 'build', clear: has('--clear'), renderPresets: has('--render-presets') ? (value('--render-presets') ?? true) : undefined }
+        : { type: 'build',
+            clear: has('--clear'),
+            // Not a flag that happens to be set — the client's OUTPUT
+            // CONTRACT. `--json` promises the document on stdout and every
+            // log line on stderr, and BOTH halves are decided by the process
+            // that does the writing. Forwarded, that is the instance, which
+            // was started without the flag. So the contract has to travel
+            // with the request or it is not honoured at all.
+            json: has('--json'),
+            renderPresets: has('--render-presets') ? (value('--render-presets') ?? true) : undefined }
 
     return {
         longRunning,

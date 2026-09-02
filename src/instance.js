@@ -125,8 +125,11 @@ export function forward({ workingFolder, config, request }) {
         readFrames(socket, (message) => {
             if (message.type === 'log') {
                 // The instance's output for THIS request, on the stream it
-                // would have used locally.
-                process.stderr.write(message.chunk)
+                // would have used locally — which requires knowing which
+                // stream that was. An instance too old to say defaults to
+                // stderr, which is what every frame used to mean.
+                const out = message.stream === 'stdout' ? process.stdout : process.stderr
+                out.write(message.chunk)
             } else if (message.type === 'refused') {
                 answered = true
                 process.stderr.write(`mikser: ${message.reason}\n`)
@@ -197,14 +200,22 @@ let server = null
 // adding a log transport means the client sees precisely what it would have
 // seen locally, formatting and all, with no second rendering of the same
 // records to keep in step.
+// WHICH stream, not merely that something was written.
+//
+// stdout and stderr are not two ways of saying the same thing: under --json,
+// --tool and --tools, stdout carries a machine-readable document and stderr
+// carries the log, and the split is the entire value of those flags. Capturing
+// both into one undifferentiated stream throws that away, and the client can
+// only guess — it guessed stderr, so every forwarded document landed where no
+// consumer looks while the command exited 0.
 function captureOutput(onChunk) {
     const originals = [process.stdout.write, process.stderr.write]
-    const patch = (stream, original) => function (chunk, encoding, callback) {
-        try { onChunk(typeof chunk === 'string' ? chunk : chunk.toString()) } catch { /* client gone */ }
+    const patch = (stream, original, name) => function (chunk, encoding, callback) {
+        try { onChunk(typeof chunk === 'string' ? chunk : chunk.toString(), name) } catch { /* client gone */ }
         return original.call(stream, chunk, encoding, callback)
     }
-    process.stdout.write = patch(process.stdout, originals[0])
-    process.stderr.write = patch(process.stderr, originals[1])
+    process.stdout.write = patch(process.stdout, originals[0], 'stdout')
+    process.stderr.write = patch(process.stderr, originals[1], 'stderr')
     return () => {
         process.stdout.write = originals[0]
         process.stderr.write = originals[1]
@@ -264,10 +275,10 @@ async function configStale() {
 // the only process that can answer correctly. Same guards as a build: wrong
 // config refuses, drifted config refuses.
 async function serveReport(socket, request, logger) {
-    const restore = captureOutput((chunk) => frame(socket, { type: 'log', chunk }))
+    const restore = captureOutput((chunk, stream) => frame(socket, { type: 'log', chunk, stream }))
     let code = 0
     try {
-        code = await runReportOnly(request) ?? 0
+        code = await withRequestOutput(request, () => runReportOnly(request)) ?? 0
     } catch (err) {
         logger?.error('instance: forwarded report failed — %s', err.message)
         code = 3
@@ -328,8 +339,37 @@ function refuseStale(socket, movedFile) {
     })
 }
 
+// The client's output contract, applied to the instance for one request.
+//
+// `--json` is answered by two pieces of code that both read runtime.options:
+// the logger picks its stream per line, and emitReport() writes nothing at all
+// unless the option is set. The instance was started without the flag, so a
+// forwarded `--json` was answered under the INSTANCE's contract — a build
+// emitted no document whatsoever, and a report emitted one into the same
+// stream as the log it was supposed to be separated from.
+//
+// Tighten only, never loosen. A client asking for a document states something
+// the instance cannot know; a client not asking states nothing, and silencing
+// an instance that was itself started under `--json` would take a document
+// away from whatever is reading ITS stdout.
+//
+// Per request and restored after, like renderPresets: one client's flag does
+// not put the instance into json mode for everyone.
+async function withRequestOutput(request, run) {
+    const prior = {}
+    for (const key of ['json', 'tool', 'tools']) {
+        prior[key] = runtime.options[key]
+        if (request[key]) runtime.options[key] = request[key]
+    }
+    try {
+        return await run()
+    } finally {
+        Object.assign(runtime.options, prior)
+    }
+}
+
 async function serveBuild(socket, request, logger) {
-    const restore = captureOutput((chunk) => frame(socket, { type: 'log', chunk }))
+    const restore = captureOutput((chunk, stream) => frame(socket, { type: 'log', chunk, stream }))
     let code = 0
     try {
         // Fire the pending debounce rather than waiting it out.
@@ -356,7 +396,11 @@ async function serveBuild(socket, request, logger) {
         const priorRenderPresets = runtime.options.renderPresets
         if (request.renderPresets !== undefined) runtime.options.renderPresets = request.renderPresets
         try {
-            await runtime.rebuild()
+            // The report is emitted by the cycle itself, from inside
+            // rebuild() — the same call a one-shot makes. Nothing here
+            // re-implements it: the contract is what decides whether it
+            // writes, so setting the contract is the whole fix.
+            await withRequestOutput(request, () => runtime.rebuild())
         } finally {
             runtime.options.renderPresets = priorRenderPresets
         }

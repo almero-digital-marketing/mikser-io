@@ -796,6 +796,19 @@ queue. A client that writes a file and immediately asks can beat the file
 event, and draining would then build without the change that prompted the
 request.
 
+`--json`, `--tool` and `--tools` keep their stream contract across the socket:
+the document on stdout, the log on stderr, so `mikser --json | jq` means the
+same thing whether or not something is listening. Both halves of that contract
+are decided by the process that writes, which when forwarding is the instance —
+so the flag travels with the request, and each captured chunk is replayed on
+the stream the instance actually used. The contract applies to that one request
+and is restored afterwards: asking for a document does not put the instance
+into json mode for its own output or for the next caller.
+
+`--audit-output` is the exception, and it is the same with or without an
+instance: it reports through the log and writes no document, so `--json` there
+only moves its output to stderr.
+
 ## Faults
 
 A **fault** is a subsystem saying it cannot do its job — as opposed to an
