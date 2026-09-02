@@ -767,7 +767,7 @@ answer is about your request. It is also faster, because a forwarded command
 never imports the config or the plugin graph, which is most of what a one-shot
 spends its time on.
 
-Three things it refuses or reports rather than guessing:
+Four things it refuses or reports rather than guessing:
 
 - **A different config.** If you resolve `mikser.config.prod.js` and the
   instance is running `mikser.config.js`, it refuses. Building with the wrong
@@ -779,6 +779,14 @@ Three things it refuses or reports rather than guessing:
   to *become* the instance, which is not something a running one can do for
   you — it would have to open a port in your process. They exit 1 and say so,
   rather than building and leaving nothing on the port.
+- **`--clear`.** Clearing removes the output folder and closes, unlinks and
+  reopens the cache database — a boot operation, which is why the wipe lives
+  where the database is opened and nowhere else. A running instance holds that
+  handle, has its manifest and plugin state loaded from what would be deleted,
+  and may be serving out of the folder being removed. It exits 1 and tells you
+  to stop the instance. It used to be accepted and ignored, so the build
+  reported success with nothing cleared; a half-clear would have been worse
+  than either, since afterwards nobody could say what state the folder was in.
 There is no opt-out. A flag for running a second engine on a held folder
 only ever enabled the accident this surface prevents, and stopping the
 instance serves every case it was reached for.

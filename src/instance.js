@@ -330,6 +330,35 @@ function refuseUnknownFlags(socket, request) {
     return true
 }
 
+// `--clear` against a running instance.
+//
+// Clearing is a BOOT operation. It removes the output folder, and it closes,
+// unlinks and reopens the cache database — which is why the wipe lives at the
+// point the database is opened and nowhere else. An instance has that handle
+// open with prepared statements held against it all over the engine, its
+// manifest and plugin state loaded from what is about to be deleted, and a
+// server answering requests out of the folder being removed. There is no
+// moment mid-run where this can be done and still mean what the flag means.
+//
+// It travelled on the request and was never read, so `mikser --clear` against
+// a watcher rebuilt normally and exited 0 having cleared nothing: the flag
+// looked honoured. Refusing says the only thing that helps, which is that the
+// instance has to stop first.
+//
+// A half-clear would be worse than either: it would report success for an
+// operation the caller can no longer describe.
+function refuseClear(socket, request) {
+    if (!request.clear) return false
+    frame(socket, {
+        type: 'refused',
+        reason: 'a mikser instance is running in this folder, and --clear cannot run while it does.',
+        detail: 'Clearing removes the output folder and reopens the cache database, both of which happen '
+            + 'once at startup — the running instance holds that database open and serves out of that '
+            + 'folder. Stop it and run this again.',
+    })
+    return true
+}
+
 function refuseStale(socket, movedFile) {
     frame(socket, {
         type: 'refused',
@@ -451,6 +480,7 @@ export function serveInstance() {
                     // original incident, and it is wrong whether or not it
                     // writes anything.
                     if (refuseUnknownFlags(socket, request)) return
+                    if (refuseClear(socket, request)) return
                     const wrongConfig = configMismatch(request.config)
                     if (wrongConfig) return refuseConfig(socket, request, wrongConfig)
                     const movedFile = await configStale()
