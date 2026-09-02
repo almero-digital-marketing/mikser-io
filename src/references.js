@@ -173,5 +173,31 @@ export async function checkReferences(outputFolder, { siteRoots = [] } = {}) {
         }
     }
 
+    // "It was never written" and "it is written somewhere else" are different
+    // problems with one symptom, and they were reported with one sentence.
+    //
+    // A missing target whose FILE exists elsewhere in the output is almost
+    // always a base problem: the url was built from the wrong root, or with a
+    // segment too many. Naming where the file actually is turns "resolves to
+    // nothing" into the answer. A target that exists nowhere really was never
+    // produced — a preset that did not run, an extension nothing emits.
+    //
+    // Indexed only when something is broken, so a clean build pays nothing.
+    if (broken.size) {
+        const byName = new Map()
+        for (const file of await globby('**/*', {
+            cwd: outputFolder, followSymbolicLinks: true, onlyFiles: true, suppressErrors: true,
+        })) {
+            const name = path.basename(file)
+            if (!byName.has(name)) byName.set(name, [])
+            byName.get(name).push(file)
+        }
+        for (const entry of broken.values()) {
+            const elsewhere = (byName.get(path.basename(entry.target)) ?? [])
+                .filter(f => f !== entry.target)
+            if (elsewhere.length) entry.elsewhere = elsewhere.slice(0, 3)
+        }
+    }
+
     return { broken: [...broken.values()], overDeep: [...overDeepRefs.values()], checked }
 }

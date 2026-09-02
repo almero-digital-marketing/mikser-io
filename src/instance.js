@@ -286,6 +286,39 @@ function refuseConfig(socket, request, wrongConfig) {
     })
 }
 
+// An option the instance's own commander does not recognise.
+//
+// A forwarded invocation never reaches commander: app.js pre-parses the few
+// flags it needs and forwards the rest, so `mikser --bogus` against a running
+// watcher built normally and exited 0, while the same command with nothing
+// listening was rejected outright. Same words, two answers, and the quiet one
+// is the one that looks like it worked.
+//
+// parseOptions REPORTS unknowns without applying anything, which is what makes
+// this safe to run against the live instance's option table.
+function refuseUnknownFlags(socket, request) {
+    const argv = Array.isArray(request.argv) ? request.argv : null
+    if (!argv?.length) return false
+    const commander = runtime.engine?.commander
+    if (!commander) return false
+    let unknown = []
+    try {
+        unknown = commander.parseOptions([...argv]).unknown ?? []
+    } catch {
+        return false   // never let a probe refuse a legitimate build
+    }
+    unknown = unknown.filter(a => a.startsWith('-'))
+    if (!unknown.length) return false
+    frame(socket, {
+        type: 'refused',
+        reason: `unknown option ${unknown.map(u => `'${u}'`).join(', ')}.`,
+        detail: 'Forwarded to the instance running in this folder, which does not recognise it. '
+            + 'The same command with nothing listening would have been rejected too — this says so '
+            + 'rather than building as though the flag had been understood.',
+    })
+    return true
+}
+
 function refuseStale(socket, movedFile) {
     frame(socket, {
         type: 'refused',
@@ -373,6 +406,7 @@ export function serveInstance() {
                     // instance's — a report against the wrong config is the
                     // original incident, and it is wrong whether or not it
                     // writes anything.
+                    if (refuseUnknownFlags(socket, request)) return
                     const wrongConfig = configMismatch(request.config)
                     if (wrongConfig) return refuseConfig(socket, request, wrongConfig)
                     const movedFile = await configStale()

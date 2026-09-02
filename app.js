@@ -47,6 +47,12 @@ function locate(argv) {
 
     return {
         longRunning,
+        // The flags this process was invoked with, forwarded so the INSTANCE
+        // can reject an unknown one. This pre-parser reads the few options it
+        // needs and passes the rest along, so commander never runs on a
+        // forwarded invocation — and a typo was accepted in silence, built,
+        // and reported success.
+        argv,
         workingFolder: value('--working-folder', '-i') ?? '.',
         config: value('--config', '-c') ?? 'mikser.config.js',
         request,
@@ -74,7 +80,7 @@ async function main() {
         const code = await forward({
             workingFolder,
             config: path.resolve(where.workingFolder, where.config),
-            request: where.request,
+            request: { ...where.request, argv: where.argv },
         })
         // null means nobody was listening — carry on exactly as before.
         if (code !== null) process.exit(code)

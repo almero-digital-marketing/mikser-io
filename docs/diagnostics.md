@@ -914,9 +914,12 @@ surfaces that turn silence into a statement:
   evidence:
   - **The emitted output**, read back and resolved the way a browser
     would — `src`, `href`, `poster`, `srcset` and CSS `url()` across
-    html and css. Anything resolving to no file warns under
-    `reference-broken`, naming the url and the pages carrying it. This
-    one sees paths written by hand, not just helper output.
+    html and css. This one sees paths written by hand, not just helper
+    output, and it separates two problems that share a symptom:
+    `reference-wrong-base` when the file exists elsewhere in the output
+    (the url was built from the wrong root, and the report names where
+    the file actually is), `reference-broken` when nothing produced it
+    at all.
   - **The render track**, which records every `asset()` / `resource()`
     call and tests the destination it built. This catches a url that
     never reaches an html file at all — one emitted into a feed or a

@@ -118,9 +118,9 @@ describe('several site roots in one build', () => {
     })
 
     it('a target nothing produced is still broken, from both depths', () => {
-        assert.match(out, /Resolves to nothing:.*ghost\.jpg.*from a\/index\.html/,
+        assert.match(out, /nothing produced it:.*ghost\.jpg.*from a\/index\.html/,
             `expected the missing derivative reported from the shallow page\n${out}`)
-        assert.match(out, /Resolves to nothing:.*ghost\.jpg.*from a\/x\/y\/deep\/index\.html/,
+        assert.match(out, /nothing produced it:.*ghost\.jpg.*from a\/x\/y\/deep\/index\.html/,
             `expected it reported from the deep page too\n${out}`)
     })
 

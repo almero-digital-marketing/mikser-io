@@ -66,7 +66,7 @@ describe('references in the emitted output', () => {
     it('names the reference that resolves to nothing, and the page that made it', async () => {
         const { code, combined } = await runMikser(workdir)
         assert.equal(code, 0, `a broken reference must warn, not fail\n${combined}`)
-        assert.match(combined, /Resolves to nothing: \.\.\/\.\.\/files\/nope\.svg/,
+        assert.match(combined, /nothing produced it: \.\.\/\.\.\/files\/nope\.svg/,
             `expected the broken url to be named\n${combined}`)
         assert.match(combined, /deep\/page\/index\.html/,
             `expected the page that linked it to be named\n${combined}`)
@@ -82,7 +82,7 @@ describe('references in the emitted output', () => {
             `expected the url to be named\n${combined}`)
         // It is not broken — it resolves. Reporting it as such would be wrong
         // and would drown the reference that genuinely resolves nowhere.
-        assert.doesNotMatch(combined, /Resolves to nothing: \.\.\/\.\.\/\.\.\/files\/logo\.svg/,
+        assert.doesNotMatch(combined, /nothing produced it: \.\.\/\.\.\/\.\.\/files\/logo\.svg/,
             `an over-deep url still resolves and must not be called broken\n${combined}`)
     })
 

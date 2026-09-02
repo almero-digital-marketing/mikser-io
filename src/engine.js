@@ -116,15 +116,31 @@ async function reportBrokenReferences(logger) {
     const named = (files) =>
         files.slice(0, 3).join(', ') + (files.length > 3 ? ` and ${files.length - 3} more` : '')
 
-    for (const { url, target, files } of broken.slice(0, SHOWN)) {
-        logger.warn({ code: 'reference-broken', url, target, files },
-            'Resolves to nothing: %s (from %s) — %s', url, named(files), target)
+    for (const { url, target, files, elsewhere } of broken.slice(0, SHOWN)) {
+        // Two different problems wear the same symptom. A target whose file
+        // exists elsewhere in the output is a base that is wrong, not an asset
+        // that is missing — and saying which one saves the reader the search.
+        if (elsewhere?.length) {
+            logger.warn({ code: 'reference-wrong-base', url, target, files, elsewhere },
+                'Points at the wrong place: %s (from %s) — nothing at %s, but the file is at %s',
+                url, named(files), target, elsewhere.join(', '))
+        } else {
+            logger.warn({ code: 'reference-broken', url, target, files },
+                'Resolves to nothing, and nothing produced it: %s (from %s) — %s',
+                url, named(files), target)
+        }
     }
     if (broken.length) {
-        logger.warn({ code: 'reference-broken-summary', broken: broken.length, checked },
-            '%d of %d reference(s) in the output resolve to nothing%s. A URL helper builds the '
-            + 'path rather than looking it up, so these are links to files nothing produced.',
-            broken.length, checked, broken.length > SHOWN ? `, ${SHOWN} shown` : '')
+        const misplaced = broken.filter(b => b.elsewhere?.length).length
+        logger.warn({
+            code: 'reference-broken-summary',
+            broken: broken.length, wrongBase: misplaced, checked,
+        },
+            '%d of %d reference(s) in the output resolve to nothing%s. Wrong base (the file exists '
+            + 'elsewhere): %d. Never produced: %d. A URL helper builds the path rather than looking '
+            + 'it up, so neither kind can fail at the point it is written.',
+            broken.length, checked, broken.length > SHOWN ? `, ${SHOWN} shown` : '',
+            misplaced, broken.length - misplaced)
     }
 
     // Grouped by how FAR each climbed, because a site whose every over-deep url

@@ -185,21 +185,21 @@ describe('a second invocation forwards to the running one', () => {
         assert.equal(code, 1, combined)
     })
 
-    it('has no opt-out: the old flag cannot produce a second engine', async () => {
+    it('has no opt-out, and the removed flag is now refused rather than carried', async () => {
         // --no-attach used to start a private engine on the same folder. Its
         // only effect was to enable the accident this surface exists to
-        // prevent — two engines sharing one catalogue and one output tree with
-        // no lock between them — and no caller had a reason to want it that
-        // stopping the instance would not serve better.
+        // prevent, and no caller had a reason to want it that stopping the
+        // instance would not serve better.
         //
-        // Removed, not deprecated. app.js pre-parses argv and forwards before
-        // commander sees the flag, so here it is simply carried along and the
-        // build is forwarded like any other. What matters is the property: no
-        // argument reaches a second engine.
+        // It used to be silently carried along on a forwarded build, because
+        // app.js pre-parses argv and commander never ran. The instance checks
+        // the argv now, so a flag it does not recognise is refused here exactly
+        // as it would be locally — same command, same answer, listener or not.
         const { code, combined } = await runMikser(workdir, ['--no-attach'])
-        assert.equal(code, 0, combined)
+        assert.equal(code, 1, `an unknown option must not be ignored\n${combined}`)
+        assert.match(combined, /unknown option/)
         assert.doesNotMatch(combined, /Another mikser is already running/,
-            `it must forward, not start its own engine\n${combined}`)
+            `it must not start its own engine\n${combined}`)
     })
 })
 
