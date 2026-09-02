@@ -948,6 +948,15 @@ surfaces that turn silence into a statement:
     sitemap — and warns under `asset-missing`. Where both can see the
     same file, the output scan reports it and this one stays quiet.
 
+  A `url()` inside a **custom property** is resolved from the stylesheet that
+  substitutes it, for both of these questions and for the climb check below.
+  It is substituted where it is *used*, so the page that declared it in a
+  style attribute is not its base — a bundle at `styles/` is. Every emitted
+  stylesheet is a candidate, since which one substitutes the variable is not
+  knowable from the bytes; a clean resolution settles it, one that resolves
+  only by climbing is a genuine over-deep against *that* base, and a url that
+  resolves from none of them is reported as broken.
+
   A url under the assets folder gets a cause rather than a guess. Whether a
   preset covers a file is decided by `match` against the entity id, which is
   not visible from a url, so the assets plugin is asked and the answer is one
@@ -971,7 +980,11 @@ surfaces that turn silence into a statement:
 - **A link that works only by accident** — a url with one `..` too many
   still loads, because a browser discards a climb above the origin root
   rather than failing. Reported under `reference-over-deep`, separately
-  from the outright failures, and grouped by how far each climbed:
+  from the outright failures, and grouped by how far each climbed. A custom
+  property is judged against its stylesheet here too: judged against the page
+  it produced a climb report for references that are correct, with a reason
+  — "a browser discards the extra `..`" — that was false for them, which
+  sends the reader to fix a base that is right:
   - **One url, or several climbing different distances** — each is a
     latent 404, working today and broken as soon as the same markup
     renders one level deeper.

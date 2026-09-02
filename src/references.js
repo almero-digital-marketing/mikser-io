@@ -198,21 +198,46 @@ export async function checkReferences(outputFolder, { siteRoots = [] } = {}) {
         const pageDir = path.dirname(file).slice(root.length).replace(/^\/+/, '')
 
         for (const { url, customProperty } of extractReferences(source)) {
-            const { target, overDeep, floored } = resolveUrl(pageDir, url, { root })
+            let { target, overDeep, floored } = resolveUrl(pageDir, url, { root })
             checked++
 
-            if (!exists.has(target)) {
-                exists.set(target, existsSync(path.join(outputFolder, target)))
-            }
-
-            // Resolved from a stylesheet instead, and correct there.
-            if (!exists.get(target) && customProperty && styleBases.some((base) => {
-                const from = resolveUrl(base.dir, url, { root: base.root }).target
-                if (!exists.has(from)) {
-                    exists.set(from, existsSync(path.join(outputFolder, from)))
+            const resolves = (candidate) => {
+                if (!exists.has(candidate)) {
+                    exists.set(candidate, existsSync(path.join(outputFolder, candidate)))
                 }
-                return exists.get(from)
-            })) continue
+                return exists.get(candidate)
+            }
+            resolves(target)
+
+            // A custom property is resolved from the STYLESHEET, for BOTH
+            // questions this check asks.
+            //
+            // The first version of this only replaced the verdict when the
+            // page-relative target was missing, which left the climb check
+            // answering from a base it had already been told was the wrong
+            // one. Where the discarded `..` happened to land on a real file,
+            // the reference was reported as climbing above the site root, and
+            // the explanation said it loads "because a browser discards the
+            // extra `..`" — when it loads because it is correct where it is
+            // actually read from. A wrong reason on a correct reference is
+            // worse than the original false positive: it sends the reader to
+            // fix a base that is right.
+            //
+            // Clean beats floored beats missing. A stylesheet that resolves it
+            // without climbing settles it; one that resolves it only by
+            // climbing is a genuine over-deep against THAT base; and if none
+            // resolves it the page-relative answer stands and the url is
+            // simply broken.
+            if (customProperty && styleBases.length) {
+                let best = null
+                for (const base of styleBases) {
+                    const from = resolveUrl(base.dir, url, { root: base.root })
+                    if (!resolves(from.target)) continue
+                    if (!from.overDeep) { best = from; break }
+                    best ??= from
+                }
+                if (best) ({ target, overDeep, floored } = best)
+            }
 
             // Broken outranks over-deep: a url that resolves nowhere is the
             // failure, and adding that it is also one level too deep is noise.

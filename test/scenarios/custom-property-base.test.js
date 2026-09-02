@@ -162,3 +162,114 @@ describe('a stated cause behind a crowd of guesses', () => {
         assert.equal(summary.wrongBase, 12, JSON.stringify(summary))
     })
 })
+
+// The climb check is the sibling of the broken check, and it was left behind.
+//
+// The first fix only replaced the verdict where the page-relative target was
+// MISSING. Where the discarded `..` happened to land on a real file, the
+// reference fell through to the over-deep bucket and was reported as climbing
+// above the site root — with an explanation that had become false: "they load,
+// a browser discards the extra `..`". They load because they are correct where
+// they are actually read from. A wrong reason attached to a correct reference
+// is worse than the original false positive, because it sends the reader to
+// fix a base that is right.
+//
+// It shows up on a page at its SITE ROOT, where pageDir is empty and a single
+// `..` has nothing to pop.
+
+const SITE_CONFIG = `
+import { documents, files, frontMatter, renderHbs } from 'mikser-io'
+import { layouts } from 'mikser-io-layouts'
+export default {
+    siteRoots: ['bg'],
+    plugins: [documents(), files(), frontMatter(), layouts(), renderHbs()],
+}
+`
+
+describe('a custom property on a page at its site root', () => {
+    const workdir = freshWorkdir('custom-property-climb')
+    after(() => cleanup(workdir))
+    let out
+
+    before(async () => {
+        await setupFixture(workdir, {
+            'mikser.config.js': SITE_CONFIG,
+            'files/bg/media/raw/icons/social-fb.svg': '<svg xmlns="http://www.w3.org/2000/svg"/>',
+            'files/bg/media/raw/icons/social-ig.svg': '<svg xmlns="http://www.w3.org/2000/svg"/>',
+            'files/bg/media/raw/icons/social-li.svg': '<svg xmlns="http://www.w3.org/2000/svg"/>',
+            'files/bg/styles/bundle.css': 'icon{mask:var(--icon-btn-src)}',
+            'documents/bg/index.html': '---\nlayout: page\n---\n',
+            'layouts/page.html.hbs': [
+                '<!doctype html><head><link rel="stylesheet" href="/styles/bundle.css"></head><body>',
+                // Correct from the bundle at bg/styles/. From the page — which
+                // IS the site root — the `..` has nothing to pop and floors
+                // onto a file that exists.
+                '<span style="--a:url(&quot;../media/raw/icons/social-fb.svg&quot;)"></span>',
+                // Resolves from neither.
+                '<span style="--b:url(&quot;../media/raw/icons/nowhere.svg&quot;)"></span>',
+                // One `..` too many even from the bundle: genuinely over-deep.
+                '<span style="--c:url(&quot;../../media/raw/icons/social-ig.svg&quot;)"></span>',
+                // Not a custom property: the page IS its base, unchanged.
+                '<img src="../media/raw/icons/social-li.svg">',
+                '</body>',
+            ].join(''),
+        })
+        const { code, combined } = await runMikser(workdir)
+        assert.equal(code, 0, combined)
+        out = combined
+    })
+
+    it('does not report a climb for one that resolves cleanly from the bundle', () => {
+        assert.doesNotMatch(out, /social-fb\.svg/,
+            `correct where it is read from, so there is no climb to report\n${out}`)
+    })
+
+    it('still reports one that resolves from neither base', () => {
+        assert.match(out, /nothing produced it: \.\.\/media\/raw\/icons\/nowhere\.svg/, out)
+    })
+
+    it('still reports one that is over-deep from the bundle itself', () => {
+        // The check is not switched off for custom properties — it is asked
+        // against the right base.
+        assert.match(out, /climb 1 level/, out)
+        assert.match(out, /social-ig\.svg/, out)
+    })
+
+    it('leaves an ordinary reference judged against the page', () => {
+        assert.match(out, /social-li\.svg/,
+            `an <img> src really is page-relative, and that has not changed\n${out}`)
+    })
+})
+
+describe('two stylesheets at different depths', () => {
+    const workdir = freshWorkdir('custom-property-precedence')
+    after(() => cleanup(workdir))
+
+    it('takes the base that resolves cleanly over one that only floors', async () => {
+        // Which stylesheet substitutes the variable is not knowable from the
+        // bytes, so every emitted one is a candidate — and they do not agree.
+        // `bg/a.css` sits at the site root, so `../media/...` from it has
+        // nothing to pop and floors onto a file that exists; `bg/styles/b.css`
+        // resolves the same url cleanly.
+        //
+        // Scanned in path order, the flooring one comes first. Taking the
+        // first match that resolves would report a climb for a reference some
+        // other stylesheet reads correctly — so a clean resolution ends the
+        // search and a floored one is only ever a fallback.
+        await setupFixture(workdir, {
+            'mikser.config.js': SITE_CONFIG,
+            'files/bg/media/raw/icons/social-fb.svg': '<svg xmlns="http://www.w3.org/2000/svg"/>',
+            'files/bg/a.css': 'icon{mask:var(--icon-btn-src)}',
+            'files/bg/styles/b.css': 'icon{mask:var(--icon-btn-src)}',
+            'documents/bg/index.html': '---\nlayout: page\n---\n',
+            'layouts/page.html.hbs': '<!doctype html><body>'
+                + '<span style="--icon-btn-src:url(&quot;../media/raw/icons/social-fb.svg&quot;)"></span>'
+                + '</body>',
+        })
+        const { code, combined } = await runMikser(workdir)
+        assert.equal(code, 0, combined)
+        assert.doesNotMatch(combined, /climb \d+ level/,
+            `one stylesheet reads it correctly, so there is no climb to report\n${combined}`)
+        assert.doesNotMatch(combined, /social-fb\.svg/, combined)
+    })
+})
