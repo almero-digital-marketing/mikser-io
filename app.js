@@ -58,6 +58,7 @@ function locate(argv) {
         : tool                    ? { type: 'report', tool, toolArgs: value('--tool-args'), json: has('--json') }
         : explain                 ? { type: 'report', explain, json: has('--json') }
         : has('--audit-output')   ? { type: 'report', auditOutput: true, json: has('--json') }
+        : has('--fingerprint')    ? { type: 'report', fingerprint: true, json: has('--json') }
         : { type: 'build',
             clear: has('--clear'),
             // Not a flag that happens to be set — the client's OUTPUT

@@ -71,7 +71,7 @@ export function socketPath(workingFolder) {
 // ship together, so there is nothing to negotiate and no version to carry.
 //
 //   → { type: 'build',  config, clear, renderPresets }
-//   → { type: 'report', config, tool, tools, toolArgs, explain, auditOutput, json }
+//   → { type: 'report', config, tool, tools, toolArgs, explain, auditOutput, fingerprint, json }
 //   ← { type: 'log', chunk }        (zero or more, in order)
 //   ← { type: 'done', code }
 //   ← { type: 'refused', reason, detail }

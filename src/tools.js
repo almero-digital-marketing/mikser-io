@@ -129,5 +129,6 @@ export function toolResultFailed(result) {
 // settle and Node drained the loop and left.
 export function isReportOnlyRun() {
     const options = runtime.options ?? {}
-    return Boolean(options.explain || options.auditOutput || options.tool || options.tools)
+    return Boolean(options.explain || options.auditOutput || options.tool || options.tools
+        || options.fingerprint)
 }

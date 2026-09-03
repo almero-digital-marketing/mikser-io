@@ -13,6 +13,7 @@ import { OPERATION, TASKS } from './constants.js'
 import { changeExtension, formatErrorContext, projectMeta, lookupKeys, siteRootFor } from './utils.js'
 import { reportRendered, reportSkipped, reportError, renderErrorCount, emitReport, finishCycle, reportAssetUse, assetUse } from './report.js'
 import { checkReferences } from './references.js'
+import { fingerprintOutputs } from './fingerprint.js'
 import { toolSchemas, invokeTool, toolResultText, toolResultFailed } from './tools.js'
 import { registerBuiltinTools } from './builtin-tools.js'
 import { useDatabase } from './database/index.js'
@@ -294,6 +295,17 @@ async function reportMissingAssets(logger, alreadyReported = new Set()) {
 // `request` carries the CLIENT's arguments. Reading runtime.options here would
 // answer with the instance's own flags, which are whatever it happened to be
 // started with.
+// Bytes at a size a person reads. Not in the document — that carries the
+// integer, because a caller comparing two builds subtracts.
+function formatBytes(bytes) {
+    if (bytes < 1024) return `${bytes} B`
+    const units = ['kB', 'MB', 'GB']
+    let value = bytes / 1024
+    let unit = 0
+    while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++ }
+    return `${value.toFixed(1)} ${units[unit]}`
+}
+
 export async function runReportOnly(request = {}) {
     const logger = useLogger()
     const {
@@ -303,6 +315,7 @@ export async function runReportOnly(request = {}) {
         json = runtime.options.json,
         explain = runtime.options.explain,
         auditOutput = runtime.options.auditOutput,
+        fingerprint = runtime.options.fingerprint,
     } = request
 
     if (tools) {
@@ -370,6 +383,25 @@ export async function runReportOnly(request = {}) {
         const report = await explainEntity(explain)
         process.stdout.write((json ? JSON.stringify(report, null, 2) : formatExplain(report)) + '\n')
         return report.found ? 0 : 3
+    }
+
+    if (fingerprint) {
+        const result = await fingerprintOutputs()
+        if (!result) {
+            logger.error('No output folder — nothing to fingerprint.')
+            return 2
+        }
+        if (json) {
+            process.stdout.write(JSON.stringify({ version: packageInfo.version, ...result }, null, 2) + '\n')
+        } else {
+            logger.notice('Output %s — %d file(s), %s',
+                result.output.hash, result.output.files, formatBytes(result.output.bytes))
+            for (const [name, group] of Object.entries(result.trees)) {
+                logger.info('  %s: %s — %d file(s), %s',
+                    name, group.hash, group.files, formatBytes(group.bytes))
+            }
+        }
+        return 0
     }
 
     if (auditOutput) {
@@ -517,6 +549,9 @@ export async function setup(options) {
             .option('--tools', 'list the tools this build exposes, then exit', false)
             .option('--tool <name>', 'run one tool and print its result, then exit. The same tools an MCP client sees, so an agent reading CLI output and an agent speaking MCP ask the engine the same questions.')
             .option('--tool-args <json>', 'JSON arguments for --tool (e.g. \'{"destination":"/bg/index.html"}\')')
+            .option('--fingerprint', 'hash everything this build wrote — including what it wrote through a '
+                + 'symlink, which `find` does not descend into — and exit. One comparable number per output '
+                + 'tree, plus one per asset preset, for proving an upgrade moved no bytes.', false)
             .option('-d --debug', 'display debug statements')
             .option('-t --trace', 'display trace statements')
             .option('-e --runtime-folder <folder>', 'set mikser runtime folder relative to working folder', 'runtime')
@@ -565,6 +600,15 @@ Which check answers which question:
       --clear               removes the output folder and reopens the cache.
                             A boot operation: it is refused while an instance
                             is running in the same folder.
+
+  Did an upgrade move any bytes?
+      --fingerprint         hash everything the build wrote, including what it
+                            wrote THROUGH A SYMLINK — files() emits by
+                            symlinking and assets links the derivatives tree
+                            in, so \`find out -type f\` descends into neither.
+                            One number for the whole output and one per shared
+                            tree, stable across runs. Take it before and after
+                            an upgrade and compare.
 
   What did this build do, and cost?
       --json                the whole report as one document on stdout, with
