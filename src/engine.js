@@ -579,10 +579,15 @@ Which check answers which question:
                             with themselves.
 
   Did an upgrade change what a render produces?
-      --force               re-renders everything and reports output-drift:
+      --force               re-renders every ENTITY and reports output-drift:
                             same inputs, different bytes. This is the one that
                             catches a renderer, helper or dependency moving
                             under the build. It also reconciles deletions.
+
+                            NOT derivatives. Assets are re-derived on a preset
+                            revision or a source change, and --force is
+                            neither — so a sharp upgrade is invisible to it.
+                            Use --render-presets for that half.
 
   Do the URLs in the output point at anything?
       (runs every build)    reads the emitted html and css and resolves each
@@ -1473,10 +1478,10 @@ The full version, with what each code means: docs/diagnostics.md`)
         const brokenTargets = await reportBrokenReferences(useLogger())
         await reportMissingAssets(useLogger(), brokenTargets)
 
-        // After the cycle, and only under --json. stdout has been kept clear
-        // for exactly this (the logger writes to stderr under --json), so the
-        // document is the only thing on it and can be piped to jq.
-        emitReport()
+        // The report is NOT emitted here any more. This hook is registered
+        // when the engine is imported, so it runs first among finalized hooks
+        // and every plugin's findings would land after the document was
+        // written. runtime.finalize() emits it once every hook has run.
 
         // Non-zero for a one-shot build, so `mikser && mikser --audit-output` cannot
         // pass with every page in the site stale. `exitCode` rather than

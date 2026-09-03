@@ -385,9 +385,21 @@ the content: an upgraded renderer, a changed helper, a dependency that shifted
 under the build.
 
 Only entities that actually rendered can drift, so an ordinary build reports
-on what moved. Under `--force` everything re-renders with unchanged inputs,
-which makes it a full sweep — **`mikser --force` after a package upgrade is
-the regression check**.
+on what moved. Under `--force` every ENTITY re-renders with unchanged inputs,
+which makes it the check for a renderer, helper or dependency that shifted —
+**`mikser --force` after a package upgrade is the regression check for
+rendered output**.
+
+It is not a full sweep, and calling it one was wrong. Derivatives are outside
+it: an asset is re-derived when its source changes or its preset's `revision`
+moves, and `--force` is neither — so on a site with image presets, `--force`
+re-renders the documents and touches no derivative at all. A sharp upgrade,
+which is exactly the kind of dependency shift this paragraph promises to
+catch, is invisible to it.
+
+Use `--render-presets` for that half, and `--fingerprint` before and after to
+compare both halves at once — it hashes the derivatives too, which is the
+thing `find out -type f` cannot do.
 
 ### The rest, briefly
 

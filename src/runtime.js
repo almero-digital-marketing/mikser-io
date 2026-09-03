@@ -213,6 +213,23 @@ const runtime = {
     async finalize(signal) {
         await this.callHooks(this.hooks.finalize, signal, 'finalize')
         await this.callHooks(this.hooks.finalized, signal, 'finalized')
+
+        // The report is the LAST thing that happens, after every hook that
+        // could still add to it.
+        //
+        // It used to be emitted from the engine's own onFinalized — which is
+        // registered when the engine module is imported, so it ran FIRST among
+        // finalized hooks and every plugin's findings landed after the
+        // document was already written. A plugin could print a warning to the
+        // console and have it absent from --json, with nothing to suggest the
+        // two disagreed.
+        //
+        // That is not a lint bug or a schemas bug; it is one ordering bug that
+        // every plugin inherits, which is why it is fixed here rather than in
+        // each of them. A finding raised through logger.warn reaches the
+        // report because the report is a VIEW of that stream — and a view has
+        // to be taken after the writing stops.
+        await this.emitReport?.()
     },
 
     async sync(operation) {

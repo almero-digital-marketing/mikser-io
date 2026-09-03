@@ -133,6 +133,10 @@ export function resetReport() {
 // an import here would close the cycle.
 runtime.resetReport = resetReport
 
+// And so it can emit the report AFTER every finalized hook, for the same
+// reason and by the same route. See runtime.finalize().
+runtime.emitReport = emitReport
+
 // End of a cycle: stamp it, file it, and wake anyone waiting on it.
 export function finishCycle() {
     if (!runtime.state?.cycle || runtime.state.cycle.finishedAt) return
