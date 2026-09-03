@@ -12,7 +12,7 @@
 // test is a true end-to-end restart simulation.
 
 import { spawn } from 'node:child_process'
-import { mkdir, writeFile, rm, symlink, lstat } from 'node:fs/promises'
+import { mkdir, writeFile, rm, symlink, lstat, readdir } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -52,6 +52,41 @@ export async function setupFixture(workdir, files) {
     } catch (err) {
         if (err.code !== 'EEXIST') throw err
     }
+    // Every sibling plugin, by the same route.
+    //
+    // Named one at a time until a test needed a third and got
+    // ERR_MODULE_NOT_FOUND that read like the fix under test breaking. The
+    // list is derived from what is actually checked out beside this package,
+    // so a scenario can import any plugin that exists without the harness
+    // being edited first — and a plugin that is not checked out simply is not
+    // linked, which is the honest outcome rather than a hardcoded name that
+    // resolves to nothing.
+    const siblingRoot = path.dirname(MIKSER_ROOT)
+    for (const sibling of await readdir(siblingRoot).catch(() => [])) {
+        if (!sibling.startsWith('mikser-io-')) continue
+        try {
+            await symlink(path.join(siblingRoot, sibling),
+                path.join(workdir, 'node_modules', sibling), 'dir')
+        } catch (err) {
+            if (err.code !== 'EEXIST') throw err
+        }
+    }
+
+    // zod, for the same reason but one level out: a scenario's `schemas/*.js`
+    // is USER code and imports zod by name, so it resolves from the workdir
+    // rather than from the plugin that consumes it. Without this the schema
+    // file throws ERR_MODULE_NOT_FOUND, the build dies before it validates
+    // anything, and the tests that assert an ABSENCE still pass — which is how
+    // this looked like a half-working fix rather than a missing link.
+    const zodRoot = path.join(path.dirname(MIKSER_ROOT), 'node_modules', 'zod')
+    if (existsSync(zodRoot)) {
+        try {
+            await symlink(zodRoot, path.join(workdir, 'node_modules', 'zod'), 'dir')
+        } catch (err) {
+            if (err.code !== 'EEXIST') throw err
+        }
+    }
+
     // Sibling plugin: layouts. Resolved via the same symlink-into-
     // node_modules pattern so scenario configs can `import { layouts }
     // from 'mikser-io-layouts'`.

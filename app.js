@@ -32,6 +32,21 @@ function locate(argv) {
     // exited with nothing on the port.
     const longRunning = has('--watch', '-w', '--server', '-s')
 
+    // Answerable without an engine, and therefore never forwarded.
+    //
+    // `--help` and `--version` do not describe a build: commander answers them
+    // from the option table and exits. Forwarding them sent an instance a
+    // request it could not recognise — commander does not list help among the
+    // options parseOptions reports on — so refuseUnknownFlags rejected
+    // `--help` as an unknown flag, with a detail line claiming "the same
+    // command with nothing listening would have been rejected too", which is
+    // the opposite of true: with nothing listening it prints the help.
+    //
+    // Which made the help unreachable in exactly the situation that sends
+    // someone to it — a watcher running, wondering which check answers which
+    // question — and made a correct refusal say something false.
+    const answeredLocally = has('--help', '-h', '--version', '-V')
+
     // What to ask the instance for. Report-only commands go over the same
     // socket as a build: they read, so running them locally never damaged
     // anything, but a catalogue being written by another process is not a
@@ -56,6 +71,7 @@ function locate(argv) {
 
     return {
         longRunning,
+        answeredLocally,
         // The flags this process was invoked with, forwarded so the INSTANCE
         // can reject an unknown one. This pre-parser reads the few options it
         // needs and passes the rest along, so commander never runs on a
@@ -85,7 +101,11 @@ async function main() {
         }
     }
 
-    if (!where.longRunning) {
+    // `--help` and `--version` never travel. Commander answers them from the
+    // option table and exits, so there is nothing to ask an instance for — and
+    // asking got them refused as unknown flags, since commander does not list
+    // help among the options parseOptions reports on.
+    if (!where.longRunning && !where.answeredLocally) {
         const code = await forward({
             workingFolder,
             config: path.resolve(where.workingFolder, where.config),

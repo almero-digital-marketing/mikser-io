@@ -147,3 +147,48 @@ describe('the stale-config refusal', () => {
             'and the folder it is holding')
     })
 })
+
+// --help is answerable without an engine, so it never travels.
+//
+// It was forwarded like any other invocation, and commander does not list help
+// among the options `parseOptions` reports on — so refuseUnknownFlags rejected
+// it as an unknown flag, with a detail claiming "the same command with nothing
+// listening would have been rejected too". The opposite is true: with nothing
+// listening it prints the help.
+//
+// Which put the help out of reach in exactly the situation that sends someone
+// to it — a watcher running, wondering which check answers which question —
+// and made a correct refusal say something false.
+
+describe('--help while an instance is running', () => {
+    const workdir = freshWorkdir('help-forwarded')
+    let instance
+    after(async () => { instance?.kill(); await cleanup(workdir) })
+
+    before(async () => {
+        await setupFixture(workdir, FILES)
+        await runMikser(workdir)
+        instance = await startInstance(workdir)
+    })
+
+    it('prints the help, including the map that answers the question', async () => {
+        const { code, stdout } = await runMikser(workdir, ['--help'])
+        assert.equal(code, 0, 'help is not a failure')
+        assert.match(stdout, /Which check answers which question/,
+            'the table is unreachable exactly when it is needed')
+        assert.match(stdout, /--audit-output/, stdout)
+    })
+
+    it('prints the version too', async () => {
+        const { code, combined } = await runMikser(workdir, ['--version'])
+        assert.equal(code, 0, combined)
+        assert.match(combined, /\d+\.\d+\.\d+/, combined)
+    })
+
+    it('still refuses a flag that really is unknown', async () => {
+        // The refusal this sits beside is right and must stay right.
+        const { code, combined } = await runMikser(workdir, ['--bogus-flag'])
+        assert.equal(code, 1, combined)
+        assert.match(combined, /unknown option '--bogus-flag'/, combined)
+    })
+})
