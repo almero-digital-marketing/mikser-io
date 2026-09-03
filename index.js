@@ -5,6 +5,7 @@ export * from './src/auth.js'
 export * from './src/roles.js'
 export * from './src/inventory.js'
 export * from './src/report.js'
+export * from './src/cli.js'
 // The diagnostics behind --explain. Exported so a transport — the MCP tool
 // surface, the api plugin's routes — can serve the same structured report the
 // CLI formats, rather than each one reimplementing the question.

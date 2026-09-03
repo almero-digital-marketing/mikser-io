@@ -38,6 +38,7 @@ import { onLoaded } from './lifecycle.js'
 import { renderErrorCount } from './report.js'
 import { runReportOnly } from './engine.js'
 import { emitReport } from './report.js'
+import { pluginOptionsFrom } from './cli.js'
 
 // Where the endpoint lives.
 //
@@ -415,6 +416,17 @@ async function withRequestOutput(request, run) {
     for (const key of ['json', 'tool', 'tools', 'requested']) {
         prior[key] = runtime.options[key]
         if (request[key]) runtime.options[key] = request[key]
+    }
+
+    // Whatever the client's argv said about a PLUGIN's options.
+    //
+    // The instance parsed its own argv and never saw the client's, so a flag a
+    // plugin declared worked with nothing listening and did nothing with a
+    // watcher up. Applied and restored with the rest of the request's
+    // contract, so a watcher's own cycle before or after is unaffected.
+    for (const [name, value] of Object.entries(pluginOptionsFrom(request.argv))) {
+        if (!(name in prior)) prior[name] = runtime.options[name]
+        runtime.options[name] = value
     }
     try {
         return await run()

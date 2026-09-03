@@ -13,6 +13,7 @@ import { OPERATION, TASKS } from './constants.js'
 import { changeExtension, formatErrorContext, projectMeta, lookupKeys, siteRootFor } from './utils.js'
 import { reportRendered, reportSkipped, reportError, renderErrorCount, emitReport, finishCycle, reportAssetUse, assetUse } from './report.js'
 import { checkReferences } from './references.js'
+import { completeCliParse } from './cli.js'
 import { fingerprintOutputs } from './fingerprint.js'
 import { toolSchemas, invokeTool, toolResultText, toolResultFailed } from './tools.js'
 import { registerBuiltinTools } from './builtin-tools.js'
@@ -624,6 +625,11 @@ Which check answers which question:
                             instance is ALWAYS in watch mode, so watch alone
                             answers the wrong question.
 
+  Is the page fast, and can it be read?
+      --lighthouse          from mikser-io-lighthouse, if installed. A plugin
+                            declares its own options now, and they appear here
+                            beside core's — see cliOption().
+
   What did this build do, and cost?
       --json                the whole report as one document on stdout, with
                             every warning carrying a stable code, and per-phase
@@ -632,7 +638,34 @@ Which check answers which question:
 
 The full version, with what each code means: docs/diagnostics.md`)
 
-        Object.assign(runtime.options, options || runtime.engine.commander.parse(process.argv).opts())
+        // Stage one of two. The config names the plugins and is not read
+        // until onLoad, so at this moment the engine does not yet know every
+        // option this build understands — a plugin's is not registered. Left
+        // strict, `mikser --lighthouse` would be rejected before the plugin
+        // that defines it had been constructed.
+        //
+        // Tolerated here and decided in stage two, where the table is complete
+        // — see completeCliParse(). The 9.81.0 refusal is not weakened, it is
+        // moved to the point where "unknown" can be answered.
+        runtime.engine.commander.allowUnknownOption(true).allowExcessArguments(true)
+
+        // --help is answered in stage two, for the same reason the parse is.
+        //
+        // Commander prints help and exits the moment it sees the flag, which
+        // in stage one is before any plugin has been constructed — so the help
+        // would list core's options and silently omit every option the
+        // project's own plugins add. A help text that is missing the flag you
+        // are looking for is worse than a slower one.
+        //
+        // Held out of this parse and answered after the table is complete. It
+        // does mean `--help` now loads the config, which is the honest cost of
+        // describing THIS project's mikser rather than a generic one.
+        const helpFlags = ['--help', '-h']
+        runtime.engine.helpRequested = process.argv.some(arg => helpFlags.includes(arg))
+        const argv = runtime.engine.helpRequested
+            ? process.argv.filter(arg => !helpFlags.includes(arg))
+            : process.argv
+        Object.assign(runtime.options, options || runtime.engine.commander.parse(argv).opts())
         // runtime.options.info gates the progress bar — gauge stays
         // silent in --debug/--trace modes because logs are voluminous
         // there and a bar on top would just be noise.
@@ -778,6 +811,15 @@ The full version, with what each code means: docs/diagnostics.md`)
     })
 
     onLoaded(async () => {
+        // Stage two of the parse, before anything reads an option.
+        //
+        // Every plugin has been constructed by now and has had its chance to
+        // declare, so the table is complete and argv is parsed against all of
+        // it. This engine hook is registered when the module is imported, so
+        // it runs ahead of every plugin's own onLoaded — which is what makes
+        // it safe for a plugin to read its own option there.
+        completeCliParse()
+
         const logger = useLogger()
         logger.debug(runtime.options, 'Mikser options')
 
