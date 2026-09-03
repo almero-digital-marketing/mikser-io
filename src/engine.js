@@ -843,8 +843,18 @@ The full version, with what each code means: docs/diagnostics.md`)
         // The same three commands the instance answers over the socket —
         // one implementation, so a forwarded --audit-output cannot disagree with a
         // local one about what it checked.
-        const code = await runReportOnly()
-        if (code !== null) process.exit(code)
+        //
+        // --tools and --tool are NOT among them: they are dispatched at `import`
+        // instead, because the tool registry is not complete until every
+        // plugin's onLoaded has run and this hook runs ahead of all of them.
+        // The import dispatch existed already and was documented as
+        // load-bearing, but this call reached the same code first and exited,
+        // so it never ran — and every tool a plugin registers was missing from
+        // the CLI while the listing looked healthy, just short.
+        if (!runtime.options.tools && !runtime.options.tool) {
+            const code = await runReportOnly()
+            if (code !== null) process.exit(code)
+        }
     })
 
     onRender(async (signal) => {
