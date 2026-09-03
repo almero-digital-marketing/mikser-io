@@ -1,0 +1,73 @@
+# Publish to npm without a stored token.
+#
+# npm is retiring tokens that skip the second factor — its own token page says
+# "Publish new versions directly (deprecated — ends January 2027)" — and the
+# replacement is this: the job proves who it is at the moment it publishes,
+# using a short-lived credential GitHub issues and npm verifies. npm trusts
+# "the publish.yml workflow in this repository", not a string.
+#
+# So there is no NODE_AUTH_TOKEN here and no secret to configure. That is the
+# point: nothing to leak, nothing to expire, nothing to rotate. The two ways
+# publishing broke in September 2026 — a token that died silently and a token
+# pasted into a chat window — are both absent by construction.
+#
+# The npm side has to be linked once, per package: npmjs.com → the package →
+# Settings → Trusted Publisher → GitHub Actions, naming this repository and
+# this filename. Until that link exists the publish step fails, which is the
+# correct behaviour rather than a silent fallback to something weaker.
+
+name: Publish
+
+on:
+  push:
+    tags: ['v*']
+  # So a failed release can be retried without inventing a tag.
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # The whole mechanism. Without it npm has nothing to verify and the
+      # publish falls back to looking for a token that is not there.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      # Trusted publishing landed in npm 11.5.1. setup-node ships whatever npm
+      # came with the node build, so pin it forward rather than hope.
+      - name: Use an npm that can do trusted publishing
+        run: npm install -g npm@latest
+
+      - run: npm ci
+
+      # The tag is the release. A tag that disagrees with package.json would
+      # publish a version nobody asked for, under a name that says otherwise —
+      # so it stops here instead.
+      - name: Tag must match package.json
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p 'require("./package.json").version')"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "tag v$TAG does not match package.json $PKG"
+            exit 1
+          fi
+          echo "publishing $PKG"
+
+      # Unit and scenarios only, deliberately. `npm test` also runs test:smoke,
+      # which builds test/fixture and reports faults for the things a CI box
+      # does not have — no chrome for the pdf postprocessor, no OpenAI key for
+      # the vector plugin — and a coded fault is a non-zero exit. Those are
+      # environment facts, not regressions, and failing a release on them would
+      # teach everyone to ignore a red run.
+      - run: npm run test:unit
+      - run: npm run test:scenarios
+
+      - run: npm publish --access public
