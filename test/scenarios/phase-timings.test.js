@@ -116,6 +116,32 @@ describe('what each phase cost', () => {
             `${timings.processUptime}ms should cover the slow plugin`)
     })
 
+    it('attributes a phase to the plugin that spent it', () => {
+        // `finalized` alone is where the reference check, schemas, lint and an
+        // audit all live, so one number for the phase says nothing about which
+        // of them cost it — attributing a 465ms lint pass took three separate
+        // measurements downstream.
+        //
+        // A plugin's identity is not knowable until its factory RETURNS: the
+        // entry in the plugins array is already the factory's result. So hooks
+        // are diffed across the call and tagged with what the call produced.
+        assert.ok(Array.isArray(timings.plugins), JSON.stringify(timings))
+        const slow = timings.plugins.find(p => p.plugin === 'slow')
+        assert.ok(slow, `the slow plugin should be named\n${JSON.stringify(timings.plugins, null, 2)}`)
+        assert.equal(slow.phase, 'import', JSON.stringify(slow))
+        assert.ok(slow.ms >= 250, `its 300ms must land on it, got ${slow.ms}ms`)
+    })
+
+    it('keeps a plugin\'s time INSIDE its phase, not beside it', () => {
+        // Otherwise the phase totals stop adding up to `total` and every
+        // comparison between two releases double-counts.
+        const imp = timings.phases.find(p => p.phase === 'import')
+        const slow = timings.plugins.find(p => p.plugin === 'slow')
+        assert.ok(slow.ms <= imp.ms + 1, `${slow.ms} must be within ${imp.ms}`)
+        const summed = timings.phases.reduce((a, p) => a + p.ms, 0)
+        assert.ok(Math.abs(summed - timings.total) < 1, `${summed} vs ${timings.total}`)
+    })
+
     it('covers the boot phases on the build that actually paid for them', () => {
         // A one-shot pays for initialize/load/import, so they belong in its
         // report. A later cycle in a watch process does not, and must not

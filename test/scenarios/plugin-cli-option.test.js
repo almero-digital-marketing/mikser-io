@@ -121,3 +121,57 @@ export default { plugins: [documents(), frontMatter(), layouts(), renderHbs()] }
         assert.match(combined, /unknown option '--bogus-flag'/, combined)
     })
 })
+
+// --force has to reach the instance answering a forwarded build.
+//
+// It changes what the CYCLE does, and the instance was started without it — so
+// a forwarded --force rebuilt whatever the gates let through, which on a
+// settled tree is nothing. A caller asking for a full re-render got a no-op
+// reported as success: the same shape as --clear being accepted and ignored,
+// and as --json producing no document.
+//
+// Found because a plugin that skips when a cycle moved nothing then never ran
+// under a forwarded --force, which is the command a person types precisely
+// when they want everything done again.
+
+describe('--force across the forwarding boundary', () => {
+    const workdir = freshWorkdir('force-forwarded')
+    let instance
+    after(async () => { instance?.kill(); await cleanup(workdir) })
+
+    before(async () => {
+        const { spawn } = await import('node:child_process')
+        const { existsSync } = await import('node:fs')
+        const path = (await import('node:path')).default
+        const { MIKSER_ROOT } = await import('./_harness.js')
+        await setupFixture(workdir, FILES)
+        await runMikser(workdir)
+        instance = spawn(process.execPath,
+            [path.join(MIKSER_ROOT, 'app.js'), '--working-folder', workdir, '--watch'],
+            { cwd: MIKSER_ROOT, stdio: ['ignore', 'pipe', 'pipe'],
+              env: { ...process.env, NO_COLOR: '1', NODE_PATH: path.dirname(MIKSER_ROOT) } })
+        const { socketPath } = await import('../../src/instance.js')
+        const endpoint = socketPath(workdir)
+        for (let i = 0; i < 200 && !existsSync(endpoint); i++) {
+            await new Promise(r => setTimeout(r, 100))
+        }
+    })
+
+    it('re-renders, where a plain forwarded build renders nothing', async () => {
+        const plain = await runMikser(workdir, [])
+        assert.doesNotMatch(plain.combined, /Rendered: [1-9]/,
+            `a settled tree renders nothing without --force\n${plain.combined}`)
+
+        const forced = await runMikser(workdir, ['--force'])
+        assert.match(forced.combined, /Rendered: [1-9]/,
+            `--force must reach the instance answering the build\n${forced.combined}`)
+    })
+
+    it('does not leave the instance forcing every later build', async () => {
+        // Applied for one cycle and restored, like renderPresets. An instance
+        // left in force mode re-renders the whole site on every save.
+        await runMikser(workdir, ['--force'])
+        const after = await runMikser(workdir, [])
+        assert.doesNotMatch(after.combined, /Rendered: [1-9]/, after.combined)
+    })
+})

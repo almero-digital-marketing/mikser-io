@@ -68,6 +68,13 @@ function locate(argv) {
             // was started without the flag. So the contract has to travel
             // with the request or it is not honoured at all.
             json: has('--json'),
+            // Travels for the same reason clear and renderPresets do: it
+            // changes what the CYCLE does, and the instance was started
+            // without it. A forwarded --force silently did not force — it
+            // rebuilt whatever the gates let through, which on a settled tree
+            // is nothing, and a caller asking for a full re-render got a no-op
+            // reported as success.
+            force: has('--force', '-f'),
             renderPresets: has('--render-presets') ? (value('--render-presets') ?? true) : undefined }
 
     return {

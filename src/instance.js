@@ -462,6 +462,10 @@ async function serveBuild(socket, request, logger) {
         // rebuild.
         const priorRenderPresets = runtime.options.renderPresets
         if (request.renderPresets !== undefined) runtime.options.renderPresets = request.renderPresets
+        // Applied for THIS cycle only, like renderPresets. An instance left in
+        // force mode would re-render the whole site on every later save.
+        const priorForce = runtime.options.force
+        if (request.force) runtime.options.force = true
         try {
             // The report is emitted by the cycle itself, from inside
             // rebuild() — the same call a one-shot makes. Nothing here
@@ -483,6 +487,7 @@ async function serveBuild(socket, request, logger) {
             })
         } finally {
             runtime.options.renderPresets = priorRenderPresets
+            runtime.options.force = priorForce
         }
 
         // From the render-error count, NOT from process.exitCode.

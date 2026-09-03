@@ -126,6 +126,8 @@ export function resetReport() {
     // asking. The boot phases therefore appear in the first cycle's report and
     // not in later ones, which is what actually happened.
     runtime.state.timings = {}
+    runtime.state.pluginTimings = {}
+    runtime.state.activity = { rendered: 0, changed: 0 }
 }
 
 // Published on the runtime so runtime.js can start a fresh cycle for a
@@ -194,6 +196,7 @@ export function reportWipe(cause, detail = {}) {
 // One source whose bytes moved. The complement of reportGated: between them
 // every file the engine looked at is accounted for.
 export function reportChanged(id) {
+    if (id) activity().changed++
     if (!reportWanted() || !id) return
     const store = changedStore()
     store.count++
@@ -277,6 +280,7 @@ export function reportGated(count = 1) {
 // `matched`, `dependency` each mean something specific, and a single
 // polymorphic key would push the type switch onto every consumer.
 export function reportRendered(entity, reason, decision = {}) {
+    activity().rendered++
     if (!reportWanted()) return
     store().rendered.push({
         id: entity?.id,
@@ -425,6 +429,45 @@ export function renderErrorCount() {
     return errorStore().length
 }
 
+// A bare count of what the cycle did, kept whether or not anyone is reading
+// the report.
+//
+// The rendered/skipped/unchanged ARRAYS are only recorded when something can
+// read them — one entry per entity per cycle is not free, which is why `gated`
+// was already a bare count. So a check asking "did this cycle do anything"
+// cannot read those arrays: without --json they are empty, and a cold build
+// that rendered the whole site looks identical to a no-op. That is exactly the
+// mistake the first version of cycleMovedNothing() made, and it reported
+// "nothing moved" on a build that had just rendered.
+//
+// Two integers cost nothing and are always true.
+function activity() {
+    runtime.state ??= {}
+    runtime.state.activity ??= { rendered: 0, changed: 0 }
+    return runtime.state.activity
+}
+
+// Did this cycle move anything?
+//
+// For a check that reads the OUTPUT — a linter, an audit — a cycle that
+// rendered nothing and changed nothing produced the same bytes the last one
+// did, so running again spends time to reprint what was already said.
+// Downstream that was measured: a lint pass costing 465ms of every no-op
+// rebuild, and a Lighthouse audit costing 19 SECONDS of one.
+//
+// Both halves matter. `rendered` alone is not enough: files() emits by
+// symlinking rather than rendering, so a new static file changes the output
+// with nothing rendered. `changed` covers that — it counts the sources whose
+// bytes moved this cycle.
+//
+// A plugin skipping on this must SAY so. "Nothing to report" and "did not run"
+// are indistinguishable otherwise, which is the property this codebase keeps
+// having to remove.
+export function cycleMovedNothing() {
+    const { rendered, changed } = activity()
+    return rendered === 0 && changed === 0
+}
+
 // The cause, and enough detail to act on it.
 //
 // A wipe outranks changed sources: when the cache went, everything is a
@@ -451,6 +494,12 @@ function phaseTimings() {
     const entries = Object.entries(timings)
         .map(([phase, { ms, calls }]) => ({ phase, ms: Math.round(ms * 10) / 10, calls }))
         .sort((a, b) => b.ms - a.ms)
+    // Inside the phases, not beside them: a plugin's time is part of its
+    // phase's, so this is a breakdown rather than an addition.
+    const byPlugin = Object.values(runtime.state?.pluginTimings ?? {})
+        .map(({ phase, plugin, ms, calls }) => ({ phase, plugin, ms: Math.round(ms * 10) / 10, calls }))
+        .sort((a, b) => b.ms - a.ms)
+
     return {
         // This cycle, summed. The phases below add up to it.
         total: Math.round(entries.reduce((sum, e) => sum + e.ms, 0) * 10) / 10,
@@ -467,6 +516,7 @@ function phaseTimings() {
         // misled by a name like "elapsed".
         processUptime: Math.round(process.uptime() * 1000 * 10) / 10,
         phases: entries,
+        ...(byPlugin.length ? { plugins: byPlugin } : {}),
     }
 }
 

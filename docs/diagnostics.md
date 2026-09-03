@@ -171,6 +171,17 @@ cycle being reported.
 }
 ```
 
+`plugins` breaks a phase down by who spent it:
+
+```
+"plugins": [ { "phase": "finalized", "plugin": "lighthouse", "ms": 6381.1, "calls": 1 } ]
+```
+
+Inside the phases, not beside them — a plugin's time is part of its phase's, so
+the phase totals still add up to `total`. Without it, `finalized` is one number
+covering the reference check, schemas, lint and any audit, and attributing a
+regression to one of them takes a separate measurement each.
+
 Ordered slowest first, so a diff between two versions leads with what moved.
 This exists because the report said what was *done* and never what it *took*: a
 preset fan-out that scanned the whole catalog every cycle shipped and ran for

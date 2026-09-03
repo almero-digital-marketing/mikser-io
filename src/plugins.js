@@ -110,11 +110,35 @@ onLoad(() => {
     if (registeredPostprocessors) parts.push(`${registeredPostprocessors} postprocessor${registeredPostprocessors === 1 ? '' : 's'}`)
     logger.info('Loading plugins: %s', parts.join(', '))
 
-    for (const factoryReturn of factoryEntries) {
+    // Which plugin registered which hook, so a phase can be broken down.
+    //
+    // `timings` said `finalized: 19400ms` and stopped there — and finalized is
+    // where the reference check, schemas, lint and lighthouse all live, so the
+    // one number said nothing about which of them cost it. Downstream that
+    // took three separate measurements to attribute a 465ms lint pass.
+    //
+    // Labelled retroactively, because a plugin's identity is not knowable
+    // until its factory RETURNS: the entry in the plugins array is already the
+    // factory's result, so there is no name to read going in, and the
+    // descriptor with `collection` on it only exists coming out. So the hooks
+    // are diffed across the call and tagged with what the call produced.
+    const hookNames = Object.keys(runtime.hooks)
+    for (const [index, factoryReturn] of factoryEntries.entries()) {
+        const before = new Map(hookNames.map(name => [name, runtime.hooks[name].length]))
+        let descriptor
         try {
-            factoryReturn(core)
+            descriptor = factoryReturn(core)
         } catch (err) {
             logger.error('Plugin factory threw on registration: %s', err.message)
+            continue
+        }
+        const label = descriptor?.collection ?? descriptor?.type ?? `plugin-${index + 1}`
+        for (const name of hookNames) {
+            for (const hook of runtime.hooks[name].slice(before.get(name))) {
+                // A plugin registering the same function twice keeps its first
+                // label rather than being renamed by a later registration.
+                if (typeof hook === 'function' && !hook.mikserPlugin) hook.mikserPlugin = label
+            }
         }
     }
 })

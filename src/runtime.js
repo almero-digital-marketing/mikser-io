@@ -82,6 +82,19 @@ const runtime = {
     //
     // Accumulated per phase rather than assigned, because a phase runs more
     // than once in a watch process and a cycle can re-enter one.
+    // Per plugin within a phase. Kept apart from `phases` so the phase totals
+    // still add up to `total` — a plugin's time is INSIDE its phase, not
+    // beside it, and adding both would double-count the run.
+    recordPluginPhase(phaseName, plugin, ms) {
+        if (!phaseName || !plugin) return
+        this.state ??= {}
+        const byPlugin = (this.state.pluginTimings ??= {})
+        const key = `${phaseName}:${plugin}`
+        const entry = (byPlugin[key] ??= { phase: phaseName, plugin, ms: 0, calls: 0 })
+        entry.ms += ms
+        entry.calls++
+    },
+
     recordPhase(phaseName, ms) {
         if (!phaseName) return
         this.state ??= {}
@@ -101,7 +114,14 @@ const runtime = {
         try {
             for (let hook of hooks) {
                 if (signal?.aborted) throw new AbortError()
+                // Timed per hook when it belongs to a plugin, so a phase can
+                // be broken down by who spent it. `finalized` alone is where
+                // the reference check, schemas, lint and an audit all live.
+                const hookStarted = hook.mikserPlugin ? performance.now() : 0
                 await hook(signal)
+                if (hook.mikserPlugin) {
+                    this.recordPluginPhase(phaseName, hook.mikserPlugin, performance.now() - hookStarted)
+                }
             }
         } finally {
             // In `finally`, so a phase that threw still reports what it spent
