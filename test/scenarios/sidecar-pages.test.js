@@ -109,3 +109,80 @@ describe('a sidecar returning `pages` as something other than a count', () => {
         assert.doesNotMatch(combined, /layout-pages-not-a-count/, combined)
     })
 })
+
+// A `.js` in layouts/ that nothing will ever read.
+//
+// A sidecar is named after the LAYOUT, and a layout's name drops BOTH
+// extensions: `robots.txt.liquid` is the layout `robots`, so its sidecar is
+// `robots.js`. Write `robots.txt.js` and it is claimed by nothing —
+// isSidecarScript rejects it (stripping `.js` leaves `.txt`) and the layout
+// glob ignores every `.js` outright. It does not fail; it never runs, and the
+// layout renders with empty `data`.
+//
+// Downstream that shipped `Sitemap: /sitemap.xml` as a RELATIVE reference in a
+// robots.txt — which in a robots.txt means nothing — on a green build.
+//
+// The consequence was already reported (`empty-output` fires). What was
+// missing is the cause.
+
+// hbs rather than liquid: the shape that matters is a layout file carrying an
+// extra extension (`c.json.hbs` → layout `c`, format json), and the renderer
+// is irrelevant to it. renderHbs also resolves from a scenario workdir, which
+// a package that is not a workspace symlink does not — ESM ignores NODE_PATH.
+const EXTRA_EXT_CONFIG = CONFIG
+
+describe('a sidecar named after the file instead of the layout', () => {
+    const workdir = freshWorkdir('sidecar-misnamed')
+    after(() => cleanup(workdir))
+
+    const base = {
+        'mikser.config.js': EXTRA_EXT_CONFIG,
+        'layouts/c.json.hbs': '{{ data.mark }}',
+        'layouts/lib/helper.js': 'export const MARK = "from-helper"\n',
+        'documents/d.html': '---\nlayout: c\n---\n',
+    }
+    const SIDECAR = 'import { MARK } from "../layouts/lib/helper.js"\n'
+        + 'export async function load() { return { mark: MARK } }\n'
+
+    it('says which file, why, and what to call it', async () => {
+        await setupFixture(workdir, {
+            ...base,
+            // The layout is `c`, so this name is wrong.
+            'layouts/c.json.js': SIDECAR.replace('../layouts/lib', './lib'),
+        })
+        const { code, combined } = await runMikser(workdir)
+        assert.equal(code, 0, combined)
+        assert.match(combined, /\[layout-sidecar-misnamed\]/, combined)
+        assert.match(combined, /layouts\/c\.json\.js is not loaded as a sidecar/, combined)
+        assert.match(combined, /c\.json\.hbs is the layout `c`/,
+            `name the layout so the correct sidecar name follows\n${combined}`)
+        assert.match(combined, /has to be c\.js/, combined)
+    })
+
+    it('is quiet once the sidecar is named correctly, and the data arrives', async () => {
+        await setupFixture(workdir, {
+            ...base,
+            'layouts/c.js': SIDECAR.replace('../layouts/lib', './lib'),
+        })
+        const { code, combined } = await runMikser(workdir)
+        assert.equal(code, 0, combined)
+        assert.doesNotMatch(combined, /layout-sidecar-misnamed/, combined)
+        // Proof the sidecar ran AND its own import resolved.
+        assert.doesNotMatch(combined, /empty-output/, combined)
+    })
+
+    it('does not flag a dotted module a sidecar imports', async () => {
+        // `lib/data.json.js` is claimed by nothing either, and is nobody's
+        // mistake. Flagging it is the noise that gets the real line filtered
+        // out — so the warning requires a layout beside it under the same
+        // stem, which is what makes it a misnaming.
+        await setupFixture(workdir, {
+            ...base,
+            'layouts/c.js': SIDECAR.replace('../layouts/lib', './lib'),
+            'layouts/lib/data.json.js': 'export const X = 1\n',
+        })
+        const { code, combined } = await runMikser(workdir)
+        assert.equal(code, 0, combined)
+        assert.doesNotMatch(combined, /layout-sidecar-misnamed/, combined)
+    })
+})
