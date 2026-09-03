@@ -40,12 +40,25 @@ const declared = new Map()
 //
 //   cliOption('--lighthouse', 'audit the built pages with Lighthouse, and exit 0')
 //
-// Reads back from `runtime.options` under commander's usual camel-cased name.
+// Reads back from `runtime.options` under commander's usual camel-cased name —
+// but NOT at construction time. Declaring happens during the load phase and
+// the table is not parsed until after it, so an option read while the plugin
+// is being built is always undefined. Read it in a hook: onLoaded and later
+// all run after stage two. documents() read its folder at construction first,
+// and `--documents content` silently did nothing.
 export function cliOption(flags, description, defaultValue) {
+    // No CLI at all — a plugin constructed by a test harness, or embedded
+    // programmatically through setup({ ... }) rather than run from a terminal.
+    // There is nothing to register the option on and nothing about that is a
+    // mistake, so it returns quietly. Throwing here made every plugin that
+    // declares an option unusable in its own unit tests, which is how this was
+    // found.
+    //
+    // Declaring LATE is still an error — see below — because that one really
+    // is a mistake: the option would never be parsed and the flag would look
+    // ignored.
     const commander = runtime.engine?.commander
-    if (!commander) {
-        throw new Error('cliOption: no commander yet — call it while the plugin is being constructed')
-    }
+    if (!commander) return undefined
     if (runtime.engine.cliSealed) {
         throw new Error(
             `cliOption(${JSON.stringify(flags)}): the option table was already parsed. `

@@ -1,5 +1,6 @@
 import { reportEvaluated } from '../report.js'
 import { countEntities } from '../catalog.js'
+import { cliOption } from '../cli.js'
 import path from 'node:path'
 import { mkdir, writeFile, unlink, rm, readFile, symlink, } from 'fs/promises'
 import { existsSync } from 'node:fs'
@@ -86,6 +87,33 @@ export function assets(options = {}) {
         changeExtension,
         constants: { ACTION, OPERATION },
     }) => {
+    // Declared HERE, not in core.
+    //
+    // Everything this flag does happens in this plugin, and core carried it
+    // only because a plugin could not declare an option until 9.100.0. The
+    // cost of that was a flag a build could accept with nothing loaded to act
+    // on it: passed, ignored, and reported afterwards by a `render-presets-
+    // unhandled` guard in the engine. Declared here, a config without assets()
+    // simply does not have the option, so the mistake is refused by name
+    // before anything is built rather than explained after.
+    // The folders this plugin owns, on the command line.
+    //
+    // They were config-only, because a plugin could not declare an option
+    // before 9.100.0 — so overriding one for a single run meant editing the
+    // config, which is the file whose checksum decides whether the whole
+    // catalog is still valid. A flag is the difference between "try this
+    // once" and "invalidate everything".
+    //
+    // CLI beats config beats default, which is the order every other option
+    // here already follows.
+    cliOption('--assets <folder>',
+        'folder for derived assets, relative to the working folder (default: assets)')
+    cliOption('--presets <folder>',
+        'folder holding the preset modules, relative to the working folder (default: presets)')
+    cliOption('--render-presets [name]',
+        're-render preset derivatives whose sources and revisions are unchanged; '
+        + 'with a name, only that preset')
+
     const collection = 'presets'
     const type = 'preset'
     const checksumMap = new Set()
@@ -425,12 +453,16 @@ export function assets(options = {}) {
         runtime.engine ??= {}
         runtime.engine.assets = { explainMissing }
 
-        runtime.options.presets = options.presetsFolder || collection
+        // `??`, not `||`: an option commander did not see is undefined, and
+        // falling through to the config is the point. `||` would also fall
+        // through for an intentional empty string, which is a different
+        // answer than "not given".
+        runtime.options.presets = runtime.options.presets ?? options.presetsFolder ?? collection
         runtime.options.presetsFolder = path.join(runtime.options.workingFolder, runtime.options.presets)
         logger.debug('Presets folder: %s', runtime.options.presetsFolder)
         await mkdir(runtime.options.presetsFolder, { recursive: true })
 
-        runtime.options.assets = options.assetsFolder || 'assets'
+        runtime.options.assets = runtime.options.assets ?? options.assetsFolder ?? 'assets'
         runtime.options.assetsFolder = path.join(runtime.options.workingFolder, runtime.options.assets)
         logger.debug('Assets folder: %s', runtime.options.assetsFolder)
 
@@ -641,7 +673,6 @@ export function assets(options = {}) {
             // end of the cycle: a flag that reaches no plugin has to say so,
             // rather than building normally and leaving the operator to
             // notice nothing was re-derived.
-            runtime.state.assets.renderPresetsHandled = true
 
             const known = Object.keys(runtime.state.assets.presets)
             const names = wanted === true ? known : [wanted]

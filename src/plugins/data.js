@@ -1,4 +1,5 @@
 import path from 'path'
+import { cliOption } from '../cli.js'
 import { mkdir, writeFile, unlink, open } from 'fs/promises'
 import _ from 'lodash'
 import sift from 'sift'
@@ -17,9 +18,23 @@ export function data(options = {}) {
         onBeforeRender,
         constants: { OPERATION },
     }) => {
+    // The folder this plugin owns, on the command line.
+    //
+    // Config-only until 9.100.0, because a plugin could not declare an option
+    // — so overriding it for one run meant editing the config, which is the
+    // file whose checksum decides whether the catalog is still valid. A flag
+    // is the difference between trying something once and invalidating
+    // everything.
+    //
+    // CLI beats config beats default. `??` rather than `||` below: an option
+    // commander did not see is undefined, and an intentional empty string is a
+    // different answer than "not given".
+    cliOption('--data <folder>',
+        'folder for emitted data files, relative to the OUTPUT folder (default: data)')
+
     onLoaded(async () => {
         const logger = useLogger()
-        runtime.options.data = options.dataFolder || 'data'
+        runtime.options.data = runtime.options.data ?? options.dataFolder ?? 'data'
         runtime.options.dataFolder = path.join(runtime.options.outputFolder, runtime.options.data)
 
         logger.debug('Data folder: %s', runtime.options.dataFolder)

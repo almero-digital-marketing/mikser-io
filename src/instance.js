@@ -73,6 +73,11 @@ export function socketPath(workingFolder) {
 //
 //   → { type: 'build',  config, clear, renderPresets }
 //   → { type: 'report', config, tool, tools, toolArgs, explain, auditOutput, fingerprint, json }
+//
+// A PLUGIN's options are not listed here and are not hand-carried: they travel
+// on `argv` and are applied by withRequestOutput against the instance's own
+// option table. --render-presets used to be named explicitly, which is what a
+// core-declared plugin flag costs — one more thing to remember in two files.
 //   ← { type: 'log', chunk }        (zero or more, in order)
 //   ← { type: 'done', code }
 //   ← { type: 'refused', reason, detail }
@@ -460,8 +465,6 @@ async function serveBuild(socket, request, logger) {
         // silent no-op, which is the failure this surface exists to remove —
         // and restoring it after keeps the watcher from forcing every later
         // rebuild.
-        const priorRenderPresets = runtime.options.renderPresets
-        if (request.renderPresets !== undefined) runtime.options.renderPresets = request.renderPresets
         // Applied for THIS cycle only, like renderPresets. An instance left in
         // force mode would re-render the whole site on every later save.
         const priorForce = runtime.options.force
@@ -486,7 +489,6 @@ async function serveBuild(socket, request, logger) {
                 emitReport()
             })
         } finally {
-            runtime.options.renderPresets = priorRenderPresets
             runtime.options.force = priorForce
         }
 

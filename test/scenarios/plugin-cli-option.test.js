@@ -19,6 +19,8 @@
 
 import { describe, it, after, before } from 'node:test'
 import assert from 'node:assert/strict'
+import { existsSync } from 'node:fs'
+import path from 'node:path'
 import { setupFixture, runMikser, cleanup, freshWorkdir } from './_harness.js'
 
 // A plugin that declares an option and reports what it received.
@@ -173,5 +175,75 @@ describe('--force across the forwarding boundary', () => {
         await runMikser(workdir, ['--force'])
         const after = await runMikser(workdir, [])
         assert.doesNotMatch(after.combined, /Rendered: [1-9]/, after.combined)
+    })
+})
+
+// The folders a plugin owns, on the command line.
+//
+// They were config-only, because a plugin could not declare an option — and
+// editing the config to try another folder once invalidates the catalog, whose
+// checksum covers that file. A flag is the difference between trying something
+// and invalidating everything.
+//
+// Each is declared by the plugin that owns the folder, so it exists only in a
+// project that loads that plugin — the same rule --render-presets now follows.
+
+describe('a folder flag a plugin declared', () => {
+    const workdir = freshWorkdir('folder-flags')
+    after(() => cleanup(workdir))
+
+    before(async () => {
+        await setupFixture(workdir, {
+            'mikser.config.js': `
+import { documents, files, frontMatter, renderHbs } from 'mikser-io'
+import { layouts } from 'mikser-io-layouts'
+export default { plugins: [documents(), files(), frontMatter(), layouts(), renderHbs()] }
+`,
+            'layouts/page.html.hbs': '<!doctype html><body>x</body>',
+            'content/index.html': '---\nlayout: page\n---\n',
+            'static/a.txt': 'hi\n',
+        })
+    })
+
+    it('finds nothing in the default folders, which is the control', async () => {
+        const { combined } = await runMikser(workdir, ['--force'])
+        assert.match(combined, /Documents loaded: 0/, combined)
+    })
+
+    it('reads the folder the flag names', async () => {
+        const { code, combined } = await runMikser(workdir, ['--force', '--documents', 'content', '--files', 'static'])
+        assert.equal(code, 0, combined)
+        assert.match(combined, /Documents loaded: 1/, combined)
+        assert.equal(existsSync(path.join(workdir, 'out', 'index.html')), true, 'the document rendered')
+        assert.equal(existsSync(path.join(workdir, 'out', 'a.txt')), true, 'and the static file was emitted')
+    })
+
+    it('is listed in this project\'s help', async () => {
+        const { combined } = await runMikser(workdir, ['--help'])
+        for (const flag of ['--documents', '--files']) {
+            assert.match(combined, new RegExp(`\\s${flag} `), `${flag} missing\n${combined}`)
+        }
+    })
+
+    it('is refused in a project whose config does not load that plugin', async () => {
+        // The property that makes this worth doing: a flag exists exactly
+        // where something acts on it.
+        const bare = freshWorkdir('folder-flags-bare')
+        try {
+            await setupFixture(bare, {
+                'mikser.config.js': `
+import { documents, frontMatter, renderHbs } from 'mikser-io'
+import { layouts } from 'mikser-io-layouts'
+export default { plugins: [documents(), frontMatter(), layouts(), renderHbs()] }
+`,
+                'layouts/page.html.hbs': '<!doctype html><body>x</body>',
+                'documents/index.html': '---\nlayout: page\n---\n',
+            })
+            const { code, combined } = await runMikser(bare, ['--files', 'static'])
+            assert.equal(code, 1, combined)
+            assert.match(combined, /unknown option '--files'/, combined)
+        } finally {
+            await cleanup(bare)
+        }
     })
 })

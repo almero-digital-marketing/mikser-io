@@ -1,4 +1,5 @@
 import { mkdir, symlink, rename, unlink } from 'node:fs/promises'
+import { cliOption } from '../cli.js'
 import { createWriteStream } from 'node:fs'
 import lodash from 'lodash'
 import deepdash from 'deepdash'
@@ -27,6 +28,20 @@ export function resources(options = {}) {
         updateProgress,
         constants: { OPERATION },
     }) => {
+    // The folder this plugin owns, on the command line.
+    //
+    // Config-only until 9.100.0, because a plugin could not declare an option
+    // — so overriding it for one run meant editing the config, which is the
+    // file whose checksum decides whether the catalog is still valid. A flag
+    // is the difference between trying something once and invalidating
+    // everything.
+    //
+    // CLI beats config beats default. `??` rather than `||` below: an option
+    // commander did not see is undefined, and an intentional empty string is a
+    // different answer than "not given".
+    cliOption('--resources <folder>',
+        'folder of library resources linked into the output, relative to the working folder (default: resources)')
+
     const collection = 'resources'
     const type = 'resource'
 
@@ -46,7 +61,7 @@ export function resources(options = {}) {
                 : resourcesName,
         }
 
-        runtime.options.resources = options.resourcesFolder || collection
+        runtime.options.resources = runtime.options.resources ?? options.resourcesFolder ?? collection
         runtime.options.resourcesFolder = path.join(runtime.options.workingFolder, runtime.options.resources)
         logger.debug('Resources folder: %s', runtime.options.resourcesFolder)
 

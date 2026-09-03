@@ -539,7 +539,6 @@ export async function setup(options) {
             .option('-c --config <file>', 'set mikser mikser.config.js location', './mikser.config.js')
             .option('-m --mode <mode>', 'set mikser runtime mode', 'development')
             .option('-r --clear', 'clear current state before execution', false)
-            .option('--render-presets [name]', 're-render preset derivatives whose sources and revisions are unchanged; with a name, only that preset')
             .option('-o --output-folder <folder>', 'set mikser output folder relative to working folder', 'out')
             .option('-w --watch', 'watch entities for changes', false)
             .option('-f --force', 'rebuild everything; disable incremental dispatch', false)
@@ -600,7 +599,10 @@ Which check answers which question:
   Are the derivatives current?
       --render-presets [n]  re-derives every preset, or one by name, without
                             touching anything else. For a preset edited without
-                            bumping its revision.
+                            bumping its revision. Declared by the assets
+                            plugin, so it exists only in a project that loads
+                            one — and a config without assets() refuses it as
+                            unknown rather than accepting it and doing nothing.
 
   Start over.
       --clear               removes the output folder and reopens the cache.
@@ -1501,30 +1503,17 @@ The full version, with what each code means: docs/diagnostics.md`)
         if (failed) logger.error('Mikser completed with %d render error%s', failed, failed === 1 ? '' : 's')
         else logger.notice('Mikser completed')
 
-        // Is everything the templates linked to actually there?
+        // The `render-presets-unhandled` guard is gone, and so is the state it
+        // read.
         //
-        // The URL helpers build paths; they do not resolve them. So a preset
-        // that never ran, a library that was not copied, or a template naming
-        // an extension the preset stopped producing all yield a well-formed
-        // link to a file that does not exist — and the only symptom is a
-        // missing image on the deployed site, found by a person.
-        //
-        // Checked at the end of the cycle because that is the first moment the
-        // answer is stable: derivatives are produced during the cycle, so
-        // asking any earlier would report files that were about to appear.
-        // --render-presets with nothing to consume it.
-        //
-        // The flag is implemented by the assets plugin, so without that plugin
-        // it reaches nobody: the build runs normally, nothing is re-derived,
-        // and the operator is left to notice. Checked here rather than at
-        // onLoaded because the engine's own onLoaded is registered first and
-        // runs before any plugin has set itself up.
-        if (runtime.options.renderPresets && !runtime.state?.assets?.renderPresetsHandled) {
-            useLogger().error({ code: 'render-presets-unhandled' },
-                '--render-presets was passed, but no assets plugin is loaded to act on it. '
-                + 'Nothing was re-derived. Add assets() to the plugins array, or drop the flag.')
-            process.exitCode = 1
-        }
+        // It existed because core declared `--render-presets` while the assets
+        // plugin implemented it, so the flag could be passed at a build that
+        // had no plugin to act on it — accepted, ignored, and reported after
+        // the fact. The plugin declares the option itself now, so a config
+        // without assets() does not have the flag at all and a misspelling is
+        // refused by name before anything is built. There is nothing left to
+        // warn about after the event.
+
 
         const brokenTargets = await reportBrokenReferences(useLogger())
         await reportMissingAssets(useLogger(), brokenTargets)

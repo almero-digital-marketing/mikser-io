@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { cliOption } from '../cli.js'
 import { mkdir, symlink, unlink, lstat, realpath } from 'fs/promises'
 import { globby } from 'globby'
 import pMap from 'p-map'
@@ -23,6 +24,20 @@ export function files(options = {}) {
         constants: { ACTION },
     }) => {
         const collection = 'files'
+        // The folder this plugin owns, on the command line.
+        //
+        // Config-only until 9.100.0, because a plugin could not declare an option
+        // — so overriding it for one run meant editing the config, which is the
+        // file whose checksum decides whether the catalog is still valid. A flag
+        // is the difference between trying something once and invalidating
+        // everything.
+        //
+        // CLI beats config beats default. `??` rather than `||` below: an option
+        // commander did not see is undefined, and an intentional empty string is a
+        // different answer than "not given".
+        cliOption('--files <folder>',
+            'folder of static files copied into the output by symlink, relative to the working folder (default: files)')
+
         const type = 'file'
 
         async function ensureLink(relativePath) {
@@ -156,7 +171,7 @@ export function files(options = {}) {
 
         onLoaded(async () => {
             const logger = useLogger()
-            runtime.options.files = options.filesFolder || collection
+            runtime.options.files = runtime.options.files ?? options.filesFolder ?? collection
             runtime.options.filesFolder = path.join(runtime.options.workingFolder, runtime.options.files)
 
             logger.debug('Files folder: %s', runtime.options.filesFolder)

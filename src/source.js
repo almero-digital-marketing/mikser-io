@@ -337,9 +337,19 @@ export function useSource(core, options) {
         // have already passed. We do folder resolution here — by which
         // point engine has set workingFolder and journal + catalog
         // have initialized.
-        absFolder = path.isAbsolute(folder)
-            ? folder
-            : path.join(runtime.options.workingFolder, folder)
+        // A `--<collection> <folder>` flag, if the plugin declared one, wins
+        // over the configured folder.
+        //
+        // Resolved HERE rather than where useSource was called, and that is
+        // the whole point: plugin factories run during the load phase, and the
+        // CLI table is not complete until after it — so an option read at
+        // construction is always undefined. documents() read it there first
+        // and `--documents content` silently did nothing, which is the shape
+        // of bug this option mechanism exists to prevent rather than create.
+        const configured = runtime.options[collection] ?? folder
+        absFolder = path.isAbsolute(configured)
+            ? configured
+            : path.join(runtime.options.workingFolder, configured)
         runtime.options[`${collection}Folder`] = absFolder
         // The authoritative set of folders whose files become entities.
         //

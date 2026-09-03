@@ -1,4 +1,5 @@
 import { useSource } from '../source.js'
+import { cliOption } from '../cli.js'
 
 // documents — the canonical content source plugin.
 //
@@ -12,6 +13,13 @@ export function documents(options = {}) {
     return (core) => {
         const collection = 'documents'
         const type = 'document'
+
+        // The folder this plugin owns, on the command line. Config-only until
+        // 9.100.0, because a plugin could not declare an option — and editing
+        // the config to try another folder once invalidates the catalog,
+        // whose checksum covers it. CLI beats config beats default.
+        cliOption('--documents <folder>',
+            'folder of source documents, relative to the working folder (default: documents)')
 
         useSource(core, {
             collection,

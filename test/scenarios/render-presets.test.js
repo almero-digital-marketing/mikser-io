@@ -144,12 +144,19 @@ export default { plugins: [documents(), frontMatter(), layouts(), renderHbs()] }
         })
     })
 
-    it('says so and exits non-zero, rather than building as if it had worked', async () => {
+    it('is refused as unknown, before anything is built', async () => {
         // A flag nothing consumes is the silent no-op this engine keeps
-        // finding. The assets plugin implements it; without that plugin it
-        // reaches nobody.
+        // finding, and this used to be caught after the fact: core declared
+        // the option, the build ran, and a `render-presets-unhandled` fault
+        // explained afterwards that nothing had acted on it.
+        //
+        // The assets plugin declares the option itself now, so a config
+        // without assets() does not have the flag at all — the mistake is
+        // refused by name before a single entity is rendered, which is what
+        // every other misspelled flag already gets.
         const { code, combined } = await runMikser(workdir, ['--render-presets'])
         assert.equal(code, 1, `an unconsumed flag must not report success\n${combined}`)
-        assert.match(combined, /no assets plugin is loaded/, combined)
+        assert.match(combined, /unknown option '--render-presets'/, combined)
+        assert.doesNotMatch(combined, /Rendered:/, 'and it must not have built first')
     })
 })

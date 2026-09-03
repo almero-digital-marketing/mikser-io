@@ -74,8 +74,7 @@ function locate(argv) {
             // rebuilt whatever the gates let through, which on a settled tree
             // is nothing, and a caller asking for a full re-render got a no-op
             // reported as success.
-            force: has('--force', '-f'),
-            renderPresets: has('--render-presets') ? (value('--render-presets') ?? true) : undefined }
+            force: has('--force', '-f') }
 
     return {
         longRunning,
