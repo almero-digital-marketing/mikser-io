@@ -7,6 +7,7 @@
 
 import _ from 'lodash'
 import realRuntime from '../src/runtime.js'
+import { resetServices } from '../src/services.js'
 import { matchEntity, normalize, changeExtension, getFormatInfo, checksum, AbortError } from '../src/utils.js'
 
 const OPERATION = {
@@ -31,6 +32,11 @@ export function createHarness({
     entities = [],
     journal = [],
 } = {}) {
+    // A fresh harness is a fresh world. The service registry is module state,
+    // so without this the previous test's provider is still registered and
+    // constructing the plugin again is (correctly) an error — every package
+    // building a plugin per test would otherwise have to remember to clear it.
+    resetServices()
     const hookNames = [
         'load', 'loaded', 'import', 'imported',
         'process', 'processed', 'persist', 'persisted',

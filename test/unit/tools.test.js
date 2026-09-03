@@ -159,3 +159,47 @@ describe('the mikser_ prefix is MCP\'s, not the registry\'s', () => {
         assert.equal(await invokeTool('mikser_search'), 'prefixed')
     })
 })
+
+describe('what a registration carries', () => {
+    it('keeps definition fields core itself does not read', () => {
+        // `mutates` is MCP's, not core's — but a plugin registering here
+        // must be able to say it, or it would have to register with the mcp
+        // plugin directly to be treated correctly. That is the coupling.
+        registerTool('mutating', { description: 'd', inputSchema: {}, mutates: true }, async () => ({}))
+        assert.equal(toolSchema('mutating').mutates, true)
+    })
+
+    it('still defaults the fields core does read', () => {
+        registerTool('bare', {}, async () => ({}))
+        assert.deepEqual(toolSchema('bare'), { name: 'bare', description: '', inputSchema: {} })
+    })
+})
+
+describe('which surface a tool belongs on', () => {
+    it('offers an undeclared tool everywhere', () => {
+        registerTool('everywhere', { description: 'd' }, async () => ({}))
+        assert.ok(toolNames('cli').includes('everywhere'))
+        assert.ok(toolNames('mcp').includes('everywhere'))
+    })
+
+    it('keeps a declared tool off the surfaces it excludes', () => {
+        // mikser-io-git's undo tools are MCP-only on purpose: API and human
+        // writes are not attributed, so an undo a CLI caller could reach
+        // would be an undo able to remove work it never made. That scope used
+        // to be enforced by registering with the mcp plugin instead of here —
+        // which made the decision inseparable from the coupling.
+        registerTool('mcp_only', { description: 'd', surfaces: ['mcp'] }, async () => ({}))
+        assert.ok(!toolNames('cli').includes('mcp_only'))
+        assert.ok(toolNames('mcp').includes('mcp_only'))
+        assert.ok(toolNames().includes('mcp_only'), 'unfiltered listing still sees it')
+    })
+
+    it('refuses rather than hides, and says where the tool does live', async () => {
+        // "Unknown tool" would send the caller hunting for a typo or a
+        // missing plugin.
+        registerTool('mcp_only_invoke', { description: 'd', surfaces: ['mcp'] }, async () => ({ ok: true }))
+        await assert.rejects(() => invokeTool('mcp_only_invoke', {}, { surface: 'cli' }),
+            /not available on the cli surface.*offered on: mcp/s)
+        assert.deepEqual(await invokeTool('mcp_only_invoke', {}, { surface: 'mcp' }), { ok: true })
+    })
+})

@@ -7,13 +7,17 @@
 // the first. Closing that by adding a CLI flag per tool would drift the moment
 // anyone added a tool.
 //
-// One direction, today. The mcp plugin mirrors its registrations into here, so
-// every tool it registers is reachable from the CLI. The reverse is NOT true: a
-// tool registered directly against this registry does not appear in an MCP
-// session, because the substrate binds sessions from its own list and MCP wants
-// a zod shape for `inputSchema` while the engine is deliberately zod-free.
-// Registering through `runtime.options.mcp` therefore remains the way to reach
-// both surfaces, and that is what every tool does now.
+// Both directions. The mcp plugin mirrors its own registrations into here, and
+// binds every tool registered here into each session — prefixing on the way
+// out, since `mikser_` belongs to MCP's flat namespace and not to the engine.
+// So a plugin registers once, against this registry, and reaches both surfaces
+// without depending on the mcp plugin being installed, or on where it sits in
+// the plugins array.
+//
+// `inputSchema` is stored opaquely, which is what makes that possible: a
+// plugin may describe its parameters in the neutral vocabulary below or hand
+// over a zod shape, and the engine passes either through untouched rather than
+// taking a dependency on zod to hold it.
 //
 // So the REGISTRY is substrate and the transports are consumers. ADR-0006's
 // five tests, which MCP itself failed on release cadence:
@@ -50,6 +54,13 @@ export function registerTool(name, definition = {}, handler) {
         runtime.engine?.logger?.debug('Tool %s re-registered, replacing the previous handler', name)
     }
     tools.set(name, {
+        // The whole definition, not the three fields core happens to read.
+        // A transport needs more than core does — `mutates: true` is how a
+        // tool says it changes something, and MCP wraps those differently.
+        // Dropping unknown keys here meant a plugin could only reach that
+        // behaviour by registering with the mcp plugin directly, which is
+        // exactly the coupling this registry exists to remove.
+        ...definition,
         name,
         description: definition.description ?? '',
         inputSchema: definition.inputSchema ?? {},
@@ -58,8 +69,29 @@ export function registerTool(name, definition = {}, handler) {
     return () => tools.delete(name)
 }
 
-export function toolNames() {
-    return [...store().keys()].sort()
+// Does this tool belong on that surface?
+//
+// A tool may declare `surfaces: ['mcp']`. Scope used to be enforced by WHICH
+// registry a plugin registered against — mikser-io-git's undo tools are
+// deliberately MCP-only and reached that by registering with the mcp plugin
+// and not the engine. That made the scope decision inseparable from the
+// coupling: to be MCP-only you had to depend on mcp.
+//
+// Declaring it is better in both directions. The scope is now visible where
+// the tool is defined rather than inferred from an import, and a plugin can
+// say it without taking a dependency on the transport it is naming.
+//
+// Undeclared means every surface, which is what almost every tool wants.
+function onSurface(tool, surface) {
+    if (!surface || !tool?.surfaces) return true
+    return tool.surfaces.includes(surface)
+}
+
+export function toolNames(surface) {
+    return [...store().entries()]
+        .filter(([, tool]) => onSurface(tool, surface))
+        .map(([name]) => name)
+        .sort()
 }
 
 // Name, description and input schema — everything a caller needs to decide
@@ -71,15 +103,15 @@ export function toolSchema(name) {
     return rest
 }
 
-export function toolSchemas() {
-    return toolNames().map(toolSchema)
+export function toolSchemas(surface) {
+    return toolNames(surface).map(toolSchema)
 }
 
 // Invoke by name. Returns whatever the tool returns — for tools registered by
 // the mcp plugin that is the MCP content envelope, so a CLI caller and a
 // session caller are looking at the same answer rather than two renderings of
 // it.
-export async function invokeTool(name, args = {}) {
+export async function invokeTool(name, args = {}, { surface } = {}) {
     // Names in this registry are BARE. The `mikser_` prefix belongs to MCP,
     // where tool names share one flat namespace across every connected server
     // and an unprefixed `audit_output` would collide with anyone else's — a
@@ -93,8 +125,16 @@ export async function invokeTool(name, args = {}) {
         ?? store().get(String(name).replace(/^mikser_/, ''))
         ?? store().get(`mikser_${name}`)
     if (!tool) {
-        const known = toolNames()
+        const known = toolNames(surface)
         throw new Error(`Unknown tool: ${name}${known.length ? `. Available: ${known.join(', ')}` : '. None are registered — is the mcp plugin in your config?'}`)
+    }
+    // Refused rather than hidden. A tool that exists but is not offered here
+    // should say so and say where it is offered, because "unknown tool" would
+    // send the caller looking for a typo or a missing plugin.
+    if (!onSurface(tool, surface)) {
+        throw new Error(
+            `Tool ${tool.name} is not available on the ${surface} surface. `
+            + `It is offered on: ${tool.surfaces.join(', ')}.`)
     }
     return tool.handler(args ?? {})
 }

@@ -32,7 +32,7 @@ import { queryContext } from './database/query-context.js'
 // Build a structuredClone-safe copy of runtime.options for WORKER
 // dispatch. Plugin surfaces live under `runtime.options.<plugin>` per
 // the engine's namespacing convention and routinely hold functions
-// (e.g. `runtime.options.layouts.inspect`, `runtime.options.preview.get`)
+// (e.g. the `layouts` service's inspect(), the `preview` service's get())
 // — those don't cross thread boundaries via Piscina's structured clone.
 //
 // Per-key probe: anything that survives `structuredClone(value)` passes
@@ -320,7 +320,8 @@ export async function runReportOnly(request = {}) {
     } = request
 
     if (tools) {
-        const schemas = toolSchemas()
+        // 'cli' — a tool may declare it belongs only on another surface.
+        const schemas = toolSchemas('cli')
         if (json) {
             process.stdout.write(JSON.stringify(schemas, null, 2) + '\n')
         } else if (!schemas.length) {
@@ -363,7 +364,7 @@ export async function runReportOnly(request = {}) {
         }
         let result
         try {
-            result = await invokeTool(tool, args)
+            result = await invokeTool(tool, args, { surface: 'cli' })
         } catch (err) {
             logger.error('%s', err.message)
             return 3
@@ -1051,7 +1052,7 @@ The full version, with what each code means: docs/diagnostics.md`)
                                 mc.port2.unref()
                                 renderOptions.port = mc.port1
                                 // Strip plugin-surface functions
-                                // (runtime.options.layouts.inspect, etc.) so
+                                // (the layouts service's inspect, etc.) so
                                 // Piscina's structured clone doesn't choke on
                                 // them. Engine-side primitives pass through;
                                 // plugin surfaces are reachable via the
