@@ -10,20 +10,24 @@ import assert from 'node:assert/strict'
 
 import { preview } from '../../../src/plugins/preview.js'
 import { createHarness } from '../plugin-harness.js'
+import { useService, resetServices } from '../../../src/services.js'
 
 function setup({ journal = [], ...options } = {}) {
     const h = createHarness({ journal })
     h.core.runtime.options ??= {}
+    resetServices()
     preview(options)(h.core)
-    return { h, cache: h.core.runtime.options.preview }
+    return { h, cache: useService('preview') }
 }
 
 const bytes = (n) => Buffer.alloc(n, 'x')
 
 describe('the preview cache', () => {
-    it('publishes its surface at factory time, before any hook runs', () => {
-        // mcp's preview tools read this during their own onLoaded, so it
-        // cannot wait for one.
+    it('offers its service at factory time, before any hook runs', () => {
+        // mcp's preview tools ask for this during their own onLoaded, so it
+        // cannot wait for one — and asking core rather than reaching into
+        // runtime.options.preview is what lets the two plugins sit in any
+        // order.
         const { cache } = setup()
         assert.deepEqual(Object.keys(cache).sort(), ['config', 'get', 'stats', 'store'])
     })

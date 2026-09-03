@@ -6,6 +6,10 @@ export * from './src/roles.js'
 export * from './src/inventory.js'
 export * from './src/report.js'
 export * from './src/cli.js'
+// What one plugin offers another. A plugin publishes an API under a name
+// (provideService) or adds to an extension point (contribute); consumers ask
+// core, never a sibling. Replaces reaching into runtime.options.<plugin>.
+export * from './src/services.js'
 // The diagnostics behind --explain. Exported so a transport — the MCP tool
 // surface, the api plugin's routes — can serve the same structured report the
 // CLI formats, rather than each one reimplementing the question.

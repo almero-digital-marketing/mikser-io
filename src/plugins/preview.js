@@ -6,7 +6,7 @@
 //   1. An in-memory cache (Map<filename, { bytes, mime, expiresAt,
 //      size, deps }>) with LRU eviction past a configurable byte cap.
 //   2. An Express GET /preview/:filename route that serves cache entries.
-//   3. Exposes the cache surface at runtime.options.preview = { store,
+//   3. Offers the cache surface as the `preview` service = { store,
 //      get, stats, config } so other plugins (mikser-io-mcp's
 //      mikser_preview_render tool, library-mode callers) can stash bytes
 //      and retrieve them by URL without going through MCP.
@@ -29,6 +29,7 @@
 // isn't mounted.
 
 import sift from 'sift'
+import { provideService } from '../services.js'
 
 export function preview(options = {}) {
     return ({ runtime, onLoaded, onPersist, useJournal, useLogger, registerRoute, constants: { OPERATION } }) => {
@@ -98,13 +99,14 @@ export function preview(options = {}) {
         }
     }
 
-    // Expose the cache surface at runtime.options.preview so other
-    // plugins / library callers can use it without going through MCP.
-    // `config` is part of the surface too — mikser-io-mcp's
-    // mikser_preview_render reads it to derive URL paths + TTL clamps.
-    // Done at factory-eval time (before any onLoaded fires) so a
-    // later plugin's onLoad / onLoaded can already see it.
-    runtime.options.preview = { store, get, stats, config }
+    // Offer the cache surface as a service, so a plugin that wants it asks
+    // core rather than reaching into runtime.options.preview. `config` is
+    // part of the surface too — mikser-io-mcp's mikser_preview_render reads
+    // it to derive URL paths + TTL clamps.
+    //
+    // Provided at factory-eval time, before any hook runs, so a consumer's
+    // onLoad / onLoaded can already see it whatever the plugin order.
+    provideService('preview', { store, get, stats, config }, { plugin: 'mikser-io' })
 
     // Per-cycle invalidation. For every preview entry that has `deps`,
     // walk this cycle's catalog mutations and evict the entry if any
@@ -144,7 +146,7 @@ export function preview(options = {}) {
 
     // HTTP route: served regardless of whether MCP is on, so previews
     // are also reachable from library-mode callers that stored bytes
-    // via runtime.options.preview.store() directly.
+    // via the preview service's store() directly.
     onLoaded(async () => {
         const logger = useLogger()
         const app = runtime.options.app

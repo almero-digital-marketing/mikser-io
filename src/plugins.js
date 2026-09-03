@@ -1,5 +1,6 @@
 import { useLogger } from './engine.js'
 import { onLoad } from './lifecycle.js'
+import { resetServices } from './services.js'
 import runtime from './runtime.js'
 
 import * as core from '../index.js'
@@ -22,6 +23,13 @@ import * as core from '../index.js'
 // new shape (see ADR-0010).
 onLoad(() => {
     const logger = useLogger()
+
+    // The service and extension-point registries are module state, which
+    // outlives one load phase — a watcher re-reads its config in the same
+    // process. Clearing here, before any factory runs, means a reload
+    // rebuilds them from scratch instead of a provider colliding with the
+    // copy of itself it registered last time.
+    resetServices()
 
     runtime.options.plugins = (runtime.options.plugins ?? [])
         .concat(runtime.config.plugins ?? [])
