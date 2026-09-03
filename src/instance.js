@@ -360,12 +360,24 @@ function refuseClear(socket, request) {
     return true
 }
 
+// Which process to restart.
+//
+// "Restart it" is only actionable if you know which `it` — and the machine
+// that hits this is the machine running several instances from several
+// projects, because that is what makes a stale config likely in the first
+// place. Without the pid, finding it meant walking /proc by cwd.
+//
+// The instance answers with its OWN pid, which is the one fact a client cannot
+// work out: it knows the folder it asked about, not who is holding it. The
+// wrong-config refusal beside this one already names both sides; this one
+// named neither.
 function refuseStale(socket, movedFile) {
     frame(socket, {
         type: 'refused',
         reason: `this instance's config changed on disk since it started (${movedFile}).`,
-        detail: 'It is still running the old one. Restart it, and this command will reach an instance that '
-            + 'matches what you edited.',
+        detail: `It is still running the old one — pid ${process.pid}, started in `
+            + `${runtime.options.workingFolder}. Restart that process and this command will reach an `
+            + 'instance that matches what you edited.',
     })
 }
 

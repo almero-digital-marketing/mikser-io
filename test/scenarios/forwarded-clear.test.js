@@ -110,3 +110,40 @@ describe('--clear against a running instance', () => {
         assert.match(combined, /Mikser completed/)
     })
 })
+
+// A refusal has to name the process it is asking you to restart.
+//
+// "It is still running the old one. Restart it" is only actionable if you know
+// which `it` — and the machine that hits this is the machine running several
+// instances from several projects, because that is what makes a stale config
+// likely in the first place. Finding it meant walking /proc by cwd.
+//
+// The instance answers with its own pid, which is the one fact the client
+// cannot work out: it knows the folder it asked about, not who is holding it.
+
+describe('the stale-config refusal', () => {
+    const workdir = freshWorkdir('stale-config-pid')
+    let instance
+    after(async () => { instance?.kill(); await cleanup(workdir) })
+
+    it('names the pid to restart, and the folder it is holding', async () => {
+        await setupFixture(workdir, FILES)
+        await runMikser(workdir)
+        instance = await startInstance(workdir)
+
+        // Edit the config after the instance read it.
+        const config = path.join(workdir, 'mikser.config.js')
+        await writeFile(config, `${CONFIG}\n// edited after start\n`)
+
+        const { code, combined } = await runMikser(workdir, [])
+        assert.equal(code, 1, `the refusal itself is right and must stay\n${combined}`)
+        assert.match(combined, /config changed on disk since it started/, combined)
+
+        const pid = combined.match(/pid (\d+)/)?.[1]
+        assert.ok(pid, `the refusal must name the process to restart\n${combined}`)
+        assert.equal(Number(pid), instance.pid,
+            `and it must be the instance's own pid, not the client's (${process.pid})`)
+        assert.match(combined, new RegExp(workdir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+            'and the folder it is holding')
+    })
+})
