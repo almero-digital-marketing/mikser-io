@@ -627,11 +627,6 @@ Which check answers which question:
                             instance is ALWAYS in watch mode, so watch alone
                             answers the wrong question.
 
-  Is the page fast, and can it be read?
-      --lighthouse          from mikser-io-lighthouse, if installed. A plugin
-                            declares its own options now, and they appear here
-                            beside core's — see cliOption().
-
   What did this build do, and cost?
       --json                the whole report as one document on stdout, with
                             every warning carrying a stable code, and per-phase

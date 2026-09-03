@@ -166,6 +166,36 @@ export function runMikser(workdir, args = []) {
     })
 }
 
+// Run mikser the way a person does: from inside the project, with no
+// --working-folder at all, so the option falls back to its './' default.
+//
+// runMikser always passes an ABSOLUTE --working-folder, which is why the
+// whole scenario suite was blind to a bug that only shows up when the
+// value is relative. Anything asserting about resolved folders wants
+// this runner, not that one.
+export function runMikserInPlace(workdir, args = []) {
+    return new Promise((resolve, reject) => {
+        const p = spawn('node', ['--no-warnings', path.join(MIKSER_ROOT, 'app.js'), ...args], {
+            cwd: workdir,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: {
+                ...process.env,
+                NO_COLOR: '1',
+                NODE_PATH: path.dirname(MIKSER_ROOT),
+            },
+        })
+        let stdout = '', stderr = ''
+        p.stdout.on('data', d => stdout += d.toString())
+        p.stderr.on('data', d => stderr += d.toString())
+        const timer = setTimeout(() => p.kill('SIGKILL'), 30_000)
+        p.on('close', code => {
+            clearTimeout(timer)
+            resolve({ code, stdout, stderr, combined: stripAnsi(stdout + stderr) })
+        })
+        p.on('error', err => { clearTimeout(timer); reject(err) })
+    })
+}
+
 export async function cleanup(workdir) {
     await rm(workdir, { recursive: true, force: true })
 }

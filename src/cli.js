@@ -110,7 +110,28 @@ export function completeCliParse() {
     }
 
     commander.parse(process.argv)
-    Object.assign(runtime.options, commander.opts())
+
+    // ONLY the options a plugin declared.
+    //
+    // Assigning the whole opts() blob put core's own options back to their
+    // parsed values — and by this point the engine has already NORMALISED
+    // several of them. `--working-folder` defaults to './' and onInitialize
+    // resolves it to an absolute path; re-assigning made it './' again, after
+    // the load phase, so every plugin that resolves a folder in onLoaded got a
+    // relative one. `path.join('./', 'schemas')` is `schemas`, which reaches
+    // import() as a BARE SPECIFIER — so schemas, presets and layout sidecars
+    // all failed with "Cannot find package 'schemas'" on a clean build that
+    // was otherwise green.
+    //
+    // Stage two exists to pick up what stage one could not know about. It has
+    // no business restating what stage one already produced and the engine has
+    // since corrected.
+    const parsed = commander.opts()
+    for (const option of commander.options) {
+        if (!declared.has(option.flags)) continue
+        const name = option.attributeName()
+        if (parsed[name] !== undefined) runtime.options[name] = parsed[name]
+    }
 }
 
 // The plugin-declared options carried by a client's argv.
