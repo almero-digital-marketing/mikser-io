@@ -615,6 +615,15 @@ Which check answers which question:
                             tree, stable across runs. Take it before and after
                             an upgrade and compare.
 
+  Is this build one a person is waiting on?
+      (automatic)           runtime.options.requested is true for a build a
+                            client asked for — including one forwarded to a
+                            running instance — and false for a watcher's own
+                            cycle. An expensive check reads it to stand down in
+                            the dev loop without standing down forever: an
+                            instance is ALWAYS in watch mode, so watch alone
+                            answers the wrong question.
+
   What did this build do, and cost?
       --json                the whole report as one document on stdout, with
                             every warning carrying a stable code, and per-phase

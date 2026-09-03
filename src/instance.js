@@ -399,7 +399,20 @@ function refuseStale(socket, movedFile) {
 // not put the instance into json mode for everyone.
 async function withRequestOutput(request, run) {
     const prior = {}
-    for (const key of ['json', 'tool', 'tools']) {
+    // `requested` is not a flag the client sent — it is the fact that a client
+    // sent anything at all.
+    //
+    // An instance is always in watch or server mode, so a plugin asking "am I
+    // in the dev loop" gets `yes` for a build a PERSON just typed and is
+    // waiting on. An expensive check that stands down in the dev loop then
+    // stands down forever on a project whose documented model is a watcher
+    // always up — it never runs, and says nothing, which is the failure this
+    // whole surface exists to remove.
+    //
+    // Set for the duration of the request and restored with the rest, so a
+    // watcher's own cycle before or after is unaffected.
+    request = { ...request, requested: true }
+    for (const key of ['json', 'tool', 'tools', 'requested']) {
         prior[key] = runtime.options[key]
         if (request[key]) runtime.options[key] = request[key]
     }
