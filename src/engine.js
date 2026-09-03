@@ -320,8 +320,7 @@ export async function runReportOnly(request = {}) {
     } = request
 
     if (tools) {
-        // 'cli' — a tool may declare it belongs only on another surface.
-        const schemas = toolSchemas('cli')
+        const schemas = toolSchemas()
         if (json) {
             process.stdout.write(JSON.stringify(schemas, null, 2) + '\n')
         } else if (!schemas.length) {
@@ -364,7 +363,7 @@ export async function runReportOnly(request = {}) {
         }
         let result
         try {
-            result = await invokeTool(tool, args, { surface: 'cli' })
+            result = await invokeTool(tool, args)
         } catch (err) {
             logger.error('%s', err.message)
             return 3

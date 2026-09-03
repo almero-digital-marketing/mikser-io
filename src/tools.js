@@ -69,29 +69,8 @@ export function registerTool(name, definition = {}, handler) {
     return () => tools.delete(name)
 }
 
-// Does this tool belong on that surface?
-//
-// A tool may declare `surfaces: ['mcp']`. Scope used to be enforced by WHICH
-// registry a plugin registered against — mikser-io-git's undo tools are
-// deliberately MCP-only and reached that by registering with the mcp plugin
-// and not the engine. That made the scope decision inseparable from the
-// coupling: to be MCP-only you had to depend on mcp.
-//
-// Declaring it is better in both directions. The scope is now visible where
-// the tool is defined rather than inferred from an import, and a plugin can
-// say it without taking a dependency on the transport it is naming.
-//
-// Undeclared means every surface, which is what almost every tool wants.
-function onSurface(tool, surface) {
-    if (!surface || !tool?.surfaces) return true
-    return tool.surfaces.includes(surface)
-}
-
-export function toolNames(surface) {
-    return [...store().entries()]
-        .filter(([, tool]) => onSurface(tool, surface))
-        .map(([name]) => name)
-        .sort()
+export function toolNames() {
+    return [...store().keys()].sort()
 }
 
 // Name, description and input schema — everything a caller needs to decide
@@ -103,15 +82,15 @@ export function toolSchema(name) {
     return rest
 }
 
-export function toolSchemas(surface) {
-    return toolNames(surface).map(toolSchema)
+export function toolSchemas() {
+    return toolNames().map(toolSchema)
 }
 
 // Invoke by name. Returns whatever the tool returns — for tools registered by
 // the mcp plugin that is the MCP content envelope, so a CLI caller and a
 // session caller are looking at the same answer rather than two renderings of
 // it.
-export async function invokeTool(name, args = {}, { surface } = {}) {
+export async function invokeTool(name, args = {}) {
     // Names in this registry are BARE. The `mikser_` prefix belongs to MCP,
     // where tool names share one flat namespace across every connected server
     // and an unprefixed `audit_output` would collide with anyone else's — a
@@ -125,16 +104,8 @@ export async function invokeTool(name, args = {}, { surface } = {}) {
         ?? store().get(String(name).replace(/^mikser_/, ''))
         ?? store().get(`mikser_${name}`)
     if (!tool) {
-        const known = toolNames(surface)
+        const known = toolNames()
         throw new Error(`Unknown tool: ${name}${known.length ? `. Available: ${known.join(', ')}` : '. None are registered — is the mcp plugin in your config?'}`)
-    }
-    // Refused rather than hidden. A tool that exists but is not offered here
-    // should say so and say where it is offered, because "unknown tool" would
-    // send the caller looking for a typo or a missing plugin.
-    if (!onSurface(tool, surface)) {
-        throw new Error(
-            `Tool ${tool.name} is not available on the ${surface} surface. `
-            + `It is offered on: ${tool.surfaces.join(', ')}.`)
     }
     return tool.handler(args ?? {})
 }
