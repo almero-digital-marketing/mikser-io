@@ -28,18 +28,21 @@
 // went from 32 lines to 97 — five records in the same millisecond to say a
 // phase did nothing, written into the log a deployment keeps.
 
-import { describe, it, beforeEach, afterEach, mock } from 'node:test'
+import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 
 import runtime from '../../src/runtime.js'
 import {
-    trackProgress, updateProgress, stopProgress, PROGRESS_INTERVAL_MS,
+    trackProgress, updateProgress, stopProgress, formatDuration, PROGRESS_INTERVAL_MS,
 } from '../../src/logger.js'
 
 let records
 const priorEngine = runtime.engine
 const priorOptions = runtime.options
 const priorTTY = process.stdout.isTTY
+const priorNow = performance.now
+let clock = 0
+const tick = (ms) => { clock += ms }
 
 beforeEach(() => {
     records = []
@@ -50,13 +53,16 @@ beforeEach(() => {
     }
     runtime.engine = { logger: { info: capture('info'), warn: capture('warn'), debug: capture('debug') } }
     runtime.options = { ...priorOptions, info: true }
-    // Date only — setTimeout must keep working for the test runner itself.
-    mock.timers.enable({ apis: ['Date'] })
+    // performance.now, because that is the clock phases are timed on and
+    // node:test's mock.timers does not cover it (verified: ticking Date
+    // leaves performance.now advancing on its own).
+    clock = 0
+    performance.now = () => clock
 })
 
 afterEach(() => {
     stopProgress()
-    mock.timers.reset()
+    performance.now = priorNow
     runtime.engine = priorEngine
     runtime.options = priorOptions
     process.stdout.isTTY = priorTTY
@@ -93,12 +99,27 @@ describe('progress is reported for long phases and nothing else', () => {
         // nothing. Under a second the number IS the information.
         runtime.options.json = true
         trackProgress('Import', 5)
-        mock.timers.tick(340)
+        tick(340)
         run(5)
         const finished = coded('progress-finished')[0]
         assert.equal(finished.ms, 340)
         assert.ok(finished.args.includes('340ms'),
             `340ms must not print as 0s — got ${JSON.stringify(finished.args)}`)
+    })
+
+    it('measures below a millisecond, where most phases actually live', () => {
+        // Moving from seconds to milliseconds moved the same defect one order
+        // of magnitude down: nine of a plain build's thirteen phases printed
+        // `0ms`. Date.now() cannot resolve this at all, which is why phases
+        // are timed on performance.now().
+        runtime.options.json = true
+        trackProgress('Catalog', 6)
+        tick(0.42)
+        run(6)
+        const finished = coded('progress-finished')[0]
+        assert.equal(finished.ms, 0.42, 'the field keeps sub-millisecond precision')
+        assert.ok(finished.args.includes('0.42ms'),
+            `a sub-millisecond phase must read as a measurement — got ${JSON.stringify(finished.args)}`)
     })
 
     it('reports on a TIME interval, not per item and not per quartile', () => {
@@ -109,7 +130,7 @@ describe('progress is reported for long phases and nothing else', () => {
         runtime.options.json = true
         trackProgress('Import', 1000)
         for (let i = 0; i < 1000; i++) {
-            mock.timers.tick(300)          // 300s of work, ten intervals
+            tick(300)          // 300s of work, ten intervals
             updateProgress()
         }
         // Nine, not ten: the interval that lands exactly on the last item is
@@ -125,7 +146,7 @@ describe('progress is reported for long phases and nothing else', () => {
         // not a minimum total.
         runtime.options.json = true
         trackProgress('Postprocess', 4)
-        for (let i = 0; i < 4; i++) { mock.timers.tick(PROGRESS_INTERVAL_MS + 1); updateProgress() }
+        for (let i = 0; i < 4; i++) { tick(PROGRESS_INTERVAL_MS + 1); updateProgress() }
         assert.ok(coded('progress').length > 0, 'a slow phase reports however few items it has')
         assert.equal(coded('progress-finished').length, 1)
     })
@@ -135,7 +156,7 @@ describe('progress is reported for long phases and nothing else', () => {
         // no-op build from 32 lines to 97.
         runtime.options.json = true
         trackProgress('Import', 100)
-        mock.timers.tick(PROGRESS_INTERVAL_MS - 1)
+        tick(PROGRESS_INTERVAL_MS - 1)
         run(100)
         assert.equal(coded('progress').length, 0, 'no running commentary')
         assert.equal(coded('progress-finished').length, 1, 'but it still says it ran')
@@ -144,7 +165,7 @@ describe('progress is reported for long phases and nothing else', () => {
     it('says what finished, how much of it, and what it cost', () => {
         runtime.options.json = true
         trackProgress('Rendering', 4)
-        mock.timers.tick(1500)
+        tick(1500)
         run(4, '/documents/post.md')
         const finished = coded('progress-finished')
         assert.equal(finished.length, 1, 'the phase says when it finished')
@@ -174,13 +195,43 @@ describe('progress is reported for long phases and nothing else', () => {
     })
 })
 
+describe('a duration is a measurement, never a zero', () => {
+    // Each band printed at the resolution it has. The floor is not
+    // decoration: a monotonic clock can return two identical readings, and
+    // `0.00ms` would be the same lie one order of magnitude further down.
+    const cases = [
+        [0,       '<0.01ms'],
+        [0.004,   '<0.01ms'],
+        [0.42,    '0.42ms'],
+        [0.999,   '1.00ms'],
+        [1,       '1ms'],
+        [340,     '340ms'],
+        [999.6,   '1000ms'],
+        [1000,    '1.0s'],
+        [3200,    '3.2s'],
+        [44400,   '44.4s'],
+    ]
+    for (const [ms, expected] of cases) {
+        it(`${ms}ms reads as ${expected}`, () => {
+            assert.equal(formatDuration(ms), expected)
+        })
+    }
+
+    it('never renders a bare zero at any magnitude', () => {
+        for (const ms of [0, 0.0001, 0.001, 0.009]) {
+            assert.doesNotMatch(formatDuration(ms), /^0(\.0+)?(ms|s)$/,
+                `${ms} rendered as ${formatDuration(ms)}`)
+        }
+    })
+})
+
 describe('progress says WHAT is progressing', () => {
     it('carries the item the phase is on', () => {
         // A phase name says a build is doing something. What a stuck build
         // has to say is what it is stuck ON.
         runtime.options.json = true
         trackProgress('Rendering', 100)
-        mock.timers.tick(PROGRESS_INTERVAL_MS + 1)
+        tick(PROGRESS_INTERVAL_MS + 1)
         run(100, '/documents/post.md')
         assert.equal(coded('progress')[0].detail, '/documents/post.md')
     })
@@ -192,7 +243,7 @@ describe('progress says WHAT is progressing', () => {
         runtime.options.json = true
         runtime.options.workingFolder = '/srv/site'
         trackProgress('Rendering', 100)
-        mock.timers.tick(PROGRESS_INTERVAL_MS + 1)
+        tick(PROGRESS_INTERVAL_MS + 1)
         run(100, '/documents/p3706.md')
         assert.equal(coded('progress')[0].detail, '/documents/p3706.md')
     })
@@ -201,7 +252,7 @@ describe('progress says WHAT is progressing', () => {
         runtime.options.json = true
         runtime.options.workingFolder = '/srv/site'
         trackProgress('Import', 100)
-        mock.timers.tick(PROGRESS_INTERVAL_MS + 1)
+        tick(PROGRESS_INTERVAL_MS + 1)
         run(100, '/srv/site/documents/post.md')
         assert.equal(coded('progress')[0].detail, 'documents/post.md')
     })
@@ -209,7 +260,7 @@ describe('progress says WHAT is progressing', () => {
     it('reports the phase without a detail when the call site has none', () => {
         runtime.options.json = true
         trackProgress('Import', 100)
-        mock.timers.tick(PROGRESS_INTERVAL_MS + 1)
+        tick(PROGRESS_INTERVAL_MS + 1)
         run(100)
         const first = coded('progress')[0]
         assert.ok(first, 'still reported')
@@ -225,7 +276,7 @@ describe('the progress bar never writes where a document is written', () => {
             process.stdout.isTTY = true
             runtime.options[flag] = flag === 'tool' ? 'mikser_ping' : true
             trackProgress('Import', 100)
-            mock.timers.tick(PROGRESS_INTERVAL_MS + 1)
+            tick(PROGRESS_INTERVAL_MS + 1)
             run(100)
             assert.ok(coded('progress').length > 0,
                 'records, not a bar — the phase took the non-drawn branch')

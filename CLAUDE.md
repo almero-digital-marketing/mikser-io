@@ -252,8 +252,14 @@ brevity.
   the commentary throttled it is the only record most phases produce, and
   off a TTY it is the only place phase timings come from. It has to stand
   alone, which `Documents import finished: 5 0s` did not: a count with no
-  subject and a duration rounded away to nothing. `formatDuration` reports
-  ms under a second, so `5 in 1ms` and `6000 in 3.2s`. The subject is the
+  subject and a duration rounded away to nothing. **Phases are timed with
+  `performance.now()`, not `Date.now()`** — moving from seconds to
+  milliseconds moved the same defect one order of magnitude down, where
+  nine of thirteen phases printed `0ms`, and Date.now() cannot resolve
+  below a millisecond at all. `formatDuration` prints each band at the
+  resolution it has (`0.12ms`, `340ms`, `3.2s`) with a `<0.01ms` floor,
+  because a monotonic clock can still return two identical readings and
+  `0.00ms` would be the same lie a third time. The subject is the
   phase NAME, deliberately not the last item walked — that item is not
   what the phase was about: seven journal phases in a row reported the
   same `/layouts/page.hbs` because that is where the walk ended, and

@@ -530,10 +530,21 @@ function progressDetail(detail) {
     return relative.startsWith('..') ? text : relative
 }
 
-// `0s` for anything under a second reports the whole phase as nothing. Below
-// a second the number IS the information.
-function formatDuration(ms) {
-    return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`
+// A duration rounded away to nothing is not a measurement.
+//
+// `finished: 5 0s` was the first version of this and `0s` said nothing;
+// millisecond resolution moved the same defect one order of magnitude down,
+// where nine of a plain build's thirteen phases still printed `0ms`. The
+// clock is the cause rather than the format — Date.now() cannot resolve
+// below a millisecond — so phases are timed with performance.now(), and each
+// band is printed at the resolution it actually has. The floor exists
+// because even a monotonic clock can report two identical readings, and
+// `0.00ms` would be the same lie a third time.
+export function formatDuration(ms) {
+    if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`
+    if (ms >= 1) return `${Math.round(ms)}ms`
+    if (ms >= 0.01) return `${ms.toFixed(2)}ms`
+    return '<0.01ms'
 }
 
 function emitProgress({ name, total, value, detail }) {
@@ -568,7 +579,8 @@ export function trackProgress(name, total) {
     // --json would have extended that to every machine reading the output.
     // Losing the graphics is the point; losing the information is not.
     const drawn = !carriesDocument && Boolean(process.stdout.isTTY) && Boolean(runtime.options.info)
-    currentBar = { name, total, value: 0, started: Date.now(), drawn, lastReport: Date.now(), detail: null }
+    const now = performance.now()
+    currentBar = { name, total, value: 0, started: now, drawn, lastReport: now, detail: null }
     if (drawn) ensureGauge().show({ section: name, subsection: `0/${total}` }, 0)
 }
 
@@ -589,7 +601,7 @@ export function updateProgress(detail) {
         // documents is 800 lines of noise if this counts the way the bar does.
         // A phase that finishes inside the interval says nothing at all while
         // it runs — its finished line covers it.
-        const now = Date.now()
+        const now = performance.now()
         if (now - currentBar.lastReport >= PROGRESS_INTERVAL_MS && value < total) {
             currentBar.lastReport = now
             emitProgress(currentBar)
@@ -602,7 +614,9 @@ export function stopProgress() {
     if (!currentBar) return
     const logger = useLogger()
     const { name, total, value, started } = currentBar
-    const ms = Date.now() - started
+    // Rounded so the field carries real sub-millisecond precision without
+    // float noise; the message formats it separately.
+    const ms = Math.round((performance.now() - started) * 1000) / 1000
     gauge?.hide()
     // Structured either way, so a machine reading --json's stderr gets the
     // same facts a person reads off the bar.
