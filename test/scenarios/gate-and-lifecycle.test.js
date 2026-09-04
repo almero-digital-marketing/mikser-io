@@ -167,10 +167,14 @@ describe('catalog cache invalidation', () => {
 
         const { code, combined } = await runMikser(workdir)
         assert.equal(code, 0, 'mikser should exit 0 — schema mismatch is recoverable from sources')
-        assert.match(combined, /schema mismatch/i,
+        assert.match(combined, /Cache shape changed/i,
             `expected the warning to surface the mismatch\n${combined}`)
         assert.match(combined, /stored=0\.0\.0-test/,
-            `expected the warning to name the stored version\n${combined}`)
+            `expected the warning to name the stored shape\n${combined}`)
+        // A stamp that is not a fingerprint at all predates the scheme,
+        // and the warning says so rather than guessing which half moved.
+        assert.match(combined, /predates schema fingerprints/i,
+            `expected the warning to name the cause\n${combined}`)
         assert.match(combined, /files are the source of truth/i,
             `expected the warning to explain that no source data is affected\n${combined}`)
     })

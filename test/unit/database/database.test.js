@@ -109,14 +109,16 @@ describe('createSqliteDatabase — schema and lifecycle', () => {
         assert.equal(read(), undefined, 'open alone must not stamp')
 
         assert.equal(db.commitStamp(), true, 'a completed cycle stamps')
-        assert.equal(read().value, '8.2.0')
+        // A fingerprint of the cache's SHAPE, not the release that wrote
+        // it: <derived-shape>:<hash of the registered SQL>.
+        assert.match(read().value, /^\d+:[0-9a-f]{12}$/)
 
         assert.equal(db.commitStamp(), false, 'and there is nothing left to stamp')
         db.close()
         rmSync(runtimeFolder, { recursive: true, force: true })
     })
 
-    it('on schema_version mismatch: wipes the cache and re-stamps the new version', () => {
+    it('on a SCHEMA change: wipes the cache and re-stamps the new shape', () => {
         // ADR-0002: files are the source of truth, the database is a
         // derived cache. Schema mismatch on upgrade/downgrade is
         // recoverable — wipe the cache, re-stamp the new version,
@@ -140,7 +142,10 @@ describe('createSqliteDatabase — schema and lifecycle', () => {
             runtimeFolder,
             version: '9.0.0',
             schemas: new Map([
-                ['sentinel', 'CREATE TABLE IF NOT EXISTS sentinel (id TEXT PRIMARY KEY)'],
+                // The COLUMN is what invalidates it now. The release
+                // number moves too, and on its own would no longer be a
+                // reason to discard anything.
+                ['sentinel', 'CREATE TABLE IF NOT EXISTS sentinel (id TEXT PRIMARY KEY, added TEXT)'],
             ]),
             logger: { warn: (...args) => warnings.push(args), debug: () => {} },
         })
@@ -157,17 +162,76 @@ describe('createSqliteDatabase — schema and lifecycle', () => {
         // start finds no stamp and rebuilds instead of trusting a cache that
         // was only ever emptied.
         const read = () => db2.prepare('SELECT value FROM mikser_meta WHERE key = ?').get('schema_version')
-        assert.equal(read(), undefined, 'the wipe alone must not claim the new version')
+        assert.equal(read(), undefined, 'the wipe alone must not claim the new shape')
         db2.commitStamp()
-        assert.equal(read()?.value, '9.0.0')
+        assert.match(read()?.value, /^\d+:[0-9a-f]{12}$/)
 
         // Warning surfaced.
         assert.equal(warnings.length, 1, 'expected exactly one warning')
         const msg = warnings[0].join(' ')
-        assert.match(msg, /schema mismatch/i)
+        assert.match(msg, /Cache shape changed/i)
         assert.match(msg, /files are the source of truth/i)
 
         db2.close()
+        rmSync(runtimeFolder, { recursive: true, force: true })
+    })
+
+    it('reuses the cache when only the release version moved', () => {
+        // The whole point of the fingerprint. The stamp used to be
+        // packageInfo.version, so every release wiped every deployment cache
+        // and rebuilt from cold: a patch that touched a README discarded the
+        // corpus. Nothing about a cache depends on the release number.
+        const schemas = new Map([['s', 'CREATE TABLE IF NOT EXISTS s (id TEXT PRIMARY KEY)']])
+        const first = createSqliteDatabase({ runtimeFolder, version: '10.2.0', schemas })
+        first.open()
+        first.prepare('INSERT INTO s (id) VALUES (?)').run('kept')
+        first.commitStamp()
+        first.close()
+
+        const second = createSqliteDatabase({ runtimeFolder, version: '10.9.9', schemas })
+        second.open()
+        assert.deepEqual(second.prepare('SELECT id FROM s').all(), [{ id: 'kept' }],
+            'a release bump alone must not wipe the cache')
+        second.close()
+        rmSync(runtimeFolder, { recursive: true, force: true })
+    })
+
+    it('wipes when the registered SQL changes at the SAME release', () => {
+        // The fingerprint is hashed from the scripts that are actually
+        // applied, so it cannot drift from the tables it describes.
+        const before = new Map([['s', 'CREATE TABLE IF NOT EXISTS s (id TEXT PRIMARY KEY)']])
+        const first = createSqliteDatabase({ runtimeFolder, version: '10.2.0', schemas: before })
+        first.open()
+        first.prepare('INSERT INTO s (id) VALUES (?)').run('gone')
+        first.commitStamp()
+        first.close()
+
+        const after = new Map([['s', 'CREATE TABLE IF NOT EXISTS s (id TEXT PRIMARY KEY, extra TEXT)']])
+        const warnings = []
+        const second = createSqliteDatabase({
+            runtimeFolder, version: '10.2.0', schemas: after,
+            logger: { warn: (...a) => warnings.push(a), debug: () => {}, info: () => {} },
+        })
+        second.open()
+        assert.deepEqual(second.prepare('SELECT id FROM s').all(), [],
+            'a column that moved must invalidate the cache')
+        assert.match(warnings.map(a => a.join(' ')).join(String.fromCharCode(10)), /schema tables changed/,
+            'and the warning names which half moved')
+        second.close()
+        rmSync(runtimeFolder, { recursive: true, force: true })
+    })
+
+    it('records which release wrote the cache, without comparing it', () => {
+        const schemas = new Map([['s', 'CREATE TABLE IF NOT EXISTS s (id TEXT PRIMARY KEY)']])
+        const db = createSqliteDatabase({ runtimeFolder, version: '10.2.0', schemas })
+        db.open()
+        db.commitStamp()
+        const read = (key) => db.prepare('SELECT value FROM mikser_meta WHERE key = ?').get(key)?.value
+        assert.equal(read('built_by_version'), '10.2.0',
+            'the first thing a person wants when reading a cache')
+        assert.match(read('schema_version'), /^\d+:[0-9a-f]{12}$/,
+            'and the shape identity says which half would move')
+        db.close()
         rmSync(runtimeFolder, { recursive: true, force: true })
     })
 

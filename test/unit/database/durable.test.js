@@ -126,22 +126,25 @@ describe('a cache wipe cannot reach the durable store', () => {
         await runMigrations(db, quiet)
         await db('t_keep').insert({ id: 'client-42' })
 
-        const open = (version) => {
+        // Keyed on the SCHEMA, because that is what invalidates a cache now.
+        // A release number moving is no longer a reason to discard one, so
+        // driving this with `version` would test nothing.
+        const open = (columns) => {
             const cache = createSqliteDatabase({
-                runtimeFolder: dir, version, config: { filename: 'cache.sqlite' },
-                schemas: new Map([['c', 'CREATE TABLE IF NOT EXISTS cache_rows (id TEXT PRIMARY KEY)']]),
+                runtimeFolder: dir, version: '1.0.0', config: { filename: 'cache.sqlite' },
+                schemas: new Map([['c', `CREATE TABLE IF NOT EXISTS cache_rows (${columns})`]]),
             })
             cache.open()
             return cache
         }
-        let cache = open('1.0.0')
+        let cache = open('id TEXT PRIMARY KEY')
         cache.handle.exec("INSERT INTO cache_rows (id) VALUES ('derived')")
         // A completed cycle, which is what stamps the version this cache was
-        // built for. The unlink below is triggered by that version moving.
+        // built for. The unlink below is triggered by the schema moving.
         cache.commitStamp()
         cache.close()
 
-        cache = open('2.0.0')   // schema mismatch → wipe
+        cache = open('id TEXT PRIMARY KEY, added TEXT')   // schema changed → wipe
         assert.equal(cache.handle.prepare('SELECT count(*) c FROM cache_rows').get().c, 0,
             'the derived cache must still be cleared')
         cache.close()

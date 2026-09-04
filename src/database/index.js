@@ -44,6 +44,7 @@
 
 import path from 'node:path'
 import { mkdirSync, unlinkSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import Database from 'better-sqlite3'
 import runtime from '../runtime.js'
 import { isReportOnlyRun } from '../tools.js'
@@ -232,6 +233,43 @@ export function useDatabase() {
     return db
 }
 
+// What the cache's SHAPE is, as a value that changes only when the cache
+// stops being reusable.
+//
+// It used to be the package version, so every release wiped every
+// deployment's cache and rebuilt from cold — a patch that touched a README
+// discarded 14k entities and re-rendered a site. The version was standing in
+// for "something might have changed", which is true of every release and
+// therefore says nothing.
+//
+// Two things actually invalidate a cache, and both are in here:
+//
+//   the SQL   — a column, index or table that moved. Hashed from the
+//               registered scripts themselves, so it cannot drift from what
+//               is applied: the fingerprint and the schema come from one
+//               string.
+//   the SHAPE — what the rows MEAN, when the SQL is untouched. A change to
+//               how inputHash is computed, to the edge kinds in a
+//               refClosure, to what a destination is relative to. No parser
+//               can see these, so they are a number someone bumps.
+//
+// BUMP DERIVED_SHAPE when a release changes the meaning of anything already
+// stored. Getting that wrong is a silent stale cache, which is the failure
+// this whole subsystem keeps producing — so when in doubt, bump. A needless
+// wipe costs one cold rebuild; a missed one costs a site serving wrong
+// output with every signal green.
+const DERIVED_SHAPE = 1
+
+// `<shape>:<sql-hash>` rather than a bare hash: the stored value is read by
+// a human when a wipe happens, and the two halves say WHICH moved.
+function cacheFingerprint(registered) {
+    const sql = [...registered.entries()]
+        .map(([name, value]) => `${name}\n${schemaEntry(value).sql}`)
+        .sort()
+        .join('\n')
+    return `${DERIVED_SHAPE}:${createHash('sha1').update(sql).digest('hex').slice(0, 12)}`
+}
+
 // Build a sqlite-backed database handle. Exported so tests can exercise
 // the lifecycle and transaction semantics in isolation (without driving
 // the full onLoaded chain). The runtime path uses this internally from
@@ -296,6 +334,11 @@ export function createSqliteDatabase({
 
         const stmtMeta = handle.prepare('SELECT value FROM mikser_meta WHERE key = ?')
         const recorded = stmtMeta.get('schema_version')?.value
+        // The identity of the cache's shape, not of the release that wrote
+        // it. `version` is still carried — into `built_by_version` at stamp
+        // time — because "which mikser built this" is worth knowing when
+        // reading a cache; it is simply not a reason to throw one away.
+        const fingerprint = cacheFingerprint(schemas)
 
         // A config change invalidates the cache for the same reason a version
         // change does: the derived state was computed under different rules.
@@ -327,13 +370,13 @@ export function createSqliteDatabase({
         const reportOnly = isReportOnlyRun()
 
         let upgradedFromVersion = null
-        if (reportOnly && !forceWipe && ((recorded && recorded !== version) || configChanged)) {
+        if (reportOnly && !forceWipe && ((recorded && recorded !== fingerprint) || configChanged)) {
             logger?.warn(
                 'The cache is stale (%s changed since it was written) and this is a read-only run, '
                 + 'so it was NOT wiped — the answer below describes the last build, which may not '
                 + 'match your sources. Run a build to refresh it.',
                 configChanged ? 'config' : 'schema version')
-        } else if (configChanged && !(recorded && recorded !== version)) {
+        } else if (configChanged && !(recorded && recorded !== fingerprint)) {
             logger?.warn(
                 'Config changed since the last run. Wiping the cache and rebuilding from sources '
                 + '(files are the source of truth — no source data is affected). The stamp covers %s and '
@@ -341,7 +384,7 @@ export function createSqliteDatabase({
                 runtime.options.config,
             )
         }
-        if (!reportOnly && (forceWipe || (recorded && recorded !== version) || configChanged)) {
+        if (!reportOnly && (forceWipe || (recorded && recorded !== fingerprint) || configChanged)) {
             // Schema mismatch on upgrade or downgrade. Per ADR-0002 the
             // files on disk are the source of truth and this database
             // is a derived cache, so the right behavior is to wipe the
@@ -352,10 +395,27 @@ export function createSqliteDatabase({
             // expect a cold-start rebuild on this run. No data loss
             // beyond the cache itself; everything in mikser.sqlite is
             // recoverable from the working folder.
-            if (recorded && recorded !== version) {
+            if (recorded && recorded !== fingerprint) {
+                // Names WHICH half moved, because the two mean different
+                // things to whoever is reading. A shape bump is a deliberate
+                // decision someone made in this release; a SQL change is a
+                // table that moved. "stored=10.0.1, current=10.1.0" said
+                // neither, and could not — it only ever meant "a release
+                // happened".
+                const [storedShape, storedSql] = String(recorded).split(':')
+                const [shape, sql] = fingerprint.split(':')
+                const cause = storedSql === undefined
+                    ? 'the cache predates schema fingerprints'
+                    : storedShape !== shape && storedSql !== sql
+                    ? 'the schema tables AND the meaning of what is stored both changed'
+                    : storedShape !== shape
+                    ? 'this release changed the meaning of what is already stored'
+                    : 'the schema tables changed'
                 logger?.warn(
-                    'Database schema mismatch: stored=%s, current=%s. Wiping the cache and rebuilding from sources (files are the source of truth — no source data is affected).',
-                    recorded, version,
+                    'Cache shape changed — %s (stored=%s, current=%s, this is mikser %s). Wiping the cache '
+                    + 'and rebuilding from sources (files are the source of truth — no source data is '
+                    + 'affected). A release that changes neither reuses the cache.',
+                    cause, recorded, fingerprint, version,
                 )
             } else if (forceWipe) {
                 logger?.info('Clearing the cache and rebuilding from sources.')
@@ -365,8 +425,8 @@ export function createSqliteDatabase({
             // the same output whether the version moved, the config moved, or
             // someone passed --clear.
             reportWipe(
-                recorded && recorded !== version ? 'version' : forceWipe ? 'clear' : 'config',
-                recorded && recorded !== version ? { from: recorded, to: version } : {},
+                recorded && recorded !== fingerprint ? 'version' : forceWipe ? 'clear' : 'config',
+                recorded && recorded !== fingerprint ? { from: recorded, to: fingerprint } : {},
             )
 
             // Unlink, rather than dropping table by table.
@@ -412,7 +472,7 @@ export function createSqliteDatabase({
         // no stamp, so the next start sees a mismatch and rebuilds properly.
         // config_checksum goes with it for the same reason — a config change
         // that half-applied must not look applied.
-        pendingStamp = { version, config: currentConfig }
+        pendingStamp = { fingerprint, version, config: currentConfig }
 
         // Build provisioning context. firstRun is true when the file
         // didn't exist before this open OR when the schema mismatch
@@ -528,7 +588,11 @@ export function createSqliteDatabase({
         commitStamp() {
             if (!pendingStamp || !handle) return false
             const stamp = handle.prepare('INSERT OR REPLACE INTO mikser_meta (key, value) VALUES (?, ?)')
-            stamp.run('schema_version', pendingStamp.version)
+            stamp.run('schema_version', pendingStamp.fingerprint)
+            // Which release wrote this cache. Recorded because it is the
+            // first thing a person wants when reading one, and deliberately
+            // NOT compared against anything — that was the bug.
+            stamp.run('built_by_version', pendingStamp.version)
             if (pendingStamp.config) stamp.run('config_checksum', pendingStamp.config)
             pendingStamp = null
             runtime.options.cacheRebuildInterrupted = false

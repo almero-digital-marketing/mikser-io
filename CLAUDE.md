@@ -155,6 +155,21 @@ brevity.
   (PK `(id, destination)`, `refClosure` as JSON, partial index on
   `parent`). `recordedHashes` aggregates dep hashes via
   `json_each` in C rather than parsing every row in JS.
+- **The cache stamp is a SHAPE fingerprint, not a release number.**
+  `mikser_meta.schema_version` holds `<derived-shape>:<hash of the
+  registered schema SQL>`. It was `packageInfo.version`, so every release
+  wiped every deployment's cache — a patch that touched a README discarded
+  the corpus and rebuilt from cold, and the riskiest path in the system ran
+  on every upgrade for no reason. Two things invalidate a cache and both are
+  in the fingerprint: the SQL (hashed from the scripts that are actually
+  applied, so it cannot drift from the tables) and `DERIVED_SHAPE`, a number
+  in `database/index.js` you **bump when a release changes the meaning of
+  anything already stored** — how inputHash is computed, the edge kinds in a
+  refClosure, what a destination is relative to. No parser can see those. A
+  needless wipe costs one cold rebuild; a missed one costs a site serving
+  wrong output with every signal green, so when in doubt bump. The release
+  that wrote a cache is recorded separately as `built_by_version` and
+  compared against nothing.
 - **The cache stamp means a cycle FINISHED.** `mikser_meta.schema_version`
   (and `config_checksum`) are written by `db.commitStamp()` from
   `onFinalized`, never at `db.open()`. Written at open they recorded only
