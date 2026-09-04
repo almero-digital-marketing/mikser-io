@@ -360,24 +360,64 @@ export default {
 
 ### `commands`
 
-```js
-export default {
-  commands: {
-    // Run shell commands at any lifecycle hook
-    load: 'echo Loading...',
-    finalized: ['npm run compress', 'npm run deploy'],
+Runs shell commands at lifecycle hooks. A plugin, so it goes in `plugins` and
+takes its options as factory arguments:
 
-    // Commands can also be async functions
-    processed: async (runtime) => {
-      if (runtime.options.mode === 'production') {
-        return 'npm run optimize'
-      }
-    }
-  }
+```js
+import { commands } from 'mikser-io'
+
+export default {
+  plugins: [
+    commands({
+      load: 'echo Loading...',
+      finalized: ['npm run compress', 'npm run deploy'],
+      // Also an async function, resolved when the hook fires
+      processed: async () => process.env.NODE_ENV === 'production' && 'npm run optimize',
+    }),
+  ],
 }
 ```
 
-Available hook names: `load`, `loaded`, `import`, `imported`, `process`, `processed`, `persist`, `persisted`, `beforeRender`, `render`, `afterRender`, `cancel`, `cancelled`, `finalize`, `finalized`.
+Hook names: `load`, `loaded`, `import`, `imported`, `process`, `processed`,
+`persist`, `persisted`, `beforeRender`, `render`, `afterRender`, `cancel`,
+`cancelled`, `finalize`, `finalized`.
+
+#### From the command line
+
+Every hook is also a flag, so a one-off side effect needs no config edit:
+
+```bash
+mikser --finalized "node deploy/publish.mjs"
+```
+
+The flag runs *in addition to* whatever the config declares for that hook, and
+only for that run. Forwarded to a running `--watch` instance it **replaces**
+the previous request's command rather than adding to it, and the instance's own
+rebuilds run neither — one hook is registered at load and reads a value the
+instance swaps per request. The flags exist only when `commands()` is in the
+config, like every plugin option.
+
+Two things to know, and they are the reason this is a flag rather than a
+convenience:
+
+**It is reported, under `command-from-cli`.** A build is otherwise a function
+of the repository — same commit, same bytes, and `--fingerprint` can prove it.
+A command from argv makes it a function of the repo *and* how it was invoked,
+so an agent, a person and CI can all run "the same build" and get different
+output. The warning carries the hook and the command string into `--json`
+`warnings`, so a fingerprint taken from that build stays interpretable instead
+of quietly meaning something else.
+
+**A command that writes into the output folder fails `--audit-output`.** Not a
+limitation to work around — mikser hashes each file as it writes it, so
+rewriting one afterwards is indistinguishable from tampering, and the audit
+reports it as `Mismatched` and exits 2. Post-build minification through a hook
+is therefore the wrong shape; it belongs in a renderer or a postprocessor,
+where the hash is taken over what is actually deployed. The honest use for
+hooks is side effects that do not touch `out/` — publishing, notifying,
+syncing — which is also the case where a flag beats config, because deploy
+steps are environment-specific and do not belong in a repository's build
+config.
 
 ### `shares`
 
