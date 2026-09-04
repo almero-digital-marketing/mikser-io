@@ -683,6 +683,22 @@ The full version, with what each code means: docs/diagnostics.md`)
         // deliberate: engine's onInitialize does setup that the rest of
         // the engine infrastructure depends on; onInitialized does
         // things plugins may need.
+        // Whether --config was TYPED, for config.js.
+        //
+        // Relative config paths resolve against the working folder, not the
+        // folder the command was run in — that is what makes the default
+        // './mikser.config.js' follow --working-folder, and `-c prod.js`
+        // reads as "the prod config of the site I am pointing at", which is
+        // how it is used. Deliberately unchanged.
+        //
+        // What was missing is what happens when the path is wrong. Nothing
+        // distinguished "this project has no config" from "the config you
+        // named is not there", so a mistyped path printed the path, reported
+        // no plugins, and exited 0 over an empty output folder. config.js
+        // needs to know which case it is in, and only commander can say.
+        runtime.options.configExplicit =
+            runtime.engine?.commander?.getOptionValueSource?.('config') === 'cli'
+
         runtime.options.workingFolder = path.resolve(runtime.options.workingFolder)
         process.chdir(runtime.options.workingFolder)
 

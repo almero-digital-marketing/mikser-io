@@ -103,6 +103,18 @@ onLoad(async () => {
     // during evaluation both exit 1. Module resolution is the only one that
     // needs this to stay in line with them.
     if (!existsSync(configFile)) {
+        // Absent by DEFAULT is a project without a config, which is allowed.
+        // Absent after the caller named it is a typo, and continuing on
+        // defaults answers a question nobody asked: the build prints the path
+        // it did not find, reports "No plugins loaded", writes nothing and
+        // exits 0. That is the same green-build-empty-output failure the
+        // module-resolution note above exists to prevent, reached by the
+        // shorter route of getting the path wrong.
+        if (runtime.options.configExplicit) {
+            throw new Error(`No config file at ${configFile} — it was named with --config, so this is a wrong `
+                + 'path rather than a project without a config. A relative --config resolves against the '
+                + `working folder (${runtime.options.workingFolder}), so it does not repeat it.`)
+        }
         logger.debug('No config file at %s — using defaults', configFile)
     } else {
         // No catch: any failure loading a config that EXISTS is fatal.
