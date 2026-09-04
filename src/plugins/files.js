@@ -4,7 +4,7 @@ import { mkdir, symlink, unlink, lstat, realpath } from 'fs/promises'
 import { globby } from 'globby'
 import pMap from 'p-map'
 import { checksumsByCollection } from '../catalog.js'
-import { sweepDeleted } from '../source.js'
+import { gateChecksum, sweepDeleted } from '../source.js'
 
 export function files(options = {}) {
     return ({
@@ -187,23 +187,32 @@ export function files(options = {}) {
 
             const paths = await globby('**/*', { cwd: runtime.options.filesFolder })
             trackProgress('Files import', paths.length)
-            // Bulk-prefetch the catalog's existing (id → checksum) map for
-            // this collection once at scan start, so the gate below reads
-            // from it per-file instead of doing per-file SQL lookups. Same
-            // pattern source.js uses for documents/layouts via useSource.
-            // Without this gate the plugin re-emitted createEntity on every
-            // cycle for every file regardless of changes, inflating the
-            // journal with phantom mutations and triggering downstream
-            // re-dispatch of aggregate layouts whose recorded query deps
-            // matched the collection.
-            // --force (and a wiped catalog) must defeat this gate, the
-            // same way source.js's gateChecksum lets them defeat its own.
-            // This is a second, independent gate: if it ignores them, no
-            // amount of forcing re-derives a file's name / meta.url /
-            // meta.presets, and a catalog holding bad `files` rows has no
-            // repair path short of deleting them.
-            const forced = runtime.options.force || runtime.catalog?.cacheInvalidated
+            // The SHARED gate, not a copy of it.
+            //
+            // Without a gate the plugin re-emitted createEntity on every cycle
+            // for every file regardless of changes, inflating the journal with
+            // phantom mutations and triggering downstream re-dispatch of
+            // aggregate layouts whose recorded query deps matched the
+            // collection. So it grew one — and then it was a SECOND,
+            // independent implementation of the decision source.js already
+            // owns, which is how it silently missed the missing-output bypass
+            // that was added to the original: an image derivative deleted from
+            // the assets folder was never regenerated, because the file it
+            // derives from was gated here as unchanged and never reached the
+            // assets plugin. Green build, missing image, and only
+            // --audit-output said otherwise.
+            //
+            // Every reason to defeat the gate — --force, a wiped catalog, a
+            // recorded output that is gone — now lives in exactly one place,
+            // so the next one cannot be added to that place and missed here.
+            //
+            // priorChecksums is still bulk-prefetched per scan so the gate
+            // reads a map instead of doing per-file SQL, and missingOutputs
+            // alongside it for the same reason; the manifest memoizes the
+            // latter for the cycle, so this shares the walk with useSource's
+            // own scans rather than paying for a second one.
             const priorChecksums = checksumsByCollection(collection)
+            const missingOutputs = runtime.manifest?.missingOutputIds() ?? new Set()
             const scanned = new Set()
             await pMap(paths, async relativePath => {
                 const { source } = await ensureLink(relativePath)
@@ -217,15 +226,13 @@ export function files(options = {}) {
                 // to re-emit; the sweep asks what still EXISTS, and a file
                 // skipped for being unchanged very much exists.
                 scanned.add(id)
-                const newChecksum = await checksum(source)
+                // Returns the checksum to stamp on the entity, or null when
+                // the catalog already has this file unchanged and there is
+                // nothing to emit. Progress ticks either way — a gated file
+                // was still looked at.
+                const newChecksum = await gateChecksum(source, id, { priorChecksums, missingOutputs })
                 updateProgress()
-                // Gate: if the catalog already has this entity with the same
-                // checksum, the file hasn't changed since the last cycle.
-                // Skip emitting a CREATE — the catalog row stays correct,
-                // the journal stays accurate (mutations = actual changes),
-                // and downstream aggregate-layout invalidation isn't fired
-                // spuriously.
-                if (!forced && priorChecksums.get(id) === newChecksum) return
+                if (newChecksum === null) return
                 await createEntity({
                     id,
                     uri,

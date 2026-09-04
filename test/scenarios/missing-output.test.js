@@ -170,12 +170,24 @@ describe('a forwarded build re-renders a missing output', () => {
             '--watch', '--server', '3772',
         ], { stdio: ['ignore', 'pipe', 'pipe'] })
         const endpoint = socketPath(workdir)
+        let listening = false
         for (let i = 0; i < 200; i++) {
-            if (existsSync(endpoint)) return
+            if (existsSync(endpoint)) { listening = true; break }
             await new Promise(r => setTimeout(r, 100))
         }
-        instance.kill()
-        throw new Error('instance never opened its socket')
+        if (!listening) {
+            instance.kill()
+            throw new Error('instance never opened its socket')
+        }
+        // The socket says it is LISTENING, not that it is idle: a watcher
+        // builds once on startup, and deleting the output folder while that
+        // build is still writing raced it — the test failed about one run in
+        // three under a full-suite load and never on its own.
+        //
+        // One forwarded no-op settles it. The instance serves requests in
+        // order, so an answer to this one means the startup build is behind
+        // us, which is the state the test is actually written against.
+        await runMikser(workdir)
     })
     after(async () => { instance?.kill(); await cleanup(workdir) })
 

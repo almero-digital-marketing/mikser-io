@@ -348,6 +348,17 @@ export function assets(options = {}) {
     }
 
     async function isPresetRendered(entity) {
+        // The marker says a render HAPPENED. It does not say the file it
+        // produced is still there, and the two come apart the moment anyone
+        // deletes a derivative — which is the obvious thing to do when you
+        // want one rebuilt. The marker survives, this returned true, and the
+        // image never came back on any number of ordinary builds; only
+        // --force or a config change brought it round, and --audit-output was
+        // the only thing that ever said a file was missing.
+        //
+        // Checked first and cheaply: one stat, and if the derivative is gone
+        // no amount of marker archaeology changes the answer.
+        if (!existsSync(entity.destination)) return false
         let result = false
         let revisions = []
         const assetChecksum = `${entity.destination}.${entity.preset.checksum}.md5`
