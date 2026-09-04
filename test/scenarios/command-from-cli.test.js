@@ -220,3 +220,87 @@ describe('a forwarded command replaces rather than accumulates', () => {
             'the previous request must not leak into this one')
     })
 })
+
+// --command spends itself on one request. --command-install puts it ON the
+// instance, so the watcher's OWN rebuilds run it too — the case --command
+// cannot serve, because a file save triggers a cycle nobody forwarded.
+describe('a command installed on the instance', () => {
+    const workdir = freshWorkdir('command-install')
+    let instance
+
+    before(async () => {
+        await setupFixture(workdir, FIXTURE)
+        await runMikser(workdir)
+        instance = spawn(process.execPath, [
+            path.join(MIKSER_ROOT, 'app.js'), '--working-folder', workdir,
+            '--watch', '--server', '3774',
+        ], { stdio: ['ignore', 'pipe', 'pipe'] })
+        const endpoint = socketPath(workdir)
+        let listening = false
+        for (let i = 0; i < 200; i++) {
+            if (existsSync(endpoint)) { listening = true; break }
+            await new Promise(r => setTimeout(r, 100))
+        }
+        if (!listening) { instance.kill(); throw new Error('instance never opened its socket') }
+        await runMikser(workdir)
+        await writeFile(path.join(workdir, 'marks.txt'), '')
+    })
+    after(async () => { instance?.kill(); await cleanup(workdir) })
+
+    // A file save, and time for the watcher to see it and finish a cycle.
+    const edit = async (title) => {
+        await writeFile(path.join(workdir, 'documents/index.md'),
+            `---\ntitle: ${title}\nlayout: page\n---\n`)
+        await new Promise(r => setTimeout(r, 4000))
+    }
+
+    it('runs on the instance own rebuilds, not just forwarded ones', async () => {
+        await runMikser(workdir, ['--command-install', 'finalized=node mark.mjs P'])
+        assert.deepEqual(await marks(workdir), ['P'], 'the installing request runs it too')
+
+        await edit('One')
+        assert.deepEqual(await marks(workdir), ['P', 'P'],
+            'a file save the watcher picked up must run it — the whole point')
+
+        await edit('Two')
+        assert.deepEqual(await marks(workdir), ['P', 'P', 'P'], 'and it stays installed')
+    })
+
+    it('is cleared by --command-reset', async () => {
+        await runMikser(workdir, ['--command-reset'])
+        const before = await marks(workdir)
+        await edit('Three')
+        assert.deepEqual(await marks(workdir), before, 'nothing runs after a reset')
+    })
+
+    it('clears one hook when named, leaving the others', async () => {
+        await runMikser(workdir, [
+            '--command-install', 'processed=node mark.mjs EARLY',
+            '--command-install', 'finalized=node mark.mjs LATE',
+        ])
+        await writeFile(path.join(workdir, 'marks.txt'), '')
+
+        await runMikser(workdir, ['--command-reset', 'processed'])
+        await writeFile(path.join(workdir, 'marks.txt'), '')
+        await edit('Four')
+        assert.deepEqual(await marks(workdir), ['LATE'],
+            'only the named hook was cleared')
+
+        await runMikser(workdir, ['--command-reset'])
+    })
+
+    it('says so when there is no instance to install on', async () => {
+        // A one-shot exits with the process, so installing is the same as
+        // --command. Saying nothing would let someone believe it persisted.
+        const solo = freshWorkdir('command-install-solo')
+        try {
+            await setupFixture(solo, FIXTURE)
+            const { code, combined } = await runMikser(solo, ['--command-install', 'finalized=node mark.mjs S'])
+            assert.equal(code, 0, combined)
+            assert.match(stripAnsi(combined), /command-install-without-instance/)
+            assert.deepEqual(await marks(solo), ['S'], 'and it still ran, once')
+        } finally {
+            await cleanup(solo)
+        }
+    })
+})

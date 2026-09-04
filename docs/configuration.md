@@ -403,6 +403,38 @@ per request. The flag exists only when `commands()` is in the config, like
 every plugin option, and an unknown hook name is refused before anything is
 built.
 
+#### Installing on a running instance
+
+`--command` spends itself on one build. A watcher's **own** rebuilds — the
+ones a file save triggers, which is the point of watching — run nothing, so a
+probe fires only when you forward a build by hand. `--command-install` puts it
+on the instance instead:
+
+```bash
+mikser --command-install finalized="node probe.mjs"   # installs, and runs now
+# ...edit a file, the watcher rebuilds  → probe runs
+# ...edit again                         → probe runs
+mikser --command-reset                                # clears all of them
+mikser --command-reset finalized                      # or just one hook
+```
+
+Installed commands are announced on **every** cycle, not once — you may have
+set one an hour ago, and each build's report has to carry the fact that it was
+not a function of the repository alone. Per-request commands are announced
+once per process, because they are in the invocation you just typed.
+
+On a one-shot build there is no instance to install on, so `--command-install`
+runs once and exits with the process exactly like `--command` — reported under
+`command-install-without-instance` rather than left to look persistent.
+
+To see what is attached, read the last build: every installed command is
+announced on **every** cycle under `command-from-cli`, so the log or the
+`--json` report names each one. There is deliberately no `--tool commands` —
+the tool registry is mirrored into MCP over HTTP with an allow-all default,
+and a command string routinely carries a path, a host or a token. Listing
+them there would hand an authenticated web client a map of the build box, and
+tools have no per-tool scope to gate it with.
+
 Two hooks behave differently from the rest, and both say so rather than
 failing quietly:
 

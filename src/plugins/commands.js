@@ -86,15 +86,97 @@ export function commands(options = {}) {
         // collector is remembered by cliOption and replayed when an instance
         // re-parses a forwarded client's argv, so the forwarded path sees the
         // same array the local one does.
+        const collect = (value, previous = []) => [...previous, parseHookCommand(value)]
         cliOption('--command <hook=command>',
-            'run a command at a lifecycle hook for this run only, e.g. '
+            'run a command at a lifecycle hook for THIS run only, e.g. '
             + '--command finalized="node deploy/publish.mjs". Repeatable. '
             + `Hooks: ${[...HOOKS].join(', ')}`,
-            (value, previous = []) => [...previous, parseHookCommand(value)], [])
+            collect, [])
+        // Installed on the instance rather than spent on one request.
+        //
+        // --command alone cannot serve the case it was asked for. A watcher's
+        // OWN rebuilds — the ones a file save triggers, which is the whole
+        // point of watching — run nothing, so a probe fires only when a build
+        // is forwarded by hand. Installing puts it on the instance, where
+        // every cycle sees it until it is cleared.
+        cliOption('--command-install <hook=command>',
+            'install a command on the running instance, so its own rebuilds run it too. '
+            + 'Repeatable. Cleared with --command-reset.',
+            collect, [])
+        cliOption('--command-reset [hook]',
+            'clear commands installed with --command-install: all of them, or one hook\'s.')
 
         // Said once per hook per process, not once per cycle: a watcher would
         // otherwise repeat it on every rebuild.
         const announced = new Set()
+
+        // Commands installed on THIS process by a forwarded --command-install.
+        //
+        // Lives in the plugin's closure rather than runtime.options because
+        // options are swapped per request and restored after — which is
+        // exactly right for --command and exactly wrong for something whose
+        // point is to outlive the request that set it.
+        const installed = new Map()
+
+        // Applied at the top of every hook: idempotent, so it does not matter
+        // which hook of the cycle sees the request first, and by the next
+        // cycle the request's options are gone while `installed` remains.
+        function applyInstallRequest() {
+            const reset = runtime.options?.commandReset
+            if (reset !== undefined && reset !== false) {
+                const cleared = reset === true
+                    ? [...installed.keys()]
+                    : installed.has(reset) ? [reset] : []
+                if (reset === true) installed.clear()
+                else installed.delete(reset)
+                if (cleared.length) {
+                    useLogger()?.info('Cleared installed command(s) at %s', cleared.join(', '))
+                }
+            }
+            const requested = runtime.options?.commandInstall
+            if (!Array.isArray(requested) || !requested.length) return
+            // An instance is what there is to install ON. A one-shot exits
+            // with the process, so installing is the same as --command and
+            // saying nothing would let someone believe it persisted.
+            if (!runtime.options?.watch && !runtime.options?.server) {
+                if (!announced.has('no-instance')) {
+                    announced.add('no-instance')
+                    useLogger()?.warn({ code: 'command-install-without-instance' },
+                        'Nothing to install on — this is a one-shot build, not a watcher, so '
+                        + '--command-install ran once and exits with the process, exactly like --command.')
+                }
+            }
+            for (const { hook, command } of requested) {
+                const list = installed.get(hook) ?? []
+                if (!list.includes(command)) installed.set(hook, [...list, command])
+            }
+        }
+
+        // NOT registered as a tool, deliberately.
+        //
+        // Listing what is attached is worth having, and `--tool commands` was
+        // the obvious shape — the registry forwards report-only runs to the
+        // instance, so it would answer from the process that holds the state.
+        // But the registry is mirrored into MCP over HTTP, its endpoint filter
+        // defaults to allow-all, and a command string routinely carries a
+        // path, a host or a token. That turns "list the hooks" into handing an
+        // authenticated web client a map of the build box.
+        //
+        // There is no per-tool scope to lean on: routes declare reachability
+        // (public / token / loopback), tools declare only `mutates`. A
+        // `scope: 'admin'` key here would be decorative — nothing enforces it
+        // — and a decorative guard is worse than none, because it reads like
+        // one.
+        //
+        // Installing is not the exposure: it needs the unix socket, which is
+        // chmod 0600, so anyone who can reach it already runs as this user and
+        // could run the command directly. Reading over HTTP is a different
+        // boundary, which is why this half is the half that had to go.
+        //
+        // What answers the question meanwhile: every installed command is
+        // announced on every cycle under `command-from-cli`, so the last
+        // build's log or its --json report names each one. A standalone
+        // listing wants per-tool scoping in the registry first.
 
         // Which requested hooks actually fired this cycle.
         //
@@ -140,10 +222,17 @@ export function commands(options = {}) {
             // reads whatever THIS request asked for. Registering a hook per
             // request would have made two clients' commands add up; there is
             // one hook, registered once, reading a value that changes.
+            applyInstallRequest()
+
             const requested = runtime.options?.command
-            const fromCli = (Array.isArray(requested) ? requested : [])
+            const perRequest = (Array.isArray(requested) ? requested : [])
                 .filter(entry => entry?.hook === hook)
                 .map(entry => entry.command)
+            // Installed ones outlive the request that set them, so they run
+            // for the instance's OWN rebuilds too — which is the case
+            // --command alone cannot serve.
+            const fromInstalled = installed.get(hook) ?? []
+            const fromCli = [...perRequest, ...fromInstalled]
             for (const command of fromCli) {
                 // Under a code, in the report, with the command.
                 //
@@ -155,8 +244,13 @@ export function commands(options = {}) {
                 // warnings are a view of logger.warn in the report, so a
                 // fingerprint taken from this build stays interpretable
                 // instead of quietly meaning something else.
+                // A per-request command is announced once per process: it is
+                // in the invocation you just typed. An INSTALLED one is
+                // announced every cycle, because you may have set it an hour
+                // ago and each build's report has to carry the fact that this
+                // build was not a function of the repository alone.
                 const key = `${hook}:${command}`
-                if (!announced.has(key)) {
+                if (fromInstalled.includes(command) || !announced.has(key)) {
                     announced.add(key)
                     useLogger()?.warn({ code: 'command-from-cli', hook, command },
                         'Running a command from the command line at the %s hook: %s. This build is a '
