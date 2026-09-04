@@ -1575,10 +1575,34 @@ The full version, with what each code means: docs/diagnostics.md`)
     // undefined here. The logger has no such problem — it writes during the
     // run, by which time options exist.
     const quietStdout = ['--json', '--tool', '--tools'].some(flag => process.argv.includes(flag))
+    // Through the logger when nobody is watching, so it gets a timestamp.
+    //
+    // This line marks a process start, which in a supervisor's log is the
+    // most useful thing on the page — it is how a restart is found at all.
+    // Written straight to the stream it was undated and, worse, carried its
+    // own hardcoded escapes into a file that no terminal would ever render.
+    //
+    // The decorated form stays for a terminal, where it is a banner rather
+    // than a record.
     if (runtime.options?.json || quietStdout) {
+        // Written straight to stderr, NOT through the logger: the logger picks
+        // its sink per-write from runtime.options.json, which commander has
+        // not parsed yet — the same reason quietStdout reads argv above. A
+        // banner routed through it here lands on stdout and turns the
+        // document into a parse error, which is the failure this branch was
+        // added to prevent in the first place.
         process.stderr.write(`mikser. ${packageInfo.version}\n`)
-    } else {
+    } else if (process.stdout.isTTY && !process.env.NO_COLOR) {
         console.info('\x1b[1mmikser\x1b[22;5;38;2;255;63;0m.\x1b[0m %s\n', packageInfo.version)
+    } else {
+        // Redirected: through the logger, so the line that marks a process
+        // start carries a timestamp. In a supervisor's log that is the most
+        // useful line on the page — it is how a restart is found at all — and
+        // written straight to the stream it was undated and carried its own
+        // escapes into a file no terminal will render.
+        const logger = useLogger()
+        if (logger) logger.info('mikser. %s', packageInfo.version)
+        else process.stdout.write(`mikser. ${packageInfo.version}\n`)
     }
     return runtime
 }

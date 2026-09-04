@@ -154,16 +154,44 @@ function createTerminalStream() {
 // trace} resolves to, defaulting to 'info'.
 export function createMikserLogger(level = 'info') {
     const terminalStream = createTerminalStream()
+
+    // A terminal is watched as it happens. A file is read afterwards.
+    //
+    // The minimal format below is right for the first and wrong for the
+    // second, and until now it was used for both — so a supervisor's log was
+    // a wall of undated lines wearing ANSI escapes. Reconstructing an
+    // incident from one meant ordering events by file mtimes and git commit
+    // dates because the build's own log could not say when anything happened,
+    // and every excerpt had to be piped through sed to be readable.
+    //
+    // Decided from the stream these lines actually land on, which is stderr
+    // under --json / --tool (stdout carries the document there). The logger is
+    // rebuilt at onLoad, by which point those options are parsed, so the
+    // second construction gets it right even if the first cannot.
+    //
+    // Same signal the progress bar already uses — a gauge is pointless in a
+    // file for the same reason a timestamp is pointless on a terminal.
+    const target = (runtime.options?.json || runtime.options?.tool || runtime.options?.tools)
+        ? process.stderr : process.stdout
+    const attended = Boolean(target.isTTY)
+
     const prettyStream = pretty({
         destination:   terminalStream,
-        colorize:      true,
-        // apt-like minimal format: hide timestamp / pid / hostname, and
-        // suppress the level prefix entirely via a customPrettifier
-        // that returns an empty string. The icon prepended by
-        // messageFormat (🟡 / 🔴 / 🟢 / …) is what signals level. The
-        // raw pino record still carries `level`, so third-party
-        // transports get full structured data.
-        ignore:        'pid,hostname,time',
+        // NO_COLOR is honoured on a terminal too; nobody wants escapes in a
+        // file regardless.
+        colorize:      attended && !process.env.NO_COLOR,
+        // `SYS:standard` carries the date, milliseconds AND the UTC offset.
+        // The offset is not decoration: the incident that prompted this
+        // needed a container's clock lined up against commit dates in
+        // another zone, and a bare wall-clock time cannot answer that.
+        ...(attended ? {} : { translateTime: 'SYS:standard' }),
+        // apt-like minimal format: hide pid / hostname, and suppress the
+        // level prefix entirely via a customPrettifier that returns an empty
+        // string. The icon prepended by messageFormat (🟡 / 🔴 / 🟢 / …) is
+        // what signals level. The raw pino record still carries `level`, so
+        // third-party transports get full structured data. `time` is dropped
+        // only when someone is watching.
+        ignore:        attended ? 'pid,hostname,time' : 'pid,hostname',
         // The terminal gets the SENTENCE; the structured fields go to the
         // report and to transports.
         //
