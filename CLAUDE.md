@@ -308,10 +308,22 @@ brevity.
   its source and forces it past the reuse check (`preset-unfinished`) —
   without this the removal in (1) is inert, since nothing consults a marker
   for an entity the journal never mentioned, which is exactly the state a
-  SIGKILL or the OOM killer leaves. The scan is behind an emptiness check
-  over the marker index the cycle already builds, so a healthy build still
-  does not walk the catalog — that cost is why this recovery was once left to
-  `--render-presets`. Not fixable from here: a preset that wraps a tool and
+  SIGKILL or the OOM killer leaves. **That scan asks the MANIFEST which
+  outputs exist, never the folder what is in it.** Only the destination the
+  engine hands a preset gets a marker, so a preset that legitimately writes
+  more than one file — a poster frame beside a video — made a folder walk
+  report a permanent failure that never happened: `preset-unfinished` on
+  every build for ever, announcing a re-derive that could not occur because
+  no entity's destination matched the extra file. A warning that fires on
+  every healthy build is worse than the silence it replaced. A file nothing
+  claims is an ORPHAN, a different fault with its own report. Snapshots also
+  make the recovery possible at all: one carries the entity id, so there is
+  nothing to reverse-map and no catalog to walk. Three states the scan must
+  tell apart, each of which survived a mutation until it was written down:
+  a rendered PAGE (no marker, not under a preset root), a derivative that is
+  GONE (the engine's missing-output path owns it), and a derivative whose
+  SOURCE is gone (nothing to schedule, so nothing may claim a recovery — the
+  warning is raised from what was scheduled, never from what looked suspect). Not fixable from here: a preset that wraps a tool and
   does not check its exit code RESOLVES, so the manifest snapshots the
   truncated bytes and `--audit-output` reads green. A preset that reports
   success is believed.

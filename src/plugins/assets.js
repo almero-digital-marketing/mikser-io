@@ -418,11 +418,12 @@ export function assets(options = {}) {
     }
 
     async function forgetPresetMarkers(entity) {
-        for (const marker of markersByDestination.get(entity.destination) ?? []) {
+        const destination = path.resolve(entity.destination)
+        for (const marker of markersByDestination.get(destination) ?? []) {
             await rm(marker, { force: true })
             checksumMap.delete(marker)
         }
-        markersByDestination.delete(entity.destination)
+        markersByDestination.delete(destination)
     }
 
     async function renderPresets(entities, { rendererChanged = new Set() } = {}) {
@@ -702,27 +703,22 @@ export function assets(options = {}) {
 
         checksumMap.clear()
         markersByDestination.clear()
-        // Scoped to the preset folders rather than the whole assets tree: the
-        // assets folder also carries what the files plugin symlinks into it,
-        // and those have no markers and never will. Unscoped, every one of
-        // them would read as an interrupted render on every cycle.
-        const presetFolders = Object.keys(runtime.state.assets.presets).map(name => `${name}/**/*`)
-        const files = presetFolders.length
-            ? await globby(presetFolders, { cwd: runtime.options.assetsFolder, onlyFiles: true })
-            : []
-        const derivatives = new Set()
-        for (let file of files) {
-            const absolute = path.join(runtime.options.assetsFolder, file)
-            if (!file.endsWith('.md5')) {
-                derivatives.add(absolute)
-                continue
-            }
-            checksumMap.add(absolute)
+        const checksumFiles = await globby('**/*.md5', { cwd: runtime.options.assetsFolder })
+        for (let checksumFile of checksumFiles) {
+            const marker = path.join(runtime.options.assetsFolder, checksumFile)
+            checksumMap.add(marker)
             // `<destination>.<revision>.md5` — the same shape the orphan
             // sweep strips to get back to the derivative.
-            const destination = absolute.replace(/\.[^.]+\.md5$/, '')
+            //
+            // Resolved on both sides of the comparison, because the other
+            // side is a manifest destination and these two are built by
+            // different subsystems. It is a no-op while assetsFolder is
+            // derived from workingFolder (see onLoaded), which is why no test
+            // can tell it apart — normalization at the boundary, not a
+            // transform anything depends on.
+            const destination = path.resolve(marker.replace(/\.[^.]+\.md5$/, ''))
             if (!markersByDestination.has(destination)) markersByDestination.set(destination, [])
-            markersByDestination.get(destination).push(absolute)
+            markersByDestination.get(destination).push(marker)
         }
 
         const entitiesToRender = new Map()
@@ -745,28 +741,63 @@ export function assets(options = {}) {
         // Empty on any healthy build, and the catalog walk is behind that
         // emptiness: this costs one Set lookup per cycle until something has
         // actually gone wrong.
-        const unmarked = new Set()
-        for (const derivative of derivatives) {
-            if (!markersByDestination.has(derivative)) unmarked.add(derivative)
+        // Asked of the MANIFEST, not of the folder.
+        //
+        // The first version walked every file under each preset folder and
+        // called anything without a marker an interrupted render. But only
+        // the destination the engine hands the preset gets a marker, so a
+        // preset that legitimately writes MORE than one file — a poster frame
+        // beside a video — left permanent evidence of a failure that never
+        // happened. It warned on every build for ever, said the derivative
+        // was "being re-derived", and re-derived nothing, because no entity's
+        // destination ever matched the extra file. A warning that cries wolf
+        // on every build is worse than the silence it replaced, and it
+        // teaches people to ignore the one that matters.
+        //
+        // A file nothing claims is an ORPHAN, which is a different fault with
+        // its own report. This asks only about outputs the manifest recorded,
+        // which is also what makes the recovery possible: a snapshot carries
+        // the entity id, so there is nothing to reverse-map and no catalog to
+        // walk.
+        const presetRoots = Object.keys(presets)
+            .map(name => path.resolve(runtime.options.assetsFolder, name) + path.sep)
+        const unfinished = new Map()
+        for (const snapshot of runtime.manifest?.all?.() ?? []) {
+            if (!snapshot.destination) continue
+            const destination = path.resolve(snapshot.destination)
+            if (!presetRoots.some(root => destination.startsWith(root))) continue
+            if (markersByDestination.has(destination)) continue
+            // Gone entirely is a different fault, and the engine's
+            // missing-output path already has it. Reporting it here as well
+            // would name the wrong cause.
+            if (outputMissing(snapshot.destination)) continue
+            unfinished.set(snapshot.id, destination)
         }
-        if (unmarked.size) {
-            for await (const candidate of iterateEntities({ collection: { $ne: collection } })) {
-                const candidatePresets = await getEntityPresets(candidate)
-                const damaged = candidatePresets.filter(name => presets[name]
-                    && unmarked.has(presetDestination(candidate, presets[name])))
-                if (!damaged.length) continue
-                assetsMap[candidate.id] ??= candidatePresets
+        if (unfinished.size) {
+            const damaged = []
+            for (const [id, destination] of unfinished) {
+                const entity = await findEntity({ id })
+                // Source gone: the orphan sweep removes the derivative at
+                // finalize. Nothing to re-derive and nothing to say.
+                if (!entity) continue
+                assetsMap[entity.id] ??= await getEntityPresets(entity)
                 // Forced past the reuse check as well as scheduled: the file
                 // on disk is exactly what must not be trusted, and
-                // isPresetRendered has no way to tell half-written bytes from
+                // isPresetRendered cannot tell half-written bytes from
                 // finished ones.
-                presetMoved.add(candidate.id)
-                entitiesToRender.set(candidate.id, candidate)
+                presetMoved.add(entity.id)
+                entitiesToRender.set(entity.id, entity)
+                damaged.push(destination)
             }
-            useLogger().warn({ code: 'preset-unfinished', derivatives: [...unmarked], sources: entitiesToRender.size },
-                'Assets: %d derivative(s) have no completed-render marker and are being re-derived. '
-                + 'A preset render did not finish — the file left behind is not trustworthy.',
-                unmarked.size)
+            // Only when something is actually being re-derived. The warning
+            // claimed the action rather than reporting it, so a build that
+            // scheduled nothing still announced a recovery.
+            if (damaged.length) {
+                useLogger().warn({ code: 'preset-unfinished', derivatives: damaged },
+                    'Assets: %d derivative(s) have no completed-render marker and are being re-derived. '
+                    + 'A preset render did not finish — the file left behind is not trustworthy.',
+                    damaged.length)
+            }
         }
 
         // --render-presets [name]: re-derive though nothing moved.

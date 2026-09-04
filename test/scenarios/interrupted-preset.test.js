@@ -162,3 +162,164 @@ describe('a preset render that did not finish', () => {
             'and it is the previous good one, not a partial replacement')
     })
 })
+
+// The recovery must not cry wolf.
+//
+// The first version of the unmarked-derivative scan walked every file under
+// each preset folder and called anything without a marker an interrupted
+// render. Only the destination the engine hands the preset gets a marker, so
+// a preset that legitimately writes MORE than one file left permanent
+// evidence of a failure that never happened: `preset-unfinished` on every
+// build, for ever, announcing a re-derive that never occurred because no
+// entity's destination ever matched the extra file.
+//
+// That is worse than the silence it replaced. A warning that fires on every
+// healthy build is one people learn to scroll past, including the time it is
+// real. The detection now asks the MANIFEST which outputs exist rather than
+// asking the folder what is in it — a file nothing claims is an orphan, which
+// is a different fault.
+describe('a preset that writes more than one file', () => {
+    const workdir = freshWorkdir('preset-extra-outputs')
+    after(() => cleanup(workdir))
+
+    // A poster frame beside the video: the ordinary shape for a video preset.
+    const MULTI = `
+import { mkdir, writeFile, readFile } from 'node:fs/promises'
+import path from 'node:path'
+export const revision = 1
+export default async function web({ entity }) {
+    await mkdir(path.dirname(entity.destination), { recursive: true })
+    await writeFile(entity.destination, await readFile(entity.source ?? entity.uri))
+    await writeFile(entity.destination.replace(/\\.[^.]+$/, '.poster.jpg'), 'poster')
+}
+`
+    const derivative = () => path.join(workdir, 'assets', 'web', 'media', 'clip.bin')
+
+    before(async () => {
+        await setupFixture(workdir, { 'mikser.config.js': CONFIG, 'presets/web.js': MULTI })
+        await mkdir(path.join(workdir, 'files/media'), { recursive: true })
+        await writeFile(path.join(workdir, 'files/media/clip.bin'), Buffer.alloc(SIZE, 7))
+        const { code, combined } = await runMikser(workdir)
+        assert.equal(code, 0, combined)
+        assert.ok(existsSync(path.join(workdir, 'assets/web/media/clip.poster.jpg')),
+            'precondition: the preset really does write a second file')
+    })
+
+    it('is not reported as unfinished, on any build', async () => {
+        for (const run of [1, 2, 3]) {
+            const { code, combined } = await runMikser(workdir)
+            assert.equal(code, 0, combined)
+            assert.doesNotMatch(stripAnsi(combined), /preset-unfinished/,
+                `run ${run} accused a healthy multi-output preset of an interrupted render`)
+        }
+    })
+
+    it('is not reported for unrelated debris beside a derivative either', async () => {
+        // A preset doing its own temp-and-rename leaves these behind when it
+        // is killed. They are not derivatives and nothing claims them.
+        await writeFile(path.join(workdir, 'assets/web/media/clip.bin.tmp-1234.part'), 'x')
+        const { combined } = await runMikser(workdir)
+        assert.doesNotMatch(stripAnsi(combined), /preset-unfinished/, stripAnsi(combined))
+    })
+
+    it('never announces a re-derive it did not perform', async () => {
+        // The second half of the defect: the warning was raised from the
+        // count of suspect FILES, before anything had been scheduled, so a
+        // build that re-derived nothing still said it was re-deriving.
+        const { combined } = await runMikser(workdir)
+        const log = stripAnsi(combined)
+        if (/being re-derived/.test(log)) {
+            assert.match(log, /Rendered:\s*[1-9]/,
+                `claimed a re-derive with nothing rendered:\n${log}`)
+        }
+    })
+
+    it('still catches a genuine interruption, with the extra files present', async () => {
+        // The guard against fixing the false positive by deleting the
+        // feature: the same tree that must stay quiet above has to report
+        // this.
+        const marker = (await globby('**/*.md5', { cwd: path.join(workdir, 'assets') }))[0]
+        await rm(path.join(workdir, 'assets', marker))
+        await writeFile(derivative(), Buffer.alloc(SIZE / 2, 7))
+
+        const { code, combined } = await runMikser(workdir)
+        assert.equal(code, 0, combined)
+        assert.match(stripAnsi(combined), /preset-unfinished|did not finish/,
+            'a truncated derivative must still be caught')
+        assert.equal((await stat(derivative())).size, SIZE, 'and re-derived whole')
+    })
+})
+
+// The three states the detection has to tell apart, each of which survived a
+// mutation of the code until it was written down here.
+describe('what the unfinished scan must NOT claim', () => {
+    const workdir = freshWorkdir('preset-scan-limits')
+    after(() => cleanup(workdir))
+
+    // Documents and layouts as well as assets, so the manifest carries PAGE
+    // snapshots beside the derivative ones. Those have no markers and never
+    // will; without the preset-root filter every page on a site reads as an
+    // interrupted render.
+    const FULL = `
+import { documents, files, assets, frontMatter, renderHbs } from 'mikser-io'
+import { layouts } from 'mikser-io-layouts'
+export default {
+    plugins: [documents(), files(), frontMatter(), layouts({ autoLayouts: true }),
+        assets({ presets: { web: { match: ['/files/media/**'] } } }), renderHbs()],
+}
+`
+    const derivative = () => path.join(workdir, 'assets', 'web', 'media', 'clip.bin')
+    const markers = () => globby('**/*.md5', { cwd: path.join(workdir, 'assets') })
+
+    before(async () => {
+        await setupFixture(workdir, {
+            'mikser.config.js': FULL,
+            'presets/web.js': PRESET,
+            'layouts/page.hbs': '<!doctype html><title>{{document.meta.title}}</title>',
+            'documents/index.md': '---\ntitle: One\nlayout: page\n---\n',
+            'documents/two.md': '---\ntitle: Two\nlayout: page\n---\n',
+        })
+        await mkdir(path.join(workdir, 'files/media'), { recursive: true })
+        await writeFile(path.join(workdir, 'files/media/clip.bin'), Buffer.alloc(SIZE, 7))
+        const { code, combined } = await runMikser(workdir)
+        assert.equal(code, 0, combined)
+        assert.ok(existsSync(path.join(workdir, 'out/index.html')),
+            'precondition: pages are rendered, so the manifest holds page snapshots too')
+    })
+
+    it('does not read a rendered PAGE as an unfinished derivative', async () => {
+        // Pages are in the same manifest and carry no markers. Only outputs
+        // under a configured preset folder are this scan's business.
+        const { combined } = await runMikser(workdir)
+        assert.doesNotMatch(stripAnsi(combined), /preset-unfinished/, stripAnsi(combined))
+    })
+
+    it('says nothing when the derivative is GONE rather than half-written', async () => {
+        // A different fault with an existing owner: the engine's
+        // missing-output path re-renders it. Reporting it here as well would
+        // name the wrong cause for the same recovery.
+        await rm(derivative())
+        for (const marker of await markers()) await rm(path.join(workdir, 'assets', marker))
+
+        const { code, combined } = await runMikser(workdir)
+        assert.equal(code, 0, combined)
+        assert.doesNotMatch(stripAnsi(combined), /preset-unfinished/,
+            `a missing derivative is not an unfinished one:\n${stripAnsi(combined)}`)
+        assert.equal((await stat(derivative())).size, SIZE, 'and it still comes back')
+    })
+
+    it('stays silent when the source is gone, having nothing to re-derive', async () => {
+        // Snapshot present, derivative present, marker absent — but the
+        // entity no longer exists, so nothing can be scheduled. The warning
+        // was raised from the count of suspect FILES, before anything had
+        // been scheduled, so this state announced a recovery that could not
+        // happen. The orphan sweep is what removes the derivative.
+        for (const marker of await markers()) await rm(path.join(workdir, 'assets', marker))
+        await rm(path.join(workdir, 'files/media/clip.bin'))
+
+        const { code, combined } = await runMikser(workdir)
+        assert.equal(code, 0, combined)
+        assert.doesNotMatch(stripAnsi(combined), /being re-derived/,
+            `nothing could be re-derived, so nothing may say it was:\n${stripAnsi(combined)}`)
+    })
+})
