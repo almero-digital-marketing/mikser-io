@@ -37,6 +37,9 @@ import runtime from './runtime.js'
 import { onLoaded } from './lifecycle.js'
 import { renderErrorCount } from './report.js'
 import { runReportOnly } from './engine.js'
+import {
+    setLogLevel, installLogLevel, resetLogLevel, restingLogLevel,
+} from './logger.js'
 import { emitReport } from './report.js'
 import { pluginOptionsFrom } from './cli.js'
 
@@ -418,6 +421,17 @@ async function withRequestOutput(request, run) {
     // Set for the duration of the request and restored with the rest, so a
     // watcher's own cycle before or after is unaffected.
     request = { ...request, requested: true }
+
+    // The level the CLIENT asked for, for this request only.
+    //
+    // Restored in the finally below like every other part of the contract, so
+    // a watcher's own cycle before or after keeps the level it was running at.
+    // An installed level is different and deliberately not touched here — it
+    // outlives the request, which is its whole point.
+    if (request.logReset) resetLogLevel()
+    if (request.logInstall) installLogLevel(request.logInstall)
+    if (request.log) setLogLevel(request.log)
+
     for (const key of ['json', 'tool', 'tools', 'requested']) {
         prior[key] = runtime.options[key]
         if (request[key]) runtime.options[key] = request[key]
@@ -437,6 +451,11 @@ async function withRequestOutput(request, run) {
         return await run()
     } finally {
         Object.assign(runtime.options, prior)
+        // Back to where the level RESTS, not to what it was a moment ago.
+        // An installed level survives the request; a per-request --log does
+        // not; and a --log-reset in this same request has already moved the
+        // resting point, so restoring "the previous level" would undo it.
+        setLogLevel(restingLogLevel())
     }
 }
 

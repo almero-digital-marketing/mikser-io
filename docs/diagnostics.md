@@ -328,7 +328,7 @@ compare against. It never appears alongside `matched` or `dependency`
 either: a consumer switches on `reason` and reads one field, so a stray
 key from another branch would make that switch wrong.
 
-The same detail appears at `--debug` for a watch run, one line per render.
+The same detail appears at `--log debug` for a watch run, one line per render.
 It is deliberately not in the build's normal output — the counts are the
 summary and `--json` is the record — but when you are watching one page
 misbehave, the trigger is the point.
@@ -419,7 +419,9 @@ thing `find out -type f` cannot do.
 | `-f, --force` | ignore all three gates (import checksum, dispatch, manifest) and re-render everything |
 | `-R, --resume` | continue from a previous interrupted run's journal; skips the filesystem scan |
 | `-r, --clear` | clear state before running |
-| `-d, --debug` / `-t, --trace` | raise log level; `trace` includes per-entity catalog writes |
+| `-l, --log <level>` | set the level for this run; `trace` includes per-entity catalog writes |
+| `--log-install <level>` | raise the level on a RUNNING instance without restarting it — restarting drops every connected MCP and drive session, so the tool you need should not require the risky act you are diagnosing. Expires after 30 minutes, dies with the process, and appears in the build report under `logLevel` so a level left on production is findable. |
+| `--log-reset` | put a running instance back to its configured level |
 | `--tools` | list the registered tools, then exit; `--json` for full schemas |
 | `--tool <name>` | run one tool and print its result, then exit. `--tool-args '<json>'` supplies arguments |
 

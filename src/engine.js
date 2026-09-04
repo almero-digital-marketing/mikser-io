@@ -24,7 +24,10 @@ import map from 'p-map'
 import Queue from 'p-queue'
 import packageInfo from '../package.json' with { type: 'json' }
 import { attachServerCliOptions, setupServer } from './server.js'
-import { createMikserLogger } from './logger.js'
+import {
+    createMikserLogger, setLogLevel, rememberBaseLevel, installLogLevel, resetLogLevel,
+    applyInstalledLogLevel, installedLogLevel, LOG_LEVELS, INSTALLED_LOG_TTL_MS,
+} from './logger.js'
 import { inputHashOf } from './utils.js'
 import { createTrack, mergeTrack } from './track.js'
 import { queryContext } from './database/query-context.js'
@@ -552,8 +555,19 @@ export async function setup(options) {
             .option('--fingerprint', 'hash everything this build wrote — including what it wrote through a '
                 + 'symlink, which `find` does not descend into — and exit. One comparable number per output '
                 + 'tree, plus one per asset preset, for proving an upgrade moved no bytes.', false)
-            .option('-d --debug', 'display debug statements')
-            .option('-t --trace', 'display trace statements')
+            // One level, not two booleans.
+            //
+            // `--debug` and `--trace` could not say "warnings only on this
+            // build" or "trace this one thing", and --debug did not work at
+            // all: it moved the logger's level while the terminal stream kept
+            // the one it was built with, so debug records were accepted and
+            // discarded. Both are gone rather than aliased — a flag that lies
+            // is worse than a flag that is missing.
+            .option('-l --log <level>', `log level for this run: ${LOG_LEVELS.join(', ')}`)
+            .option('--log-install <level>', 'set the log level on a RUNNING instance, so its own '
+                + `rebuilds are verbose too. Expires after ${INSTALLED_LOG_TTL_MS / 60000} minutes and `
+                + 'dies with the process. Levels as above.')
+            .option('--log-reset', 'return a running instance to its configured log level', false)
             .option('-e --runtime-folder <folder>', 'set mikser runtime folder relative to working folder', 'runtime')
         attachServerCliOptions(runtime.engine.commander)
 
@@ -666,16 +680,20 @@ The full version, with what each code means: docs/diagnostics.md`)
         // runtime.options.info gates the progress bar — gauge stays
         // silent in --debug/--trace modes because logs are voluminous
         // there and a bar on top would just be noise.
+        //
+        // Applied through setLogLevel so the terminal STREAM moves with the
+        // logger — the whole reason --debug did nothing.
         runtime.options.info = true
-        if (runtime.options.debug) {
-            runtime.engine.logger.level = 'debug'
-            runtime.options.info = false
+        const asked = runtime.options.log
+        if (asked) {
+            if (!LOG_LEVELS.includes(asked)) {
+                throw new Error(`--log ${asked}: no such level. Levels: ${LOG_LEVELS.join(', ')}`)
+            }
+            setLogLevel(asked)
+            // A bar on top of debug output is noise, and silent means silent.
+            if (asked === 'trace' || asked === 'debug' || asked === 'silent') runtime.options.info = false
         }
-        if (runtime.options.trace) {
-            runtime.engine.logger.level = 'trace'
-            runtime.options.debug = false
-            runtime.options.info = false
-        }
+        rememberBaseLevel(asked && LOG_LEVELS.includes(asked) ? asked : 'info')
 
         // Resolve folders inside onInitialize so journal.js and
         // catalog.js (which initialize in onInitialized) see absolute

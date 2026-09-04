@@ -10,6 +10,7 @@
 // reworded — which is exactly the kind of assertion that should not break
 // when someone improves the wording.
 import runtime from './runtime.js'
+import { installedLogLevel } from './logger.js'
 import { isReportOnlyRun } from './tools.js'
 
 // A transport that can serve the build report declares itself here, at
@@ -529,6 +530,27 @@ export function buildReport() {
         cycleId: cycle?.id ?? null,
         startedAt: cycle?.startedAt ?? null,
         finishedAt: cycle?.finishedAt ?? null,
+        // A log level installed on this instance with --log-install.
+        //
+        // Read HERE, at emit time, rather than raised as a warning during the
+        // cycle. A warning was the obvious shape — it is how an installed
+        // command is disclosed — and it does not survive into the document a
+        // forwarded --json emits: the line reached the instance's log from
+        // onImport, onFinalize and onFinalized alike, and `warnings` stayed
+        // empty every time. Reading state at emit has no ordering to get
+        // wrong, and this is a FACT ABOUT THE INSTANCE rather than an event in
+        // the cycle, so it reads better as a field than as an entry anyway.
+        //
+        // Null is the normal case, and its absence is what tells a reader the
+        // level is the configured one.
+        logLevel: installedLogLevel()
+            ? {
+                level: installedLogLevel().level,
+                installed: true,
+                expiresInMinutes: Math.max(0,
+                    Math.round((installedLogLevel().expiresAt - Date.now()) / 60000)),
+            }
+            : null,
         // What the run COST, per phase, in milliseconds.
         //
         // `finishedAt - startedAt` is not this. It spans the processing cycle

@@ -54,11 +54,11 @@ function locate(argv) {
     // cycle reports drift that is not there.
     const tool = value('--tool')
     const explain = value('--explain')
-    const request = has('--tools') ? { type: 'report', tools: true, json: has('--json') }
-        : tool                    ? { type: 'report', tool, toolArgs: value('--tool-args'), json: has('--json') }
-        : explain                 ? { type: 'report', explain, json: has('--json') }
-        : has('--audit-output')   ? { type: 'report', auditOutput: true, json: has('--json') }
-        : has('--fingerprint')    ? { type: 'report', fingerprint: true, json: has('--json') }
+    const request = has('--tools') ? { type: 'report', tools: true, json: has('--json'), log: value('--log') ?? value('-l') }
+        : tool                    ? { type: 'report', tool, toolArgs: value('--tool-args'), json: has('--json'), log: value('--log') ?? value('-l') }
+        : explain                 ? { type: 'report', explain, json: has('--json'), log: value('--log') ?? value('-l') }
+        : has('--audit-output')   ? { type: 'report', auditOutput: true, json: has('--json'), log: value('--log') ?? value('-l') }
+        : has('--fingerprint')    ? { type: 'report', fingerprint: true, json: has('--json'), log: value('--log') ?? value('-l') }
         : { type: 'build',
             clear: has('--clear'),
             // Not a flag that happens to be set — the client's OUTPUT
@@ -74,7 +74,16 @@ function locate(argv) {
             // rebuilt whatever the gates let through, which on a settled tree
             // is nothing, and a caller asking for a full re-render got a no-op
             // reported as success.
-            force: has('--force', '-f') }
+            force: has('--force', '-f'),
+            // The level travels for the same reason --json does: it is an
+            // OUTPUT CONTRACT, and the process doing the writing is the
+            // instance, which was started without it. A forwarded --log
+            // otherwise changed the level of a process that prints nothing.
+            log: value('--log') ?? value('-l'),
+            // Instance state rather than a contract: these outlive the request
+            // on purpose, which is the case a per-request flag cannot serve.
+            logInstall: value('--log-install'),
+            logReset: has('--log-reset') }
 
     return {
         longRunning,

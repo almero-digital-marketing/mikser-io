@@ -114,8 +114,11 @@ mikser [options]
                                    interrupted run; skip the initial filesystem scan
       --audit-output                     Audit output against recorded snapshots; report
                                    drift instead of building
-  -d, --debug                      Show debug log statements
-  -t, --trace                      Show trace log statements
+  -l, --log <level>                Log level for this run: trace, debug, info,
+                                   notice, warn, error, fatal, silent
+  --log-install <level>            Set the level on a RUNNING instance, so its
+                                   own rebuilds are verbose too. Expires.
+  --log-reset                      Return an instance to its configured level
   -e, --runtime-folder <folder>    Runtime/temp folder (default: runtime)
 ```
 

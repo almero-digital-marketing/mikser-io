@@ -91,7 +91,7 @@ onInitialized(async () => {
 
 **What Mikser does here:**
 - Parses CLI arguments and merges into `runtime.options`
-- Sets logger level based on `--debug` / `--trace` flags
+- Sets the logger level from `--log <level>`, moving the terminal stream with it
 - Resolves absolute paths for `workingFolder`, `outputFolder`, `runtimeFolder`
 - Creates the `runtimeFolder` directory
 - Clears `outputFolder` and `runtimeFolder` if `--clear` was set
