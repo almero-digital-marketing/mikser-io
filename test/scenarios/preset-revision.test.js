@@ -29,7 +29,7 @@ import path from 'node:path'
 import { globby } from 'globby'
 import {
     setupFixture, runMikser, cleanup,
-    freshWorkdir,
+    freshWorkdir, stripAnsi,
 } from './_harness.js'
 
 const CONFIG = `
@@ -99,25 +99,44 @@ describe('a preset revision bump', () => {
             `an unbumped preset must not rebuild\n${combined}`)
     })
 
-    it('a marker deleted by hand is recovered by --render-presets, not by a plain build', async () => {
-        // This used to happen on any build, but only because the preset
-        // fan-out was scanning the whole catalog every cycle — a full scan per
-        // rebuild, including no-op ones. Gating that scan on the preset
-        // actually moving is worth more than recovering a marker nobody
-        // deletes by accident, and --render-presets makes the recovery
-        // explicit rather than incidental.
+    it('a missing marker is recovered by a plain build, and says why', async () => {
+        // This test used to assert the opposite, and the reasoning was: a
+        // marker is not something anyone deletes by accident, so recovering
+        // it was not worth a full catalog scan on every cycle including no-op
+        // ones. The first half of that is no longer true — the marker is now
+        // REMOVED before a render and written again on completion, so its
+        // absence beside a derivative is the signature of a render that was
+        // killed, and that file is not trustworthy.
+        //
+        // The cost objection is answered rather than accepted: the scan is
+        // behind an emptiness check over the marker index this cycle already
+        // builds, so a healthy build still does not walk the catalog. The
+        // test below holds that line.
         await rm(path.join(workdir, 'assets/web/media/hero.jpg.2.md5'))
 
         const plain = await runMikser(workdir)
         assert.equal(plain.code, 0, plain.combined)
-        assert.equal(existsSync(path.join(workdir, 'assets/web/media/hero.jpg.2.md5')), false,
-            'nothing schedules an entity whose source and preset both stood still')
-
-        const forced = await runMikser(workdir, ['--render-presets'])
-        assert.equal(forced.code, 0, forced.combined)
-        assert.equal(await readFile(derivative(), 'utf8'), 'THIRD-NOT-APPLIED',
-            `--render-presets must re-derive regardless of markers\n${forced.combined}`)
+        assert.match(stripAnsi(plain.combined), /preset-unfinished|did not finish/,
+            'a derivative with no marker must be re-derived, and the reason named')
         assert.ok(existsSync(path.join(workdir, 'assets/web/media/hero.jpg.2.md5')),
             'and the marker comes back')
+    })
+
+    it('says nothing, and scans nothing, when every derivative is marked', async () => {
+        // The cost guarantee. `preset-unfinished` is only reachable past the
+        // emptiness check, so its absence is the observable proxy for the
+        // catalog walk not having happened.
+        const { code, combined } = await runMikser(workdir)
+        assert.equal(code, 0, combined)
+        assert.doesNotMatch(stripAnsi(combined), /preset-unfinished/,
+            'a healthy build must not look for damage it has no evidence of')
+    })
+
+    it('--render-presets still re-derives regardless of markers', async () => {
+        await write(2, 'FOURTH')
+        const forced = await runMikser(workdir, ['--render-presets'])
+        assert.equal(forced.code, 0, forced.combined)
+        assert.equal(await readFile(derivative(), 'utf8'), 'FOURTH',
+            `--render-presets must re-derive regardless of markers\n${forced.combined}`)
     })
 })

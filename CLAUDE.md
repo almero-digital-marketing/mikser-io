@@ -292,6 +292,29 @@ brevity.
   of folder names written in the plugin. A hardcoded list misses every
   collection a project registers through `sources()`, which produced 63
   false warnings per build on a real site.
+- **A preset `.md5` marker means a render FINISHED, and its absence is read.**
+  Presets are the one place user code is handed a final output path and left
+  to fill it, and a half-written derivative there is not self-correcting:
+  the marker is keyed on the SOURCE checksum, which an interruption does not
+  change, and the file is present, so `outputMissing` does not fire either.
+  Both gates say "nothing to do" over truncated bytes for as long as nobody
+  looks. Three parts, and all three are needed. (1) `forgetPresetMarkers`
+  removes the marker BEFORE the render; `onComplete` writes it after — so it
+  cannot outlive the render it describes. (2) `render.js`'s preset renderer
+  removes the destination when a failed render is what changed it, measured
+  by size+mtime before and after: a preset that throws before writing keeps
+  its good derivative, because deleting that would take a working asset off
+  the site until the next build. (3) A derivative with no marker schedules
+  its source and forces it past the reuse check (`preset-unfinished`) —
+  without this the removal in (1) is inert, since nothing consults a marker
+  for an entity the journal never mentioned, which is exactly the state a
+  SIGKILL or the OOM killer leaves. The scan is behind an emptiness check
+  over the marker index the cycle already builds, so a healthy build still
+  does not walk the catalog — that cost is why this recovery was once left to
+  `--render-presets`. Not fixable from here: a preset that wraps a tool and
+  does not check its exit code RESOLVES, so the manifest snapshots the
+  truncated bytes and `--audit-output` reads green. A preset that reports
+  success is believed.
 - `src/plugins/render/asset.js` / `resource.js` — URL helpers that BUILD
   a path from a naming convention instead of looking an entity up, so
   they cannot fail: a preset that never ran yields a well-formed link to

@@ -118,6 +118,11 @@ export function assets(options = {}) {
     const collection = 'presets'
     const type = 'preset'
     const checksumMap = new Set()
+    // Every marker on disk, indexed by the derivative it claims. Built beside
+    // checksumMap so forgetting a derivative's markers costs a lookup rather
+    // than a scan — this runs once per entity that renders, and a directory
+    // walk per entity is quadratic on an assets tree of any size.
+    const markersByDestination = new Map()
 
     // A preset that matches nothing builds green and says nothing, which is
     // how a mistyped pattern ships. `files({ outputFolder })` prefixes `name`
@@ -387,6 +392,39 @@ export function assets(options = {}) {
         return result
     }
 
+    // A marker outliving the render it describes is the whole defect.
+    //
+    // `isPresetRendered` is keyed on the SOURCE checksum, and an interrupted
+    // render does not change the source — so a derivative that was being
+    // rewritten when the process died keeps a marker that still matches, and
+    // every later build reports nothing to do over a half-written file.
+    // Measured on a 20KB fixture: delete a derivative, interrupt the
+    // re-render, and the site serves 10KB of it indefinitely.
+    //
+    // The marker means "a completed render produced this file", so it is
+    // removed before the render starts and written again by onComplete. An
+    // interrupted render then leaves no claim behind and the next ordinary
+    // build re-derives. The FILE is deliberately left alone: a preset that
+    // fails before writing anything still has a good derivative on disk, and
+    // removing it would take a working asset off the site until the next
+    // build.
+    // Where a preset puts a given entity. One implementation, because the
+    // reuse check, the render dispatch and the unmarked-derivative scan all
+    // need it and a second copy would drift from `presetUrl` the moment a
+    // preset grew an option.
+    function presetDestination(entity, preset) {
+        const name = preset.format ? changeExtension(entity.name, preset.format) : entity.name
+        return path.join(runtime.options.assetsFolder, preset.name, name)
+    }
+
+    async function forgetPresetMarkers(entity) {
+        for (const marker of markersByDestination.get(entity.destination) ?? []) {
+            await rm(marker, { force: true })
+            checksumMap.delete(marker)
+        }
+        markersByDestination.delete(entity.destination)
+    }
+
     async function renderPresets(entities, { rendererChanged = new Set() } = {}) {
         const { presets, assetsMap } = runtime.state.assets
 
@@ -409,11 +447,7 @@ export function assets(options = {}) {
                 const { options: configOptions } = normalizePresetConfig(
                     options.presets?.[entityPreset]
                 )
-                let destination = entity.name
-                if (entity.preset.format) {
-                    destination = changeExtension(destination, entity.preset.format)
-                }
-                entity.destination = path.join(runtime.options.assetsFolder, entityPreset, destination)
+                entity.destination = presetDestination(entity, entity.preset)
                 // Two gates sit between a scheduled entity and a render: the
                 // manifest's "its source did not change", and this plugin's
                 // marker. A forced render clears both — a marker at the
@@ -421,6 +455,9 @@ export function assets(options = {}) {
                 // disregard.
                 const forced = rendererChanged.has(entityToRender.id)
                 const ignore = forced ? false : await isPresetRendered(entity)
+                // Asked after isPresetRendered, which reads the markers this
+                // removes.
+                if (!ignore) await forgetPresetMarkers(entity)
                 tasks.push({
                     entity,
                     options: {
@@ -661,18 +698,76 @@ export function assets(options = {}) {
     })
 
     onBeforeRender(async signal => {
-        const { assetsMap } = runtime.state.assets
+        const { assetsMap, presets } = runtime.state.assets
 
         checksumMap.clear()
-        const checksumFiles = await globby('**/*.md5', { cwd: runtime.options.assetsFolder })
-        for (let checksumFile of checksumFiles) {
-            checksumMap.add(path.join(runtime.options.assetsFolder, checksumFile))
+        markersByDestination.clear()
+        // Scoped to the preset folders rather than the whole assets tree: the
+        // assets folder also carries what the files plugin symlinks into it,
+        // and those have no markers and never will. Unscoped, every one of
+        // them would read as an interrupted render on every cycle.
+        const presetFolders = Object.keys(runtime.state.assets.presets).map(name => `${name}/**/*`)
+        const files = presetFolders.length
+            ? await globby(presetFolders, { cwd: runtime.options.assetsFolder, onlyFiles: true })
+            : []
+        const derivatives = new Set()
+        for (let file of files) {
+            const absolute = path.join(runtime.options.assetsFolder, file)
+            if (!file.endsWith('.md5')) {
+                derivatives.add(absolute)
+                continue
+            }
+            checksumMap.add(absolute)
+            // `<destination>.<revision>.md5` — the same shape the orphan
+            // sweep strips to get back to the derivative.
+            const destination = absolute.replace(/\.[^.]+\.md5$/, '')
+            if (!markersByDestination.has(destination)) markersByDestination.set(destination, [])
+            markersByDestination.get(destination).push(absolute)
         }
 
         const entitiesToRender = new Map()
         // Entities that must render regardless of markers or manifest: their
         // preset moved, or --render-presets asked for them.
         const presetMoved = new Set()
+
+        // A derivative with no marker beside it is a render that was killed
+        // before it could write one.
+        //
+        // Nothing else notices. The file is present, so the engine's
+        // missing-output path does not fire; the source did not change, so
+        // the journal never mentions it; and the marker check that WOULD
+        // catch it is only consulted for entities something else already
+        // scheduled. So the derivative sits there half-written and every
+        // build reports nothing to do — which is the whole reason the marker
+        // is now removed before a render rather than merely written after
+        // one. Removing it only helps if its absence is read.
+        //
+        // Empty on any healthy build, and the catalog walk is behind that
+        // emptiness: this costs one Set lookup per cycle until something has
+        // actually gone wrong.
+        const unmarked = new Set()
+        for (const derivative of derivatives) {
+            if (!markersByDestination.has(derivative)) unmarked.add(derivative)
+        }
+        if (unmarked.size) {
+            for await (const candidate of iterateEntities({ collection: { $ne: collection } })) {
+                const candidatePresets = await getEntityPresets(candidate)
+                const damaged = candidatePresets.filter(name => presets[name]
+                    && unmarked.has(presetDestination(candidate, presets[name])))
+                if (!damaged.length) continue
+                assetsMap[candidate.id] ??= candidatePresets
+                // Forced past the reuse check as well as scheduled: the file
+                // on disk is exactly what must not be trusted, and
+                // isPresetRendered has no way to tell half-written bytes from
+                // finished ones.
+                presetMoved.add(candidate.id)
+                entitiesToRender.set(candidate.id, candidate)
+            }
+            useLogger().warn({ code: 'preset-unfinished', derivatives: [...unmarked], sources: entitiesToRender.size },
+                'Assets: %d derivative(s) have no completed-render marker and are being re-derived. '
+                + 'A preset render did not finish — the file left behind is not trustworthy.',
+                unmarked.size)
+        }
 
         // --render-presets [name]: re-derive though nothing moved.
         //

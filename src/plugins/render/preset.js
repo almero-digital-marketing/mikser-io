@@ -1,4 +1,4 @@
-import { mkdir } from 'node:fs/promises'
+import { mkdir, rm, stat } from 'node:fs/promises'
 import path from 'node:path'
 
 // A renderer's `load` runs for EVERY entity in the cycle, not only the ones
@@ -23,9 +23,42 @@ export async function load({ entity, runtime }) {
     runtime.preset = preset.default
 }
 
+async function describe(file) {
+    try {
+        const { mtimeMs, size } = await stat(file)
+        return { mtimeMs, size }
+    } catch { return null }
+}
+
+// A render that failed leaves nothing half-written behind.
+//
+// This is the one place user code is handed a final output path and left to
+// fill it, and a half-written derivative there is not self-correcting. The
+// marker `isPresetRendered` consults is keyed on the SOURCE checksum, and an
+// interruption does not change the source; the file exists, so the engine's
+// missing-output path does not fire either. Both gates therefore say "nothing
+// to do" over a truncated file, for as long as nobody looks. Measured on a
+// 20KB fixture: interrupt one re-render and every later build serves 10KB of
+// it. Worse where the preset wraps a tool whose non-zero exit it does not
+// check — it RESOLVES, the manifest snapshots the truncated bytes, and
+// --audit-output then reads green, because it compares each output against
+// the hash its own render recorded.
+//
+// Removed only when THIS render is what changed it. A preset that fails
+// before writing anything still has a good derivative on disk, and deleting
+// that would take a working asset off the site until the next build — so the
+// file is measured before and after, and left alone if it did not move.
 export async function render({ entity, options, config, context, plugins, runtime, state, logger }) {
     await mkdir(path.dirname(entity.destination), { recursive: true })
-    await runtime.preset({ entity, options, config, context, plugins, runtime, state, logger })
+    const before = await describe(entity.destination)
+    try {
+        await runtime.preset({ entity, options, config, context, plugins, runtime, state, logger })
+    } catch (error) {
+        const after = await describe(entity.destination)
+        const touched = after && (!before || after.size !== before.size || after.mtimeMs !== before.mtimeMs)
+        if (touched) await rm(entity.destination, { force: true })
+        throw error
+    }
     return entity.destination
 }
 
