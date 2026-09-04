@@ -98,4 +98,17 @@ jobs:
       # what it already is: the thing you run in the workspace before tagging.
       - run: npm run test:unit
 
-      - run: npm publish --access public
+      # `--tag latest` explicitly, not by implication.
+      #
+      # npm applies `latest` implicitly only when the new version is the
+      # HIGHEST published, and refuses the publish outright otherwise:
+      # "Cannot implicitly apply the latest tag because previously published
+      # version X is higher". A 11.0.0 went out and was walked back to a 10.x
+      # line, which stranded every subsequent 10.x release behind that refusal
+      # — the releases were correct and unpublishable.
+      #
+      # Saying it outright is what the implicit rule does on an ordinary
+      # release anyway, so nothing changes for the normal case, and a line
+      # that continues after a version is withdrawn is worth more than a
+      # default that assumes it never happens.
+      - run: npm publish --access public --tag latest
