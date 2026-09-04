@@ -4,22 +4,56 @@ import lineReader from 'line-reader'
 import { promisify } from 'util'
 import _ from 'lodash'
 
-// The lifecycle hook a command can hang off, and the CLI flag that names it.
+// The hooks a command can hang off.
 //
-// One flag per hook rather than a single `--on hook=cmd`, because the ask was
-// `mikser --finalized "..."` and a flag that reads like the phase is the point.
-// The cost is 15 words of top-level CLI namespace claimed by one plugin, and
-// they only exist when commands() is in the config — like every plugin option.
-const HOOKS = [
-    ['load', '--load <command>'], ['loaded', '--loaded <command>'],
-    ['import', '--import <command>'], ['imported', '--imported <command>'],
-    ['process', '--process <command>'], ['processed', '--processed <command>'],
-    ['persist', '--persist <command>'], ['persisted', '--persisted <command>'],
-    ['beforeRender', '--before-render <command>'], ['render', '--render <command>'],
-    ['afterRender', '--after-render <command>'],
-    ['cancel', '--cancel <command>'], ['canceled', '--cancelled <command>'],
-    ['finalize', '--finalize <command>'], ['finalized', '--finalized <command>'],
-]
+// ONE flag naming a hook, not fifteen flags named after hooks. The same shape
+// as `--tool <name>`: a plugin claims one word for an open-ended registry
+// rather than one word per entry. Fifteen would have reserved `--render`,
+// `--process`, `--load`, `--import`, `--persist` and `--cancel` at the top
+// level for one plugin — words core plausibly wants (a `--render <entity>` is
+// not hard to imagine) — and put fifteen near-identical rows in `--help`.
+const HOOKS = new Set([
+    'load', 'loaded', 'import', 'imported', 'process', 'processed',
+    'persist', 'persisted', 'beforeRender', 'render', 'afterRender',
+    'cancel', 'canceled', 'finalize', 'finalized',
+])
+
+// `load` is declarable in config and unreachable from the CLI: options are
+// declared DURING the load phase and the table is not parsed until after it,
+// so runtime.options is still empty when onLoad fires.
+//
+// Named and REFUSED rather than left out of the hook list. Omitting it would
+// answer `--command load=...` with "no hook named load", which is untrue —
+// there is such a hook, it is simply not one the command line can reach, and a
+// wrong reason sends someone looking for a typo. The refusal says what to do
+// instead.
+const CLI_UNREACHABLE = new Map([
+    ['load', 'the option table is parsed after the load phase, so a --command on it could never fire. '
+        + 'Declare it in the config instead: commands({ load: ... }).'],
+])
+
+// Never expected on a successful build, so their absence is not a finding.
+const CONDITIONAL = new Set(['cancel', 'canceled'])
+
+// `hook=command`, split on the FIRST `=` so a command may contain its own.
+function parseHookCommand(value) {
+    const at = value.indexOf('=')
+    if (at < 1) {
+        throw new Error(`--command expects <hook>=<command>, got ${JSON.stringify(value)}. `
+            + `Hooks: ${[...HOOKS].join(', ')}`)
+    }
+    const hook = value.slice(0, at).trim()
+    const command = value.slice(at + 1).trim()
+    if (!HOOKS.has(hook)) {
+        throw new Error(`--command: no hook named ${JSON.stringify(hook)}. `
+            + `Hooks: ${[...HOOKS].join(', ')}`)
+    }
+    if (CLI_UNREACHABLE.has(hook)) {
+        throw new Error(`--command ${hook}=: ${CLI_UNREACHABLE.get(hook)}`)
+    }
+    if (!command) throw new Error(`--command ${hook}=: no command given`)
+    return { hook, command }
+}
 
 export function commands(options = {}) {
     return ({
@@ -47,13 +81,31 @@ export function commands(options = {}) {
         // Declared here, in the load phase, and READ in the hook below.
         // Reading at construction is always undefined — the option table is
         // not parsed until after this runs.
-        for (const [hook, flags] of HOOKS) {
-            cliOption(flags, `run a command at the ${hook} hook, for this run only`)
-        }
+        //
+        // Repeatable, so several hooks can be driven in one invocation. The
+        // collector is remembered by cliOption and replayed when an instance
+        // re-parses a forwarded client's argv, so the forwarded path sees the
+        // same array the local one does.
+        cliOption('--command <hook=command>',
+            'run a command at a lifecycle hook for this run only, e.g. '
+            + '--command finalized="node deploy/publish.mjs". Repeatable. '
+            + `Hooks: ${[...HOOKS].join(', ')}`,
+            (value, previous = []) => [...previous, parseHookCommand(value)], [])
 
         // Said once per hook per process, not once per cycle: a watcher would
         // otherwise repeat it on every rebuild.
         const announced = new Set()
+
+        // Which requested hooks actually fired this cycle.
+        //
+        // `loaded` is the case that matters: it fires for a local build and
+        // NOT for one forwarded to a running instance, because that instance
+        // loaded at startup and a rebuild does not repeat the load phase. So
+        // the same command does different things depending on whether a
+        // watcher happens to be up, and until now it did so in silence.
+        // Checked generically rather than special-casing that one hook, since
+        // the interesting cases are the ones nobody predicted.
+        const fired = new Set()
 
         async function executeCommand(command) {
             const logger = useLogger()
@@ -88,8 +140,11 @@ export function commands(options = {}) {
             // reads whatever THIS request asked for. Registering a hook per
             // request would have made two clients' commands add up; there is
             // one hook, registered once, reading a value that changes.
-            const fromCli = runtime.options?.[hook]
-            if (typeof fromCli === 'string' && fromCli.length) {
+            const requested = runtime.options?.command
+            const fromCli = (Array.isArray(requested) ? requested : [])
+                .filter(entry => entry?.hook === hook)
+                .map(entry => entry.command)
+            for (const command of fromCli) {
                 // Under a code, in the report, with the command.
                 //
                 // A build is otherwise a function of the repository — same
@@ -100,22 +155,39 @@ export function commands(options = {}) {
                 // warnings are a view of logger.warn in the report, so a
                 // fingerprint taken from this build stays interpretable
                 // instead of quietly meaning something else.
-                const key = `${hook}:${fromCli}`
+                const key = `${hook}:${command}`
                 if (!announced.has(key)) {
                     announced.add(key)
-                    useLogger()?.warn({ code: 'command-from-cli', hook, command: fromCli },
+                    useLogger()?.warn({ code: 'command-from-cli', hook, command },
                         'Running a command from the command line at the %s hook: %s. This build is a '
                         + 'function of how it was invoked as well as of the repository — the same commit '
                         + 'built without this flag can differ. Commands that write into the output folder '
                         + 'also fail --audit-output, which hashes each file as it is written.',
-                        hook, fromCli)
+                        hook, command)
                 }
-                cmds = [...cmds, fromCli]
             }
+            cmds = [...cmds, ...fromCli]
 
             for (let command of cmds) {
                 await executeCommand(command)
             }
+            if (fromCli.length) fired.add(hook)
+        }
+
+        // Anything asked for that never ran, said at the end of the cycle.
+        function reportUnfired() {
+            const requested = runtime.options?.command
+            if (!Array.isArray(requested)) return
+            const missed = [...new Set(requested.map(entry => entry?.hook))]
+                .filter(hook => hook && !fired.has(hook) && !CONDITIONAL.has(hook))
+            fired.clear()
+            if (!missed.length) return
+            useLogger()?.warn({ code: 'command-hook-not-reached', hooks: missed },
+                'Asked to run a command at %s, and that hook did not fire this cycle. A build forwarded '
+                + 'to a running instance reuses one that loaded at startup, so load-phase hooks belong '
+                + 'to the instance rather than to the request. Stop the instance to run the command, or '
+                + 'move it to a per-cycle hook.',
+                missed.join(', '))
         }
 
         onLoad(async () => await executeCommands('load'))
@@ -132,7 +204,11 @@ export function commands(options = {}) {
         onCancel(async () => await executeCommands('cancel'))
         onCancelled(async () => await executeCommands('canceled'))
         onFinalize(async () => await executeCommands('finalize'))
-        onFinalized(async () => await executeCommands('finalized'))
+        onFinalized(async () => {
+            await executeCommands('finalized')
+            // Last, so every other hook has had its chance.
+            reportUnfired()
+        })
 
         return { executeCommand }
     }

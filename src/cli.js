@@ -46,7 +46,13 @@ const declared = new Map()
 // is being built is always undefined. Read it in a hook: onLoaded and later
 // all run after stage two. documents() read its folder at construction first,
 // and `--documents content` silently did nothing.
-export function cliOption(flags, description, defaultValue) {
+// `parseArg` and `defaultValue` mirror commander's own signature, so a plugin
+// that wants a REPEATABLE option can pass a collector — which is what a flag
+// naming one of several things needs, and what `--command hook=cmd` is. Kept
+// commander-compatible rather than inventing a shape: the third argument is a
+// coercion function when it is callable and a default otherwise, which is
+// exactly how commander reads it.
+export function cliOption(flags, description, parseArg, defaultValue) {
     // No CLI at all — a plugin constructed by a test harness, or embedded
     // programmatically through setup({ ... }) rather than run from a terminal.
     // There is nothing to register the option on and nothing about that is a
@@ -65,11 +71,20 @@ export function cliOption(flags, description, defaultValue) {
             + 'Declare options while the plugin is constructed (the load phase), not afterwards — '
             + 'a later one would never be read and the flag would look ignored.')
     }
-    if (declared.has(flags)) return declared.get(flags)
-    const option = defaultValue === undefined
+    if (declared.has(flags)) return declared.get(flags).option
+    const coerce = typeof parseArg === 'function' ? parseArg : undefined
+    const fallback = coerce ? defaultValue : parseArg
+    const option = coerce
+        ? commander.option(flags, description, coerce, fallback)
+        : fallback === undefined
         ? commander.option(flags, description)
-        : commander.option(flags, description, defaultValue)
-    declared.set(flags, option)
+        : commander.option(flags, description, fallback)
+    // The coercion is remembered, not just applied. pluginOptionsFrom rebuilds
+    // a throwaway parser to read a forwarded client's argv, and a collector
+    // left out there would hand back the last value where the local run got an
+    // array — the forwarded path quietly behaving differently from the local
+    // one, which is the failure the instance surface exists to remove.
+    declared.set(flags, { option, coerce, fallback })
     return option
 }
 
@@ -154,7 +169,11 @@ export function pluginOptionsFrom(argv) {
     let parsed
     try {
         const probe = commander.createCommand()
-        for (const flags of declared.keys()) probe.option(flags, '')
+        for (const [flags, { coerce, fallback }] of declared) {
+            if (coerce) probe.option(flags, '', coerce, fallback)
+            else if (fallback === undefined) probe.option(flags, '')
+            else probe.option(flags, '', fallback)
+        }
         probe.allowUnknownOption(true).allowExcessArguments(true)
         probe.parse(argv, { from: 'user' })
         parsed = probe.opts()

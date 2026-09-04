@@ -384,18 +384,50 @@ Hook names: `load`, `loaded`, `import`, `imported`, `process`, `processed`,
 
 #### From the command line
 
-Every hook is also a flag, so a one-off side effect needs no config edit:
+One flag names a hook, so a one-off side effect needs no config edit:
 
 ```bash
-mikser --finalized "node deploy/publish.mjs"
+mikser --command finalized="node deploy/publish.mjs"
+
+# repeatable
+mikser --command loaded="node probe.mjs" --command finalized="node publish.mjs"
 ```
 
-The flag runs *in addition to* whatever the config declares for that hook, and
-only for that run. Forwarded to a running `--watch` instance it **replaces**
-the previous request's command rather than adding to it, and the instance's own
-rebuilds run neither — one hook is registered at load and reads a value the
-instance swaps per request. The flags exist only when `commands()` is in the
-config, like every plugin option.
+The same shape as `--tool <name>`: one word of CLI namespace for an
+open-ended set, rather than one flag per hook. It runs *in addition to*
+whatever the config declares for that hook, and only for that run. Forwarded
+to a running `--watch` instance it **replaces** the previous request's
+commands rather than adding to them, and the instance's own rebuilds run
+none — one hook is registered at load and reads a value the instance swaps
+per request. The flag exists only when `commands()` is in the config, like
+every plugin option, and an unknown hook name is refused before anything is
+built.
+
+Two hooks behave differently from the rest, and both say so rather than
+failing quietly:
+
+- **`load` is refused.** Options are declared *during* the load phase and the
+  table is parsed after it, so a `--command load=` could never fire. It is
+  named and refused rather than left out of the list, because "no hook named
+  load" would be untrue and would send you looking for a typo. Declare it in
+  the config instead.
+- **`loaded` does not fire for a forwarded build.** A running instance loaded
+  at startup and a rebuild does not repeat the load phase, so a load-phase
+  hook belongs to the instance rather than to the request. Asking for one
+  warns under `command-hook-not-reached`. Stop the instance, or use a
+  per-cycle hook.
+
+Two hooks behave differently from the rest, and both say so rather than
+failing quietly:
+
+- **`load` is refused.** Options are declared *during* the load phase and the
+  table is parsed after it, so a `--command load=` could never fire. Declare
+  it in the config instead.
+- **`loaded` does not fire for a forwarded build.** A running instance loaded
+  at startup and a rebuild does not repeat the load phase, so a load-phase
+  hook belongs to the instance rather than to the request. Asking for one
+  warns under `command-hook-not-reached`. Stop the instance, or use a
+  per-cycle hook.
 
 Two things to know, and they are the reason this is a flag rather than a
 convenience:
