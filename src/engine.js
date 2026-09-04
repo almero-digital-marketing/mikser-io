@@ -25,8 +25,8 @@ import Queue from 'p-queue'
 import packageInfo from '../package.json' with { type: 'json' }
 import { attachServerCliOptions, setupServer } from './server.js'
 import {
-    createMikserLogger, setLogLevel, rememberBaseLevel, installLogLevel, resetLogLevel,
-    applyInstalledLogLevel, installedLogLevel, LOG_LEVELS, INSTALLED_LOG_TTL_MS,
+    createMikserLogger, rememberBaseLevel, applyLogRequest,
+    LOG_LEVELS, INSTALLED_LOG_TTL_MS,
 } from './logger.js'
 import { inputHashOf } from './utils.js'
 import { createTrack, mergeTrack } from './track.js'
@@ -685,14 +685,14 @@ The full version, with what each code means: docs/diagnostics.md`)
         // logger — the whole reason --debug did nothing.
         runtime.options.info = true
         const asked = runtime.options.log
-        if (asked) {
-            if (!LOG_LEVELS.includes(asked)) {
-                throw new Error(`--log ${asked}: no such level. Levels: ${LOG_LEVELS.join(', ')}`)
-            }
-            setLogLevel(asked)
-            // A bar on top of debug output is noise, and silent means silent.
-            if (asked === 'trace' || asked === 'debug' || asked === 'silent') runtime.options.info = false
-        }
+        // The same call the instance makes for a forwarded request — see
+        // applyLogRequest. Two implementations drifted within one commit.
+        const logRefusal = applyLogRequest({
+            log: asked,
+            logInstall: runtime.options.logInstall,
+            logReset: runtime.options.logReset,
+        })
+        if (logRefusal) throw new Error(logRefusal)
         rememberBaseLevel(asked && LOG_LEVELS.includes(asked) ? asked : 'info')
 
         // Resolve folders inside onInitialize so journal.js and

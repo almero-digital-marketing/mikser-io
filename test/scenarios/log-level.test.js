@@ -153,6 +153,31 @@ describe('a log level installed on a running instance', () => {
         await runMikser(workdir, ['--log-reset'])
     })
 
+    it('refuses an unknown level forwarded, exactly as it does locally', async () => {
+        // The forwarded/local split --json and --force each had. The argv path
+        // threw and the socket path called setLogLevel and ignored the false
+        // it returns, so --log chatty exited 1 alone and built normally with a
+        // watcher up. A flag that lies is worse than a flag that is missing.
+        for (const flag of ['--log', '--log-install']) {
+            const { code, combined } = await runMikser(workdir, [flag, 'chatty'])
+            assert.notEqual(code, 0, `${flag} chatty must be refused: ${combined}`)
+            assert.match(stripAnsi(combined), /no such level/)
+        }
+    })
+
+    it('is silent when asked, forwarded, and does not leave the instance mute', async () => {
+        // `runtime.options.info` is written by applyLogRequest and restored
+        // with the rest of the request contract — captured BEFORE the call,
+        // since capturing after would record the value the call just wrote.
+        const silent = await runMikser(workdir, ['--force', '--log', 'silent'])
+        assert.equal(silent.code, 0, silent.combined)
+        assert.equal(stripAnsi(silent.combined).trim(), '', 'silent means silent')
+
+        const after = await runMikser(workdir, ['--force'])
+        assert.ok(lines(after.combined) > 0,
+            'and the next request gets its output back')
+    })
+
     it('does not let a per-request --log stick to the instance', async () => {
         // --log is a contract for one request. Only --log-install outlives it.
         const before = await edit('E')

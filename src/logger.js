@@ -491,16 +491,49 @@ export function trackProgress(name, total) {
     if (!name || !total) return
     const logger = useLogger()
     logger.debug('%s started: %d', name, total)
-    if (!process.stdout.isTTY || !runtime.options.info) return
-    currentBar = { name, total, value: 0, started: Date.now() }
-    ensureGauge().show({ section: name, subsection: `0/${total}` }, 0)
+    // The bar writes to stdout, and stdout is where --json and --tool put
+    // their DOCUMENT. Forwarded, those writes are captured and framed to the
+    // client, so the gauge landed inside the JSON:
+    // `^[[?25lDocuments import: >416/800` at byte 0, and JSON.parse threw —
+    // 4 runs in 10 at the default level on an 800-document corpus.
+    //
+    // Checked HERE rather than through runtime.options.info, because this is
+    // the actual invariant and info is a preference. A preference can be
+    // forgotten on a path; an invariant stated at the one place a bar starts
+    // cannot.
+    const carriesDocument = runtime.options?.json || runtime.options?.tool || runtime.options?.tools
+
+    // TRACKED always, DRAWN only where a bar belongs.
+    //
+    // The two used to be one decision, so anything that could not draw also
+    // stopped counting — and `stopProgress` returns early without a bar, which
+    // is where the "finished: N in Ns" line comes from. A piped build
+    // therefore reported no phase timings at all, and suppressing the bar for
+    // --json would have extended that to every machine reading the output.
+    // Losing the graphics is the point; losing the information is not.
+    const drawn = !carriesDocument && Boolean(process.stdout.isTTY) && Boolean(runtime.options.info)
+    currentBar = { name, total, value: 0, started: Date.now(), drawn, milestone: 0 }
+    if (drawn) ensureGauge().show({ section: name, subsection: `0/${total}` }, 0)
+    else logger.info({ code: 'progress', phase: name, total, value: 0 }, '%s: 0/%d', name, total)
 }
 
 export function updateProgress() {
     if (!currentBar) return
     currentBar.value++
-    const { name, total, value } = currentBar
-    gauge?.show({ section: name, subsection: `${value}/${total}` }, value / total)
+    const { name, total, value, drawn } = currentBar
+    if (drawn) {
+        gauge?.show({ section: name, subsection: `${value}/${total}` }, value / total)
+    } else {
+        // Quartiles, not every item: a bar redraws in place and costs one
+        // line, a log record does not. 800 documents is 800 lines of noise if
+        // this counts the way the bar does.
+        const reached = Math.floor((value / total) * 4)
+        if (reached > currentBar.milestone && value < total) {
+            currentBar.milestone = reached
+            useLogger()?.info({ code: 'progress', phase: name, total, value },
+                '%s: %d/%d', name, value, total)
+        }
+    }
     if (value >= total) stopProgress()
 }
 
@@ -509,11 +542,15 @@ export function stopProgress() {
     const logger = useLogger()
     const { name, total, value, started } = currentBar
     gauge?.hide()
+    // Structured either way, so a machine reading --json's stderr gets the
+    // same facts a person reads off the bar.
     if (value < total) {
-        logger.warn('%s unfinished: %d', name, total - value)
+        logger.warn({ code: 'progress-unfinished', phase: name, total, value, missing: total - value },
+            '%s unfinished: %d', name, total - value)
     } else {
-        const elapsed = Math.round((Date.now() - started) / 1000)
-        logger.info('%s finished: %d %ds', name, total, elapsed)
+        const ms = Date.now() - started
+        logger.info({ code: 'progress-finished', phase: name, total, ms },
+            '%s finished: %d %ds', name, total, Math.round(ms / 1000))
     }
     currentBar = null
 }
@@ -526,6 +563,38 @@ export function updateProgressDetails(details) {
         { section: currentBar.name, subsection: details },
         currentBar.value / currentBar.total,
     )
+}
+
+// What a caller asked for about logging, applied the same way from argv and
+// from a forwarded request.
+//
+// It was written twice and the copies drifted immediately: the argv path threw
+// on an unknown level and set `info`, the forwarded path called setLogLevel and
+// ignored the false it returns. So `--log chatty` exited 1 locally and built
+// normally with a watcher up, and `--log silent` left the progress bar running
+// on an instance. The same forwarded/local split --json and --force each had,
+// and this feature's own argument against itself: a flag that lies is worse
+// than a flag that is missing.
+//
+// Returns an error STRING rather than throwing, because the two callers need
+// different things from a failure — argv throws, the instance refuses over the
+// socket — and a shared implementation should not decide that for them.
+export function applyLogRequest({ log, logInstall, logReset } = {}) {
+    for (const [flag, level] of [['--log', log], ['--log-install', logInstall]]) {
+        if (level !== undefined && level !== null && !LOG_LEVELS.includes(level)) {
+            return `${flag} ${level}: no such level. Levels: ${LOG_LEVELS.join(', ')}`
+        }
+    }
+    if (logReset) resetLogLevel()
+    if (logInstall) installLogLevel(logInstall)
+    if (log) setLogLevel(log)
+
+    // A bar on top of debug output is noise, and silent means silent.
+    const level = log || logInstall
+    if (level === 'trace' || level === 'debug' || level === 'silent') {
+        runtime.options.info = false
+    }
+    return null
 }
 
 // An installed level, disclosed and expired, once per cycle.

@@ -38,7 +38,7 @@ import { onLoaded } from './lifecycle.js'
 import { renderErrorCount } from './report.js'
 import { runReportOnly } from './engine.js'
 import {
-    setLogLevel, installLogLevel, resetLogLevel, restingLogLevel,
+    setLogLevel, restingLogLevel, applyLogRequest, LOG_LEVELS,
 } from './logger.js'
 import { emitReport } from './report.js'
 import { pluginOptionsFrom } from './cli.js'
@@ -240,6 +240,17 @@ function captureOutput(onChunk) {
 // than by content hash — the hash would require the client to import its
 // config, which is most of the startup forwarding exists to skip, and it is
 // not what tells the two apart. Different configs are different files.
+// Does this request name a level that does not exist? Pure, so the refusal
+// can be decided before anything is applied.
+function logRequestRefusal(request) {
+    for (const [flag, level] of [['--log', request?.log], ['--log-install', request?.logInstall]]) {
+        if (level !== undefined && level !== null && !LOG_LEVELS.includes(level)) {
+            return `${flag} ${level}: no such level. Levels: ${LOG_LEVELS.join(', ')}`
+        }
+    }
+    return null
+}
+
 function configMismatch(theirs) {
     if (!theirs) return null
     const mine = path.resolve(runtime.options.config ?? 'mikser.config.js')
@@ -369,6 +380,26 @@ function refuseClear(socket, request) {
     return true
 }
 
+// A level the instance cannot use.
+//
+// Validated where the request ARRIVES rather than where it is applied, because
+// applying it is exactly what a bad level cannot do: setLogLevel returns false
+// and, before this, nobody read it — so `--log chatty` exited 1 locally and
+// built normally with a watcher up. The refusal frame is how the instance says
+// no to everything else, and a client that mistypes a level deserves the same
+// answer whether or not something happens to be listening.
+function refuseLogLevel(socket, request) {
+    const refusal = logRequestRefusal(request)
+    if (!refusal) return false
+    frame(socket, {
+        type: 'refused',
+        reason: refusal,
+        detail: 'The instance would otherwise have built normally and said nothing, which is the '
+            + 'forwarded-versus-local split this surface exists to remove.',
+    })
+    return true
+}
+
 // Which process to restart.
 //
 // "Restart it" is only actionable if you know which `it` — and the machine
@@ -428,14 +459,24 @@ async function withRequestOutput(request, run) {
     // a watcher's own cycle before or after keeps the level it was running at.
     // An installed level is different and deliberately not touched here — it
     // outlives the request, which is its whole point.
-    if (request.logReset) resetLogLevel()
-    if (request.logInstall) installLogLevel(request.logInstall)
-    if (request.log) setLogLevel(request.log)
-
-    for (const key of ['json', 'tool', 'tools', 'requested']) {
+    // Captured BEFORE applyLogRequest, which writes `info`.
+    //
+    // `info` is here because --log silent turns the progress bar off through
+    // it, and without a restore one silent request left the instance with no
+    // bar for the rest of its life. Capturing after the call would have
+    // recorded the value the call just wrote and restored nothing — the same
+    // shape of mistake, one line further on.
+    for (const key of ['json', 'tool', 'tools', 'requested', 'info']) {
         prior[key] = runtime.options[key]
         if (request[key]) runtime.options[key] = request[key]
     }
+
+    // The same call the argv path makes — see applyLogRequest. The level was
+    // validated at arrival by refuseLogLevel, so a refusal here is impossible;
+    // it is asserted rather than ignored, because "cannot happen" is how the
+    // first version of this silently accepted a bad level.
+    const refusal = applyLogRequest(request)
+    if (refusal) throw new Error(refusal)
 
     // Whatever the client's argv said about a PLUGIN's options.
     //
@@ -558,6 +599,7 @@ export function serveInstance() {
                     // writes anything.
                     if (refuseUnknownFlags(socket, request)) return
                     if (refuseClear(socket, request)) return
+                    if (refuseLogLevel(socket, request)) return
                     const wrongConfig = configMismatch(request.config)
                     if (wrongConfig) return refuseConfig(socket, request, wrongConfig)
                     const movedFile = await configStale()
