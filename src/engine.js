@@ -1593,6 +1593,16 @@ The full version, with what each code means: docs/diagnostics.md`)
     // undefined here. The logger has no such problem — it writes during the
     // run, by which time options exist.
     const quietStdout = ['--json', '--tool', '--tools'].some(flag => process.argv.includes(flag))
+    // The banner is an info record, so a level above info must not print it.
+    //
+    // `--log silent` printed the version line and nothing else — the one line
+    // the flag most obviously promises to remove — because this runs before
+    // the level is applied. Only the FORWARDED path was ever silent, and that
+    // is the path the test exercises, so the test could not see it.
+    //
+    // argv again, for the reason quietStdout reads it: commander parses in a
+    // lifecycle hook, which runs after setup() returns.
+    if (!argvWantsInfo()) return runtime
     // Through the logger when nobody is watching, so it gets a timestamp.
     //
     // This line marks a process start, which in a supervisor's log is the
@@ -1623,6 +1633,26 @@ The full version, with what each code means: docs/diagnostics.md`)
         else process.stdout.write(`mikser. ${packageInfo.version}\n`)
     }
     return runtime
+}
+
+// The level asked for on the command line, before commander has parsed.
+// Both spellings, both flags: `--log warn` and `--log=warn`, and
+// `--log-install`, which on a run with no instance to forward to sets the
+// level for this process.
+function argvLogLevel() {
+    for (const flag of ['--log', '--log-install', '-l']) {
+        const at = process.argv.indexOf(flag)
+        if (at >= 0 && process.argv[at + 1]) return process.argv[at + 1]
+        const inline = process.argv.find(arg => arg.startsWith(`${flag}=`))
+        if (inline) return inline.slice(flag.length + 1)
+    }
+    return null
+}
+
+function argvWantsInfo() {
+    const level = argvLogLevel()
+    if (!level || !LOG_LEVELS.includes(level)) return true
+    return LOG_LEVELS.indexOf(level) <= LOG_LEVELS.indexOf('info')
 }
 
 export function useLogger() {

@@ -145,7 +145,7 @@ export function resources(options = {}) {
                     logger.error('Resource error: %s %s %s', entity.id, resource, err.message)
                 }
             }
-            updateProgress()
+            updateProgress(resource)
         }
 
         const resourceFiles = await globby('**/*', { cwd: runtime.options.resourcesFolder })
@@ -226,7 +226,7 @@ export function resources(options = {}) {
                         checksum: await checksum(resource)
                     })
                 }
-                updateProgress()
+                updateProgress(resource)
             }, { concurrency: 10, signal })
             count && logger.info('Downloaded: %d', count)
         }

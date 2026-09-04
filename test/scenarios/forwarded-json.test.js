@@ -185,3 +185,46 @@ export default { plugins: [documents(), frontMatter(), layouts(), renderHbs(), s
         assert.equal(typeof report.summary, 'object')
     })
 })
+
+describe('a forwarded document does not land in the instance\'s own log', () => {
+    // The instance wears the client's output so an operator watching it sees
+    // that a forwarded request happened. That is right for log lines and
+    // wrong for a DOCUMENT: every --json request wrote its whole report into
+    // the instance's console as well as onto the client's stdout — 364 lines
+    // — and under pm2 that is 364 lines in the out log for every report an
+    // agent asks for. Every MCP report request does this.
+    const workdir = freshWorkdir('forwarded-json-tee')
+    let instance
+    let instanceOut = ''
+    after(async () => { instance?.kill(); await cleanup(workdir) })
+
+    before(async () => {
+        await setupFixture(workdir, {
+            'mikser.config.js': CONFIG,
+            'layouts/page.hbs': '<!doctype html><body>{{document.meta.title}}</body>',
+            'documents/index.html': '---\nlayout: page\ntitle: One\n---\n',
+        })
+        await runMikser(workdir)
+        instance = await startInstance(workdir)
+        instance.stdout.on('data', d => { instanceOut += d })
+        instance.stderr.on('data', d => { instanceOut += d })
+    })
+
+    it('frames the report to the client and keeps its own log to log lines', async () => {
+        // Discard the boot cycle, so what is asserted below is this request's
+        // doing and not the instance's own startup.
+        instanceOut = ''
+        const { code, stdout } = await runMikser(workdir, ['--json'])
+        assert.equal(code, 0)
+        assert.equal(typeof JSON.parse(stdout).summary, 'object',
+            'the client still gets the whole document')
+        await new Promise(r => setTimeout(r, 500))
+
+        assert.doesNotMatch(instanceOut, /"summary"/,
+            `the document must not be echoed into the instance's log:\n${instanceOut}`)
+        // The tee itself is not the bug — losing it would take away the only
+        // sign an operator has that a forwarded request happened at all.
+        assert.ok(instanceOut.trim().length > 0,
+            'the log lines are still teed, which is what the tee is for')
+    })
+})

@@ -228,6 +228,33 @@ brevity.
     immediately. Both surfaces compose; same `{level, target, options}`
     shape. Enables Better Stack / Datadog / Loki / Axiom / Sentry as
     standard sibling plugins without engine changes per vendor.
+- **Progress is TRACKED always, DRAWN only where a bar belongs, and
+  REPORTED only for a phase that took time.** Three decisions that were
+  once one. Drawing is gated on `carriesDocument` at the single place a
+  bar starts — the gauge writes to stdout, which under `--json` / `--tool`
+  carries the DOCUMENT, and forwarded it landed inside the JSON
+  (`^[[?25lDocuments import: >416/800` at byte 0). Tracking must survive
+  that gate, because `stopProgress` is where phase timings come from and
+  tying the two together left every piped build reporting none. Reporting
+  is gated on `PROGRESS_MIN_MS` ELAPSED, not on a minimum total: eleven of
+  a plain build's thirteen phases carry five items, and quartile records
+  for those took a piped no-op build from 32 lines to 97 — but four PDFs
+  through Chrome is a small phase and a slow one, and it is exactly the
+  one worth narrating. A count threshold gets that backwards; time does
+  not, and needs no per-phase tuning. It applies to the drawn path too, so
+  an attended build no longer prints `finished: 5 0s` — its own `0s` was
+  the argument. `updateProgress(detail)` takes whatever the call site
+  already holds — a path, an id — so a record says WHAT is progressing and
+  not only how far; stored per item, formatted at emit, so naming the work
+  costs a 14k import nothing. An entity id LOOKS absolute and is not a
+  path, so `progressDetail` shortens only what is genuinely inside the
+  working folder.
+- **The version banner is an info record and obeys the level.** Written in
+  `setup()`, before commander has applied `--log`, so it reads the level
+  off argv the same way `quietStdout` does. Without that, `--log silent`
+  printed the version line and nothing else — and only the FORWARDED path
+  was ever silent, which is the path the tests exercise, so nothing could
+  see it.
 - `utils.js` — shared pure helpers: `mimeForEntity`, `isLoopback`,
   `expandEntity`, `projectMeta`, `useCollection`, `useRenderer` (via
   render.js), `isTextEntity`, `readEntityContent`, `extractRefs`,
@@ -370,6 +397,14 @@ brevity.
   `process.exitCode` — the engine suppresses that in watch mode by
   design. Config mismatch is refused by resolved PATH; config drift
   under a running instance is detected by stat over `configCoverage`.
+  `captureOutput` frames the instance's writes to the client AND echoes
+  them locally, so an operator watching the instance sees that a forwarded
+  request happened — right for log lines, wrong for a DOCUMENT. A `--json`
+  request wrote its whole report into the instance's own console as well,
+  which under pm2 is a few hundred lines in the out log for every report an
+  agent asks for. `echoStdout: false` suppresses just the local write, and
+  the seam is exact rather than a guess: under `--json` / `--tool` the
+  logger writes to stderr and stdout carries only the document.
 - `manager.js` — file watching (chokidar) and cron scheduling. `watch()`
   turns file events into SYNC events — it is how a source folder becomes
   entities, so pointing it at the output folder feeds output back in as

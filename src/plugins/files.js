@@ -228,7 +228,7 @@ export function files(options = {}) {
                 // nothing to emit. Progress ticks either way — a gated file
                 // was still looked at.
                 const newChecksum = await gateChecksum(source, id, { priorChecksums })
-                updateProgress()
+                updateProgress(id)
                 if (newChecksum === null) return
                 await createEntity({
                     id,

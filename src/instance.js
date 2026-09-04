@@ -218,10 +218,29 @@ let server = null
 // both into one undifferentiated stream throws that away, and the client can
 // only guess — it guessed stderr, so every forwarded document landed where no
 // consumer looks while the command exited 0.
-function captureOutput(onChunk) {
+// `echoStdout: false` frames the chunk to the client and writes NOTHING
+// locally.
+//
+// The instance wears the client's output so an operator watching it sees what
+// a forwarded request did — right for log lines, wrong for a DOCUMENT. A
+// --json request put its 364-line report into the instance's own console as
+// well as onto the client's stdout, and under pm2 that is 364 lines in the out
+// log for every report an agent asks for.
+//
+// The seam is exact rather than a guess: under --json / --tool the logger
+// writes to stderr and stdout carries only the document (see logger.js), so
+// stdout chunks during a document-carrying request ARE the document.
+function captureOutput(onChunk, { echoStdout = true } = {}) {
     const originals = [process.stdout.write, process.stderr.write]
     const patch = (stream, original, name) => function (chunk, encoding, callback) {
         try { onChunk(typeof chunk === 'string' ? chunk : chunk.toString(), name) } catch { /* client gone */ }
+        if (!echoStdout && name === 'stdout') {
+            // write()'s callback is the second argument when encoding is
+            // omitted. Dropped, a caller awaiting the drain never resumes.
+            const done = typeof encoding === 'function' ? encoding : callback
+            if (typeof done === 'function') process.nextTick(done)
+            return true
+        }
         return original.call(stream, chunk, encoding, callback)
     }
     process.stdout.write = patch(process.stdout, originals[0], 'stdout')
@@ -242,6 +261,12 @@ function captureOutput(onChunk) {
 // not what tells the two apart. Different configs are different files.
 // Does this request name a level that does not exist? Pure, so the refusal
 // can be decided before anything is applied.
+// Does this request's answer go on stdout as a document?
+// The same trio logger.js gates the progress bar on, for the same reason.
+function carriesDocument(request) {
+    return Boolean(request?.json || request?.tool || request?.tools)
+}
+
 function logRequestRefusal(request) {
     for (const [flag, level] of [['--log', request?.log], ['--log-install', request?.logInstall]]) {
         if (level !== undefined && level !== null && !LOG_LEVELS.includes(level)) {
@@ -296,7 +321,9 @@ async function configStale() {
 // the only process that can answer correctly. Same guards as a build: wrong
 // config refuses, drifted config refuses.
 async function serveReport(socket, request, logger) {
-    const restore = captureOutput((chunk, stream) => frame(socket, { type: 'log', chunk, stream }))
+    const restore = captureOutput(
+        (chunk, stream) => frame(socket, { type: 'log', chunk, stream }),
+        { echoStdout: !carriesDocument(request) })
     let code = 0
     try {
         code = await withRequestOutput(request, () => runReportOnly(request)) ?? 0
@@ -501,7 +528,9 @@ async function withRequestOutput(request, run) {
 }
 
 async function serveBuild(socket, request, logger) {
-    const restore = captureOutput((chunk, stream) => frame(socket, { type: 'log', chunk, stream }))
+    const restore = captureOutput(
+        (chunk, stream) => frame(socket, { type: 'log', chunk, stream }),
+        { echoStdout: !carriesDocument(request) })
     let code = 0
     try {
         // Fire the pending debounce rather than waiting it out.

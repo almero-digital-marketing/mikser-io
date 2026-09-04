@@ -100,7 +100,7 @@ export function observer(options = {}) {
                         synced++
                     }
                 }
-                updateProgress()
+                updateProgress(meta.id)
             }
 
             const entitiesToRemove = await findEntities({
@@ -114,7 +114,7 @@ export function observer(options = {}) {
             for (let entity of entitiesToRemove) {
                 deleteEntity(entity)
                 removed++
-                updateProgress()
+                updateProgress(entity.id)
             }
             if (synced || removed) {
                 logger.debug('Syncing api [%s] synced: %d, removed: %d', collection, synced, removed)

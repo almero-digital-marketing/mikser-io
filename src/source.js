@@ -431,7 +431,7 @@ export function useSource(core, options) {
         // is never the bottleneck.
         await pMap(files, async (file) => {
             await registerFile(file, { logger, scanned, stats: scanStats, priorChecksums })
-            if (phase === 'import') updateProgress()
+            if (phase === 'import') updateProgress(file)
         }, { concurrency: SCAN_CONCURRENCY })
 
         scanStats.deleted = await sweepDeleted(collection, scanned, async (e) => {

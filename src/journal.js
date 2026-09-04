@@ -227,9 +227,8 @@ export async function* useJournal(name, operations, signal) {
                 stopProgress()
                 throw new AbortError()
             }
-            updateProgress()
-
             const entry = rowToEntry(row)
+            updateProgress(entry.entity?.id)
             const originalEntity = row.entity   // already a JSON string
 
             yield entry

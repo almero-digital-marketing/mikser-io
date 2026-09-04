@@ -74,6 +74,23 @@ describe('--log sets a level that is actually in force', () => {
         assert.match(stripAnsi(combined), /no such level/)
     })
 
+    it('prints no banner either, when the level is above info', async () => {
+        // The banner is written in setup(), before commander has applied the
+        // level, so `--log silent` printed the version line and nothing else —
+        // the one line the flag most obviously promises to remove. Only the
+        // FORWARDED path was ever silent, and that is the path the instance
+        // tests below exercise, so nothing here could see it.
+        for (const level of ['silent', 'warn']) {
+            const { code, combined } = await runMikser(workdir, ['--force', '--log', level])
+            assert.equal(code, 0, combined)
+            assert.doesNotMatch(stripAnsi(combined), /mikser\. \d/,
+                `--log ${level} must not print the version banner`)
+        }
+        const plain = await runMikser(workdir, ['--force'])
+        assert.match(stripAnsi(plain.combined), /mikser\. \d/,
+            'and it is still there at the default level')
+    })
+
     it('has no --debug or --trace left to mislead anyone', async () => {
         for (const flag of ['--debug', '--trace']) {
             const { code, combined } = await runMikser(workdir, [flag])

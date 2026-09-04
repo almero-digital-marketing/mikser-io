@@ -28,6 +28,7 @@ import pino from 'pino'
 import pretty from 'pino-pretty'
 import Gauge from 'gauge'
 import { Writable } from 'node:stream'
+import path from 'node:path'
 import runtime from './runtime.js'
 import { useLogger } from './engine.js'
 import { onLoad, onFinalized } from './lifecycle.js'
@@ -482,10 +483,48 @@ onLoad(() => {
     runtime.engine.logger = createMikserLogger(level)
 })
 
-// Progress API. Surface preserved: trackProgress / updateProgress /
-// stopProgress / updateProgressDetails. Gauge-backed; no-op in non-TTY
-// contexts or when runtime.options.info is false (i.e. --debug / --trace
-// modes, where logs are voluminous and a bar would just be noise).
+// Progress API: trackProgress / updateProgress / stopProgress /
+// updateProgressDetails. A gauge where a terminal is watching, coded records
+// where one is not, and nothing at all for a phase that took no time.
+
+// Long phases only, and long means TIME.
+//
+// A record per quartile is right for 800 documents and absurd for 5. Eleven
+// of a plain build's thirteen phases carry exactly five items, so reporting
+// them the way a bar counts took a piped no-op build from 32 lines to 97 —
+// sixty-five progress records, five in the same millisecond to say a phase
+// did nothing. That is written into the log a deployment keeps, which is the
+// log the installed-level expiry exists to protect.
+//
+// A minimum TOTAL would fix the count and get the other half wrong: four PDFs
+// through Chrome is a small phase and a slow one, and it is exactly the phase
+// worth narrating. Elapsed time is what "long" means, it needs no per-phase
+// tuning, and it applies to the drawn path too — `finished: 5 0s` is the same
+// non-information in a terminal, and its own `0s` says so.
+export const PROGRESS_MIN_MS = 1000
+
+// Which item, not just how far. A phase name alone says a build is doing
+// something; the thing a stuck build needs to say is WHAT it is stuck on.
+function progressDetail(detail) {
+    if (detail === null || detail === undefined || detail === '') return null
+    const text = String(detail)
+    const root = runtime.options?.workingFolder
+    if (!root || !path.isAbsolute(text)) return text
+    // An entity id LOOKS absolute and is not a filesystem path.
+    // `/documents/p3706.md` relativised against the working folder becomes
+    // `../../../documents/p3706.md`, which names nothing anyone can act on.
+    // So shorten only what is genuinely INSIDE the folder, and leave every
+    // other string exactly as the call site handed it over.
+    const relative = path.relative(root, text)
+    return relative.startsWith('..') ? text : relative
+}
+
+function emitProgress({ name, total, value, detail }) {
+    const at = progressDetail(detail)
+    const fields = { code: 'progress', phase: name, total, value }
+    if (at) useLogger()?.info({ ...fields, detail: at }, '%s: %d/%d — %s', name, value, total, at)
+    else useLogger()?.info(fields, '%s: %d/%d', name, value, total)
+}
 
 export function trackProgress(name, total) {
     if (!name || !total) return
@@ -512,14 +551,18 @@ export function trackProgress(name, total) {
     // --json would have extended that to every machine reading the output.
     // Losing the graphics is the point; losing the information is not.
     const drawn = !carriesDocument && Boolean(process.stdout.isTTY) && Boolean(runtime.options.info)
-    currentBar = { name, total, value: 0, started: Date.now(), drawn, milestone: 0 }
+    currentBar = { name, total, value: 0, started: Date.now(), drawn, milestone: 0, detail: null }
     if (drawn) ensureGauge().show({ section: name, subsection: `0/${total}` }, 0)
-    else logger.info({ code: 'progress', phase: name, total, value: 0 }, '%s: 0/%d', name, total)
 }
 
-export function updateProgress() {
+export function updateProgress(detail) {
     if (!currentBar) return
     currentBar.value++
+    // The call site hands over whatever identifies the item it is on — a
+    // path, an id — and pays one assignment for it. Formatting happens at
+    // emit time, at most four times a phase, so naming the work costs the
+    // 14k-entity import nothing.
+    if (detail !== undefined) currentBar.detail = detail
     const { name, total, value, drawn } = currentBar
     if (drawn) {
         gauge?.show({ section: name, subsection: `${value}/${total}` }, value / total)
@@ -527,11 +570,14 @@ export function updateProgress() {
         // Quartiles, not every item: a bar redraws in place and costs one
         // line, a log record does not. 800 documents is 800 lines of noise if
         // this counts the way the bar does.
+        //
+        // The milestone advances whether or not the record is emitted. Held
+        // back, every quartile the phase passed under the threshold would fire
+        // in a burst the moment it crossed.
         const reached = Math.floor((value / total) * 4)
         if (reached > currentBar.milestone && value < total) {
             currentBar.milestone = reached
-            useLogger()?.info({ code: 'progress', phase: name, total, value },
-                '%s: %d/%d', name, value, total)
+            if (Date.now() - currentBar.started >= PROGRESS_MIN_MS) emitProgress(currentBar)
         }
     }
     if (value >= total) stopProgress()
@@ -541,14 +587,17 @@ export function stopProgress() {
     if (!currentBar) return
     const logger = useLogger()
     const { name, total, value, started } = currentBar
+    const ms = Date.now() - started
     gauge?.hide()
     // Structured either way, so a machine reading --json's stderr gets the
     // same facts a person reads off the bar.
+    //
+    // A phase that did not finish is worth a line at any duration — it is a
+    // warning, not progress, and the whole point is that it is unexpected.
     if (value < total) {
         logger.warn({ code: 'progress-unfinished', phase: name, total, value, missing: total - value },
             '%s unfinished: %d', name, total - value)
-    } else {
-        const ms = Date.now() - started
+    } else if (ms >= PROGRESS_MIN_MS) {
         logger.info({ code: 'progress-finished', phase: name, total, ms },
             '%s finished: %d %ds', name, total, Math.round(ms / 1000))
     }
