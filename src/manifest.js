@@ -1122,9 +1122,12 @@ export function createManifest(db) {
         // One stat per recorded snapshot, once per cycle, hoisted out of the
         // per-file path exactly like checksumsByCollection. The syscalls are
         // ~2.2ms per 1842 paths and cost the same whether the files are there
-        // or not; at the build level a warm 2000-document rebuild measured
-        // 1.05s against 1.08s without it, which is inside the run-to-run
-        // spread — the walk disappears into the cycle it is part of.
+        // or not. At the build level it does not register: warm rebuilds of
+        // the 10k perf corpus ran 3.36s median with this against 3.56s
+        // without, i.e. nominally faster, which is only to say the difference
+        // is well inside the run-to-run spread (3.0-4.1 vs 3.5-4.7 over five
+        // runs each). Re-measure with `npm run test:perf` before trusting a
+        // claim that it got slower.
         //
         // Resolves destinations through resolveOutputPath, which is what
         // auditOutput uses. The two must agree — `--audit-output` reporting

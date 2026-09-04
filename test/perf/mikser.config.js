@@ -14,7 +14,8 @@
 // Result: time spent here is pure mikser engine + handlebars render.
 // That's what we want to advertise — "10k entities, X seconds."
 
-import { documents, frontMatter, yaml, layouts, renderHbs } from 'mikser-io'
+import { documents, frontMatter, yaml, renderHbs } from 'mikser-io'
+import { layouts } from 'mikser-io-layouts'
 
 export default async () => ({
     plugins: [
