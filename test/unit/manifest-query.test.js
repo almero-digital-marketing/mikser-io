@@ -12,8 +12,11 @@
 // context, and journal). This file covers the decision logic in
 // isolation so we can be precise about each branch.
 
-import { describe, it, beforeEach } from 'node:test'
+import { describe, it, beforeEach, after } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 
 import runtime from '../../src/runtime.js'
 import { createManifest, SNAPSHOTS_SCHEMA, FAILURES_SCHEMA } from '../../src/manifest.js'
@@ -40,12 +43,28 @@ function makeDb() {
     return db
 }
 
+// Every test here means "the last render's output is still on disk, so the
+// only open question is the query closure". skipDecision checks that premise
+// now — a snapshot whose file is gone re-renders regardless of any filter —
+// so the destinations have to actually exist or every case short-circuits to
+// `output-missing` before reaching the branch under test.
+const DESTINATIONS = ['/sitemap.xml', '/featured.html']
+const outputFolder = mkdtempSync(path.join(tmpdir(), 'manifest-query-'))
+after(() => rmSync(outputFolder, { recursive: true, force: true }))
+
 beforeEach(() => {
     // findById is called by manifest.collectEdges + buildRefClosure
     // to hash $-ref targets. These tests don't seed $-refs, so a stub
     // that's just shaped right is enough — return undefined and the
     // closure falls back to the conservative path.
     runtime.catalog = { byId: new Map() }
+    runtime.options ??= {}
+    runtime.options.outputFolder = outputFolder
+    for (const destination of DESTINATIONS) {
+        const file = path.join(outputFolder, destination)
+        mkdirSync(path.dirname(file), { recursive: true })
+        writeFileSync(file, 'rendered')
+    }
 })
 
 describe('manifest.shouldSkip with query closure entries', () => {

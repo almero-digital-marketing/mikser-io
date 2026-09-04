@@ -8,7 +8,9 @@
 // needs knowledge a user of the tool should not need.
 //
 // Follows --audit-output's shape: report and exit, no build phases run.
+import { existsSync } from 'node:fs'
 import { inputHashOf, inputPartsOf, diffInputParts, lookupKeys, checksum as fileChecksum } from './utils.js'
+import { resolveOutputPath } from './manifest.js'
 import { filterKey } from './track.js'
 import { findEntity, findEntities, findById } from './catalog.js'
 import runtime from './runtime.js'
@@ -134,6 +136,13 @@ export async function explain(reference) {
     const failedSnapshots = snapshots
         .map(snap => runtime.manifest?.failureAt?.(entity.id, snap.destination))
         .filter(Boolean)
+    // Same position in the verdict for the same reason: a destination whose
+    // file is gone re-renders whatever the hashes say. Ranked below a failed
+    // attempt — if the last render threw, that is the more useful sentence,
+    // and it explains the absence too.
+    const missingDestinations = snapshots
+        .filter(snap => snap.destination && !existsSync(resolveOutputPath(snap.destination)))
+        .map(snap => snap.destination)
 
     // The catalog is as of the LAST BUILD. If the file has been edited since,
     // nothing here knows it yet — the hashes would all agree and the verdict
@@ -226,6 +235,18 @@ export async function explain(reference) {
                 : snap.inputParts
                     ? diffInputParts(snap.inputParts, currentParts)
                     : 'unknown',
+            // The file this render wrote, gone from disk.
+            //
+            // Same shape as `failed` above and added for the same reason: the
+            // recorded state is entirely consistent — the input hash matches,
+            // the snapshot is intact — so without this the report reads
+            // `[current]` and `would be SKIPPED` for an entity a build now
+            // re-renders. --explain contradicting the build is worse than
+            // --explain being incomplete, because it is the tool someone
+            // reaches for when the build has already surprised them.
+            missing: snap.destination
+                ? !existsSync(resolveOutputPath(snap.destination))
+                : false,
             outputHash: snap.outputHash ?? null,
             parent: snap.parent ?? null,
             // Which keys of its OWN meta the render read, and which keys it
@@ -286,6 +307,10 @@ export async function explain(reference) {
                   + `(${failedSnapshots[0].error})`
             : snapshots.some(s => s.inputHash !== currentHash)
                 ? renderVerdict(snapshots, currentHash, currentParts)
+            : missingDestinations.length
+                ? `would re-render — the output is gone from disk (${missingDestinations.join(', ')}). `
+                  + 'The inputs are unchanged, so nothing about the entity says this; the file being '
+                  + 'absent is the whole reason.'
                 : 'would be SKIPPED — input hash unchanged. A dependency in refClosure changing is the only other thing that would re-render it.'),
         lookupKeys: lookupKeys(entity),
         // Other entities rendering to the same path as this one.
@@ -360,6 +385,7 @@ export function formatExplain(report) {
     for (const r of report.renders) {
         row('rendered', `${r.renderedAt ?? 'unknown'}   → ${r.destination}`
             + (r.failed ? '   [STALE: last render attempt failed]'
+                : r.missing ? '   [MISSING: the file is not on disk]'
                 : r.stale ? '   [STALE: input hash moved since]'
                 : '   [current]'))
         if (r.failed) {

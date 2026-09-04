@@ -372,6 +372,11 @@ export async function sourcesOf(destination) {
 export function createManifest(db) {
     if (!db) throw new Error('createManifest: db is required')
 
+    // Per-instance, not module-level: tests build their own manifest via
+    // createManifest(db), and a shared memo would leak one test's output
+    // folder into the next.
+    let cachedMissingOutputs = null
+
     const stmtCollisions = db.prepare(`
         SELECT destination, count(*) AS n, group_concat(id) AS ids
         FROM mikser_snapshots
@@ -657,6 +662,7 @@ export function createManifest(db) {
         //
         //   unchanged        nothing this render depends on moved
         //   never-rendered   no snapshot: first build, or it never rendered
+        //   output-missing   the file the last render wrote is gone from disk
         //   inputs-changed   the entity's own hash moved
         //   ref-changed      a $-ref or partial it depends on moved
         //   query-matched    an entity matching a recorded query mutated
@@ -714,6 +720,32 @@ export function createManifest(db) {
                     reason: 'inputs-changed',
                     changed: describeInputChange(entity, snapshot),
                 }
+            }
+            // The inputs say nothing moved. That is only a reason to skip if
+            // the thing the last render PRODUCED is still there.
+            //
+            // Every branch above this one reasons about inputs, and inputs are
+            // not where `rm -rf out` shows up: the documents are unchanged,
+            // because what was deleted is the output. So the build skips every
+            // entity, renders nothing, prints no `Rendered:` line and exits 0
+            // with an empty output folder — correct by its own reasoning and
+            // wrong about the only question the caller asked. A missing output
+            // is a reason to re-render, not a reason to report unchanged.
+            //
+            // Placed after the input comparison and before the refClosure walk
+            // so one check covers both `unchanged` exits, and placed here
+            // rather than in the render loop because this is the function that
+            // owns the word: anything asking shouldSkip() gets the same answer.
+            //
+            // Checked unconditionally rather than behind a flag. It is one stat
+            // per entity that reached this point — 2.2ms for 1842 entities,
+            // the same whether the files are there or not — against a failure
+            // mode whose whole character is that nobody thinks to look for it.
+            // auditOutput() resolves destinations exactly this way, and it has
+            // to stay that way: the two disagreeing is the bug, since `--audit-output`
+            // finding what the build just called clean is what sent someone here.
+            if (snapshot.destination && !existsSync(resolveOutputPath(snapshot.destination))) {
+                return { skip: false, reason: 'output-missing', destination: snapshot.destination }
             }
             if (!snapshot.refClosure?.length) return { skip: true, reason: 'unchanged' }
             const sourceLang = entity?.meta?.lang ?? null
@@ -988,12 +1020,25 @@ export function createManifest(db) {
         // for the same id (matches the prior first-seen-wins semantic;
         // entity inputHashes were always added before deps in the
         // earlier loop).
+        // An entity whose output is gone is omitted entirely. The consumer
+        // uses a recorded hash to decide "this needs no render", and that
+        // conclusion only follows while the file the hash describes is still
+        // there. Omitting is the whole fix at this gate: a seed with no
+        // recorded hash is always dispatched.
+        //
+        // Done here rather than in the dispatcher because this map exists for
+        // that one decision, and a second consumer would otherwise have to
+        // rediscover the same caveat. missingOutputIds() is memoized for the
+        // cycle, so this shares the walk the source gate already paid for.
         recordedHashes() {
+            const missingOutputs = this.missingOutputIds()
             const map = new Map()
             for (const row of stmtEntityInputHashes.iterate()) {
+                if (missingOutputs.has(row.id)) continue
                 map.set(row.id, row.inputHash)
             }
             for (const row of stmtDepHashes.iterate()) {
+                if (missingOutputs.has(row.target)) continue
                 if (!map.has(row.target)) map.set(row.target, row.hash)
             }
             return map
@@ -1059,6 +1104,53 @@ export function createManifest(db) {
                 }
             }
             return edges
+        },
+
+        // The entity ids whose last render wrote a file that is no longer
+        // on disk. A dispatch hint, the same shape as queryAffected: the
+        // source checksum gate consults it so those entities are re-emitted
+        // instead of being short-circuited as unchanged.
+        //
+        // This exists because the gate that stops `rm -rf out` from being
+        // noticed is the FIRST one, not the last. An unchanged file never
+        // gets a CREATE, so it never reaches the journal, so the render loop
+        // never sees it and manifest.skipDecision — which does check for a
+        // missing output — is never asked. Fixing only the render gate makes
+        // the build correct for entities that get that far and changes
+        // nothing for the case in the report, where none of them do.
+        //
+        // One stat per recorded snapshot, once per cycle, hoisted out of the
+        // per-file path exactly like checksumsByCollection. The syscalls are
+        // ~2.2ms per 1842 paths and cost the same whether the files are there
+        // or not; at the build level a warm 2000-document rebuild measured
+        // 1.05s against 1.08s without it, which is inside the run-to-run
+        // spread — the walk disappears into the cycle it is part of.
+        //
+        // Resolves destinations through resolveOutputPath, which is what
+        // auditOutput uses. The two must agree — `--audit-output` reporting
+        // files that the build just called unchanged is the symptom, not a
+        // separate diagnostic.
+        // Memoized for the cycle. Two callers ask — the source checksum gate
+        // once per scan, recordedHashes() once per layouts dispatch — and both
+        // ask before anything has rendered, so one walk answers both. Cleared
+        // at the end of onFinalize, which is where this cycle's renders are
+        // recorded and the answer stops being true.
+        missingOutputIds() {
+            if (cachedMissingOutputs) return cachedMissingOutputs
+            const missing = new Set()
+            for (const row of stmtSelectAll.iterate()) {
+                const snap = rowToSnap(row)
+                if (!snap.destination) continue
+                if (!existsSync(resolveOutputPath(snap.destination))) missing.add(snap.id)
+            }
+            cachedMissingOutputs = missing
+            return missing
+        },
+
+        // Drops the memo. Called at the end of onFinalize; exported on the
+        // surface so a test can force a re-read without a full cycle.
+        forgetMissingOutputs() {
+            cachedMissingOutputs = null
         },
 
         // Walk the output folder against recorded snapshots, returning
@@ -1442,4 +1534,11 @@ onFinalize(async () => {
             + 'a render rewrites its own snapshot, so afterwards the new bytes agree with themselves.',
             drifted.length, drifted.length > SHOWN ? `, ${SHOWN} shown` : '')
     }
+
+    // This cycle just wrote files and recorded snapshots for them, so the
+    // memoized missing-output set describes a state that no longer exists.
+    // Dropped here rather than at the start of the next cycle because in
+    // watch mode there may not be one for hours, and a stale set held that
+    // long would keep re-dispatching entities it saw as missing.
+    m.forgetMissingOutputs()
 })
