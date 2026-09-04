@@ -228,27 +228,39 @@ brevity.
     immediately. Both surfaces compose; same `{level, target, options}`
     shape. Enables Better Stack / Datadog / Loki / Axiom / Sentry as
     standard sibling plugins without engine changes per vendor.
-- **Progress is TRACKED always, DRAWN only where a bar belongs, and
-  REPORTED only for a phase that took time.** Three decisions that were
-  once one. Drawing is gated on `carriesDocument` at the single place a
-  bar starts — the gauge writes to stdout, which under `--json` / `--tool`
-  carries the DOCUMENT, and forwarded it landed inside the JSON
-  (`^[[?25lDocuments import: >416/800` at byte 0). Tracking must survive
-  that gate, because `stopProgress` is where phase timings come from and
-  tying the two together left every piped build reporting none. Reporting
-  is gated on `PROGRESS_MIN_MS` ELAPSED, not on a minimum total: eleven of
-  a plain build's thirteen phases carry five items, and quartile records
-  for those took a piped no-op build from 32 lines to 97 — but four PDFs
-  through Chrome is a small phase and a slow one, and it is exactly the
-  one worth narrating. A count threshold gets that backwards; time does
-  not, and needs no per-phase tuning. It applies to the drawn path too, so
-  an attended build no longer prints `finished: 5 0s` — its own `0s` was
-  the argument. `updateProgress(detail)` takes whatever the call site
-  already holds — a path, an id — so a record says WHAT is progressing and
-  not only how far; stored per item, formatted at emit, so naming the work
-  costs a 14k import nothing. An entity id LOOKS absolute and is not a
-  path, so `progressDetail` shortens only what is genuinely inside the
-  working folder.
+- **Progress is TRACKED always, DRAWN only where a bar belongs, and the
+  RUNNING commentary is throttled to one line per `PROGRESS_INTERVAL_MS`
+  (30s).** Three decisions that were once one. Drawing is gated on
+  `carriesDocument` at the single place a bar starts — the gauge writes to
+  stdout, which under `--json` / `--tool` carries the DOCUMENT, and
+  forwarded it landed inside the JSON (`^[[?25lDocuments import: >416/800`
+  at byte 0). Tracking must survive that gate, because `stopProgress` is
+  where phase timings come from and tying the two together left every
+  piped build reporting none. The commentary is on a TIME interval and not
+  on quartiles: a quartile is a fraction of the WORK, so it says nothing
+  about how often a line appears — four records in three seconds on a fast
+  phase, four over an hour on a slow one. Quartiles took a piped no-op
+  build from 32 lines to 97, because eleven of thirteen phases carry five
+  items. `updateProgress(detail)` takes whatever the call site already
+  holds — a path, an id — so a running record says WHAT is progressing;
+  stored per item, formatted at emit, so naming the work costs a 14k
+  import nothing. An entity id LOOKS absolute and is not a path, so
+  `progressDetail` shortens only what is genuinely inside the working
+  folder.
+- **`progress-finished` is never gated, and the PHASE is its subject.**
+  Every phase says that it ran and what it cost, at any duration — with
+  the commentary throttled it is the only record most phases produce, and
+  off a TTY it is the only place phase timings come from. It has to stand
+  alone, which `Documents import finished: 5 0s` did not: a count with no
+  subject and a duration rounded away to nothing. `formatDuration` reports
+  ms under a second, so `5 in 1ms` and `6000 in 3.2s`. The subject is the
+  phase NAME, deliberately not the last item walked — that item is not
+  what the phase was about: seven journal phases in a row reported the
+  same `/layouts/page.hbs` because that is where the walk ended, and
+  `Files import finished: 3, last .../social-fb.svg` put a filename into
+  the log that nothing had anything to say about, breaking a scenario
+  asserting that file is never mentioned. Running records keep the item,
+  because there it shows MOVEMENT.
 - **The version banner is an info record and obeys the level.** Written in
   `setup()`, before commander has applied `--log`, so it reads the level
   off argv the same way `quietStdout` does. Without that, `--log silent`

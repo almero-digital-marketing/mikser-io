@@ -33,7 +33,7 @@ import assert from 'node:assert/strict'
 
 import runtime from '../../src/runtime.js'
 import {
-    trackProgress, updateProgress, stopProgress, PROGRESS_MIN_MS,
+    trackProgress, updateProgress, stopProgress, PROGRESS_INTERVAL_MS,
 } from '../../src/logger.js'
 
 let records
@@ -44,8 +44,9 @@ const priorTTY = process.stdout.isTTY
 beforeEach(() => {
     records = []
     const capture = (level) => (...args) => {
-        const fields = typeof args[0] === 'object' ? args[0] : {}
-        records.push({ level, ...fields })
+        const object = typeof args[0] === 'object'
+        const fields = object ? args[0] : {}
+        records.push({ level, ...fields, args: object ? args.slice(1) : args })
     }
     runtime.engine = { logger: { info: capture('info'), warn: capture('warn'), debug: capture('debug') } }
     runtime.options = { ...priorOptions, info: true }
@@ -65,27 +66,57 @@ const coded = (code) => records.filter(r => r.code === code)
 const run = (count, detail) => { for (let i = 0; i < count; i++) updateProgress(detail) }
 
 describe('progress is reported for long phases and nothing else', () => {
-    it('says nothing at all about a phase that took no time', () => {
+    it('says nothing about the RUNNING of a phase that took no time', () => {
         // The regression this exists for. Five items, one millisecond, and
         // the old code printed 0/5, 2/5, 3/5, 4/5 and a finished line.
         runtime.options.json = true
         trackProgress('Import', 5)
         run(5)
-        assert.deepEqual(records.filter(r => r.code?.startsWith('progress')), [],
-            'a phase that did nothing has nothing to report')
+        assert.deepEqual(coded('progress'), [],
+            'no running commentary on a phase that did nothing')
     })
 
-    it('reports a phase that runs long, at quartiles rather than per item', () => {
-        // A bar redraws in place and costs one line; a log record does not.
-        // 800 documents must not become 800 lines.
+    it('still says that the phase RAN, however brief', () => {
+        // The gate is on the commentary, never on this. With the quartiles
+        // held back it is the only record a short phase produces, so gating
+        // it too left a build unable to say what it had done — and off a TTY
+        // it is the only place phase timings come from.
         runtime.options.json = true
-        trackProgress('Import', 100)
-        mock.timers.tick(PROGRESS_MIN_MS + 1)
-        run(100)
+        trackProgress('Import', 5)
+        run(5)
+        assert.equal(coded('progress-finished').length, 1)
+        assert.equal(coded('progress-finished')[0].total, 5)
+    })
+
+    it('gives a duration at the resolution it has, not rounded away to 0s', () => {
+        // `Documents import finished: 5 0s` reported the whole phase as
+        // nothing. Under a second the number IS the information.
+        runtime.options.json = true
+        trackProgress('Import', 5)
+        mock.timers.tick(340)
+        run(5)
+        const finished = coded('progress-finished')[0]
+        assert.equal(finished.ms, 340)
+        assert.ok(finished.args.includes('340ms'),
+            `340ms must not print as 0s — got ${JSON.stringify(finished.args)}`)
+    })
+
+    it('reports on a TIME interval, not per item and not per quartile', () => {
+        // A quartile is a fraction of the WORK, so it says nothing about how
+        // often a line appears — four records in three seconds on a fast
+        // phase, four records over an hour on a slow one. 800 documents must
+        // not become 800 lines, and neither must a long phase go quiet.
+        runtime.options.json = true
+        trackProgress('Import', 1000)
+        for (let i = 0; i < 1000; i++) {
+            mock.timers.tick(300)          // 300s of work, ten intervals
+            updateProgress()
+        }
+        // Nine, not ten: the interval that lands exactly on the last item is
+        // the finished line's, not a progress record's.
         const during = coded('progress')
-        assert.ok(during.length <= 4,
-            `expected at most quartiles, got ${during.length}`)
-        assert.deepEqual(during.map(r => r.value), [25, 50, 75])
+        assert.deepEqual(during.map(r => r.value),
+            [100, 200, 300, 400, 500, 600, 700, 800, 900])
     })
 
     it('reports a SMALL phase that is SLOW, which a count threshold could not', () => {
@@ -94,35 +125,39 @@ describe('progress is reported for long phases and nothing else', () => {
         // not a minimum total.
         runtime.options.json = true
         trackProgress('Postprocess', 4)
-        for (let i = 0; i < 4; i++) { mock.timers.tick(30_000); updateProgress() }
+        for (let i = 0; i < 4; i++) { mock.timers.tick(PROGRESS_INTERVAL_MS + 1); updateProgress() }
         assert.ok(coded('progress').length > 0, 'a slow phase reports however few items it has')
         assert.equal(coded('progress-finished').length, 1)
     })
 
-    it('does not burst the milestones it passed under the threshold', () => {
-        // The milestone has to advance whether or not the record is emitted.
-        // Held back, every quartile the phase passed while it was still quick
-        // would fire at once the moment it crossed.
+    it('stays quiet for a phase that finishes inside one interval', () => {
+        // Its finished line covers it. This is the case that took a piped
+        // no-op build from 32 lines to 97.
         runtime.options.json = true
         trackProgress('Import', 100)
-        run(60)
-        assert.equal(coded('progress').length, 0, 'still quick, still quiet')
-        mock.timers.tick(PROGRESS_MIN_MS + 1)
-        run(40)
-        assert.deepEqual(coded('progress').map(r => r.value), [75],
-            'only the quartile it actually reached while slow')
+        mock.timers.tick(PROGRESS_INTERVAL_MS - 1)
+        run(100)
+        assert.equal(coded('progress').length, 0, 'no running commentary')
+        assert.equal(coded('progress-finished').length, 1, 'but it still says it ran')
     })
 
-    it('says when a long phase finished, and how long it took', () => {
+    it('says what finished, how much of it, and what it cost', () => {
         runtime.options.json = true
-        trackProgress('Import', 4)
-        mock.timers.tick(PROGRESS_MIN_MS + 500)
-        run(4)
+        trackProgress('Rendering', 4)
+        mock.timers.tick(1500)
+        run(4, '/documents/post.md')
         const finished = coded('progress-finished')
         assert.equal(finished.length, 1, 'the phase says when it finished')
-        assert.equal(finished[0].phase, 'Import')
+        assert.equal(finished[0].phase, 'Rendering')
         assert.equal(finished[0].total, 4)
-        assert.equal(finished[0].ms, PROGRESS_MIN_MS + 500)
+        assert.equal(finished[0].ms, 1500)
+        assert.ok(finished[0].args.includes('1.5s'))
+        // The PHASE is the subject, not the last item the walk happened to
+        // end on: seven journal phases reported the same /layouts/page.hbs,
+        // and a filename here broke a test asserting that file is never
+        // mentioned in the build output.
+        assert.equal(finished[0].detail, undefined,
+            'the finished line names the phase, not an arbitrary entity')
     })
 
     it('says so when a phase does not finish, at any duration', () => {
@@ -145,7 +180,7 @@ describe('progress says WHAT is progressing', () => {
         // has to say is what it is stuck ON.
         runtime.options.json = true
         trackProgress('Rendering', 100)
-        mock.timers.tick(PROGRESS_MIN_MS + 1)
+        mock.timers.tick(PROGRESS_INTERVAL_MS + 1)
         run(100, '/documents/post.md')
         assert.equal(coded('progress')[0].detail, '/documents/post.md')
     })
@@ -157,7 +192,7 @@ describe('progress says WHAT is progressing', () => {
         runtime.options.json = true
         runtime.options.workingFolder = '/srv/site'
         trackProgress('Rendering', 100)
-        mock.timers.tick(PROGRESS_MIN_MS + 1)
+        mock.timers.tick(PROGRESS_INTERVAL_MS + 1)
         run(100, '/documents/p3706.md')
         assert.equal(coded('progress')[0].detail, '/documents/p3706.md')
     })
@@ -166,7 +201,7 @@ describe('progress says WHAT is progressing', () => {
         runtime.options.json = true
         runtime.options.workingFolder = '/srv/site'
         trackProgress('Import', 100)
-        mock.timers.tick(PROGRESS_MIN_MS + 1)
+        mock.timers.tick(PROGRESS_INTERVAL_MS + 1)
         run(100, '/srv/site/documents/post.md')
         assert.equal(coded('progress')[0].detail, 'documents/post.md')
     })
@@ -174,7 +209,7 @@ describe('progress says WHAT is progressing', () => {
     it('reports the phase without a detail when the call site has none', () => {
         runtime.options.json = true
         trackProgress('Import', 100)
-        mock.timers.tick(PROGRESS_MIN_MS + 1)
+        mock.timers.tick(PROGRESS_INTERVAL_MS + 1)
         run(100)
         const first = coded('progress')[0]
         assert.ok(first, 'still reported')
@@ -190,7 +225,7 @@ describe('the progress bar never writes where a document is written', () => {
             process.stdout.isTTY = true
             runtime.options[flag] = flag === 'tool' ? 'mikser_ping' : true
             trackProgress('Import', 100)
-            mock.timers.tick(PROGRESS_MIN_MS + 1)
+            mock.timers.tick(PROGRESS_INTERVAL_MS + 1)
             run(100)
             assert.ok(coded('progress').length > 0,
                 'records, not a bar — the phase took the non-drawn branch')

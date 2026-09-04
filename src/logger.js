@@ -498,10 +498,21 @@ onLoad(() => {
 //
 // A minimum TOTAL would fix the count and get the other half wrong: four PDFs
 // through Chrome is a small phase and a slow one, and it is exactly the phase
-// worth narrating. Elapsed time is what "long" means, it needs no per-phase
-// tuning, and it applies to the drawn path too — `finished: 5 0s` is the same
-// non-information in a terminal, and its own `0s` says so.
-export const PROGRESS_MIN_MS = 1000
+// worth narrating. Elapsed time is what "long" means and it needs no
+// per-phase tuning.
+//
+// It is an INTERVAL rather than a threshold, and quartiles are gone with it.
+// A quartile is a fraction of the WORK, so it says nothing about how often a
+// line appears: four records land in three seconds on a fast phase and four
+// records cover an hour on a slow one. Time is the axis a reader cares about,
+// so one line per interval, however much work passed in between.
+//
+// This gates the RUNNING commentary only. `progress-finished` is not behind
+// it: every phase says that it ran and what it cost, whatever the duration.
+// Gated, a short phase produced no record at all and a build could not say
+// what it had done — and off a TTY that line is the only place phase timings
+// come from.
+export const PROGRESS_INTERVAL_MS = 30_000
 
 // Which item, not just how far. A phase name alone says a build is doing
 // something; the thing a stuck build needs to say is WHAT it is stuck on.
@@ -517,6 +528,12 @@ function progressDetail(detail) {
     // other string exactly as the call site handed it over.
     const relative = path.relative(root, text)
     return relative.startsWith('..') ? text : relative
+}
+
+// `0s` for anything under a second reports the whole phase as nothing. Below
+// a second the number IS the information.
+function formatDuration(ms) {
+    return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`
 }
 
 function emitProgress({ name, total, value, detail }) {
@@ -551,7 +568,7 @@ export function trackProgress(name, total) {
     // --json would have extended that to every machine reading the output.
     // Losing the graphics is the point; losing the information is not.
     const drawn = !carriesDocument && Boolean(process.stdout.isTTY) && Boolean(runtime.options.info)
-    currentBar = { name, total, value: 0, started: Date.now(), drawn, milestone: 0, detail: null }
+    currentBar = { name, total, value: 0, started: Date.now(), drawn, lastReport: Date.now(), detail: null }
     if (drawn) ensureGauge().show({ section: name, subsection: `0/${total}` }, 0)
 }
 
@@ -567,17 +584,15 @@ export function updateProgress(detail) {
     if (drawn) {
         gauge?.show({ section: name, subsection: `${value}/${total}` }, value / total)
     } else {
-        // Quartiles, not every item: a bar redraws in place and costs one
-        // line, a log record does not. 800 documents is 800 lines of noise if
-        // this counts the way the bar does.
-        //
-        // The milestone advances whether or not the record is emitted. Held
-        // back, every quartile the phase passed under the threshold would fire
-        // in a burst the moment it crossed.
-        const reached = Math.floor((value / total) * 4)
-        if (reached > currentBar.milestone && value < total) {
-            currentBar.milestone = reached
-            if (Date.now() - currentBar.started >= PROGRESS_MIN_MS) emitProgress(currentBar)
+        // One line per interval, not per item and not per quartile: a bar
+        // redraws in place and costs one line, a log record does not, so 800
+        // documents is 800 lines of noise if this counts the way the bar does.
+        // A phase that finishes inside the interval says nothing at all while
+        // it runs — its finished line covers it.
+        const now = Date.now()
+        if (now - currentBar.lastReport >= PROGRESS_INTERVAL_MS && value < total) {
+            currentBar.lastReport = now
+            emitProgress(currentBar)
         }
     }
     if (value >= total) stopProgress()
@@ -592,14 +607,26 @@ export function stopProgress() {
     // Structured either way, so a machine reading --json's stderr gets the
     // same facts a person reads off the bar.
     //
-    // A phase that did not finish is worth a line at any duration — it is a
-    // warning, not progress, and the whole point is that it is unexpected.
+    // This line has to stand alone. With the running commentary on an
+    // interval it is the ONLY record most phases produce, and `Documents
+    // import finished: 5 0s` said neither what the five were nor how long it
+    // took — a count with no subject and a duration rounded away to nothing.
+    //
+    // The subject is the PHASE, not an item. The last entity a phase happened
+    // to walk is not what the phase was about: seven journal phases in a row
+    // reported the same `/layouts/page.hbs` because that is where the walk
+    // ended, and `Files import finished: 3, last .../social-fb.svg` put a
+    // filename into the build log that nothing had anything to say about — it
+    // broke a test asserting that file is never mentioned, which is exactly
+    // the misreading it invites. `Files import finished: 3 in 3ms` already
+    // says what finished, how much of it, and what it cost. The running
+    // records keep the item, because there it shows MOVEMENT.
     if (value < total) {
         logger.warn({ code: 'progress-unfinished', phase: name, total, value, missing: total - value },
-            '%s unfinished: %d', name, total - value)
-    } else if (ms >= PROGRESS_MIN_MS) {
+            '%s unfinished: %d of %d after %s', name, total - value, total, formatDuration(ms))
+    } else {
         logger.info({ code: 'progress-finished', phase: name, total, ms },
-            '%s finished: %d %ds', name, total, Math.round(ms / 1000))
+            '%s finished: %d in %s', name, total, formatDuration(ms))
     }
     currentBar = null
 }
