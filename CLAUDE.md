@@ -155,6 +155,20 @@ brevity.
   (PK `(id, destination)`, `refClosure` as JSON, partial index on
   `parent`). `recordedHashes` aggregates dep hashes via
   `json_each` in C rather than parsing every row in JS.
+- **The cache stamp means a cycle FINISHED.** `mikser_meta.schema_version`
+  (and `config_checksum`) are written by `db.commitStamp()` from
+  `onFinalized`, never at `db.open()`. Written at open they recorded only
+  that the cache was opened, and an upgrade whose rebuild was then
+  interrupted left a current stamp over a half-built cache — catalog
+  matching disk, no snapshots, `out/` holding the previous build — after
+  which every build correctly reported "N unchanged" and rendered nothing.
+  A deployment served the previous day's pages that way, green on every
+  signal. Deferred, the same sequence self-heals. Its absence beside a
+  populated catalog is an invalidation override
+  (`REASON.REBUILD_INTERRUPTED`); an absent stamp with an EMPTY catalog is
+  an ordinary first run and emptiness already opens every gate. A unit test
+  that wants a stamped cache has to call `commitStamp()` — that is what a
+  finished cycle does.
 - `invalidation.js` — **"should this work be redone?"**, and the only
   module allowed to answer the half of it that is not layer-specific.
   Four layers ask (source.js's checksum gate, `recordedHashes` for the

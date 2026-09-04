@@ -136,6 +136,9 @@ describe('a cache wipe cannot reach the durable store', () => {
         }
         let cache = open('1.0.0')
         cache.handle.exec("INSERT INTO cache_rows (id) VALUES ('derived')")
+        // A completed cycle, which is what stamps the version this cache was
+        // built for. The unlink below is triggered by that version moving.
+        cache.commitStamp()
         cache.close()
 
         cache = open('2.0.0')   // schema mismatch → wipe

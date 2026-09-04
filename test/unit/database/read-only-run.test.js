@@ -47,10 +47,16 @@ function open({ version = '1.0.0', configChecksum } = {}) {
 
 const count = (db) => db.handle.prepare('SELECT count(*) c FROM rows_t').get().c
 
+// Seeds a cache that a COMPLETED build left behind. commitStamp is what a
+// finished cycle does, and it is what records the version and config this
+// cache was built for — without it there is nothing for a later open to
+// detect a change against, because an unstamped cache is by definition one
+// whose rebuild never finished.
 function seedAndClose({ configChecksum }) {
     const db = open({ configChecksum })
     db.handle.exec("INSERT OR REPLACE INTO rows_t (id) VALUES ('built')")
     assert.equal(count(db), 1)
+    db.commitStamp()
     db.close?.()
 }
 

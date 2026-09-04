@@ -48,7 +48,7 @@ import Database from 'better-sqlite3'
 import runtime from '../runtime.js'
 import { isReportOnlyRun } from '../tools.js'
 import { reportWipe } from '../report.js'
-import { onLoaded } from '../lifecycle.js'
+import { onLoaded, onFinalized } from '../lifecycle.js'
 import packageInfo from '../../package.json' with { type: 'json' }
 
 // Local logger resolver — same one-liner engine.js exports as
@@ -242,6 +242,10 @@ export function createSqliteDatabase({
     // `--clear` asks for. Removes the file; nothing durable is in it.
     forceWipe = false,
 }) {
+    // Set at open, written at the first successful finalize. See the note
+    // where it is assigned.
+    let pendingStamp = null
+
     // Tests inject their own provisioners; the runtime path falls
     // through to the module-level `provisioners` array that plugins
     // populate via onProvision() at module-eval.
@@ -391,9 +395,24 @@ export function createSqliteDatabase({
             handle = new Database(dbPath)
             setupConnection()
         }
-        const stmtStamp = handle.prepare('INSERT OR REPLACE INTO mikser_meta (key, value) VALUES (?, ?)')
-        stmtStamp.run('schema_version', version)
-        if (currentConfig) stmtStamp.run('config_checksum', currentConfig)
+        // Stamped when a cycle FINISHES, not when the database opens.
+        //
+        // The stamp is the only record of "this cache was rebuilt for this
+        // version", and writing it at open made it a record of "this cache
+        // was opened", which is a different and much weaker claim. A wipe
+        // followed by an interrupted rebuild left the version current and the
+        // cache half-built: the import had finished, so the catalog matched
+        // disk, but nothing had rendered, so there were no snapshots and the
+        // output folder still held the previous build. Every later start read
+        // a matching version, wiped nothing, correctly reported "N unchanged"
+        // and rendered nothing — a site frozen on the last good output, green
+        // on every signal, recoverable only by --force.
+        //
+        // Deferred, the same sequence self-heals: the interrupted run leaves
+        // no stamp, so the next start sees a mismatch and rebuilds properly.
+        // config_checksum goes with it for the same reason — a config change
+        // that half-applied must not look applied.
+        pendingStamp = { version, config: currentConfig }
 
         // Build provisioning context. firstRun is true when the file
         // didn't exist before this open OR when the schema mismatch
@@ -444,6 +463,43 @@ export function createSqliteDatabase({
             }
         }
 
+        // Did the last rebuild finish?
+        //
+        // Now that the stamp means "a cycle completed", its ABSENCE beside a
+        // populated catalog is a fact worth acting on: entities were imported
+        // and nothing ever finalized. The catalog matches disk, so every gate
+        // that reasons about inputs correctly says "unchanged"; the manifest
+        // is empty, so nothing has been rendered; and the output folder still
+        // holds whatever the last complete build wrote, because a cache wipe
+        // unlinks the database and nothing else.
+        //
+        // No layer can see this on its own. The source gate's evidence is
+        // sound, the dispatcher seeds from a journal that was discarded with
+        // the interrupted run, and the render gate — which would answer
+        // `never-rendered` — is never asked, because nothing dispatches to it.
+        // So it is declared as an override, and invalidation.js hands it to
+        // every gate at once.
+        //
+        // An empty catalog here is an ordinary first run or a completed wipe:
+        // nothing to reconcile, and emptiness already opens every gate.
+        if (!handle.prepare('SELECT value FROM mikser_meta WHERE key = ?').get('schema_version')) {
+            const table = handle.prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='mikser_entities'").get()
+            const entities = table
+                ? handle.prepare('SELECT count(*) AS count FROM mikser_entities').get()?.count ?? 0
+                : 0
+            if (entities > 0) {
+                logger?.warn(
+                    'The last rebuild did not finish — %d entities were imported and no cycle completed, '
+                    + 'so the catalog describes your sources while nothing has been rendered from them and '
+                    + 'the output folder still holds the previous build. Rebuilding everything on this run. '
+                    + '(A cache wipe followed by a restart mid-cycle does this; without the check the site '
+                    + 'stays on the old output and every build reports "unchanged".)',
+                    entities,
+                )
+                runtime.options.cacheRebuildInterrupted = true
+            }
+        }
     }
 
     function close() {
@@ -467,6 +523,17 @@ export function createSqliteDatabase({
         path: dbPath,
         open,
         close,
+        // Called once a cycle has finalized — see pendingStamp. Idempotent:
+        // the second cycle of a watch run has nothing left to write.
+        commitStamp() {
+            if (!pendingStamp || !handle) return false
+            const stamp = handle.prepare('INSERT OR REPLACE INTO mikser_meta (key, value) VALUES (?, ?)')
+            stamp.run('schema_version', pendingStamp.version)
+            if (pendingStamp.config) stamp.run('config_checksum', pendingStamp.config)
+            pendingStamp = null
+            runtime.options.cacheRebuildInterrupted = false
+            return true
+        },
         get isOpen() { return handle !== null },
         // Provisioning context from the most recent open. Plugins'
         // onLoaded handlers can read this without subscribing to
@@ -491,6 +558,20 @@ export function createSqliteDatabase({
         get handle() { return handle },
     }
 }
+
+// The cache is stamped for this version only once a cycle has run to the
+// end. Registered at module level rather than per-open so a watch server
+// that re-opens nothing still stamps its first completed cycle, and so the
+// hook cannot accumulate across opens.
+//
+// onFinalized, not onFinalize: the manifest writes this cycle's snapshots in
+// onFinalize, and the stamp claims that work happened. Claiming it one hook
+// early would reintroduce the failure in miniature.
+onFinalized(async () => {
+    if (db?.commitStamp?.()) {
+        useLogger()?.debug('Cache stamped — a full cycle completed for this schema version')
+    }
+})
 
 onLoaded(async () => {
     if (db?.isOpen) return  // multi-cycle watch mode — keep the open connection

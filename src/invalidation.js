@@ -50,6 +50,7 @@ export const REASON = Object.freeze({
     FORCE: 'force',
     CACHE_INVALIDATED: 'cache-invalidated',
     RELOAD: 'reload',
+    REBUILD_INTERRUPTED: 'rebuild-interrupted',
     OUTPUT_MISSING: 'output-missing',
     // Evidence — each layer's business, named here so the vocabulary is
     // legible as a whole.
@@ -130,6 +131,12 @@ export function bypassReason({ reload = false, id } = {}) {
     if (reload) return REASON.RELOAD
     if (runtime.options?.force) return REASON.FORCE
     if (runtime.catalog?.cacheInvalidated) return REASON.CACHE_INVALIDATED
+    // The previous rebuild imported entities and never finalized, so the
+    // catalog describes sources that nothing has rendered. Set by
+    // database/index.js at open, cleared when a cycle stamps the cache.
+    // Declared here so it reaches every gate — which is the whole reason
+    // this module exists, and this is the first override added since.
+    if (runtime.options?.cacheRebuildInterrupted) return REASON.REBUILD_INTERRUPTED
     if (id !== undefined && missingOutputIds().has(id)) return REASON.OUTPUT_MISSING
     return null
 }

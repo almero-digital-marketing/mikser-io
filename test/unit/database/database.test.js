@@ -93,15 +93,25 @@ describe('createSqliteDatabase — schema and lifecycle', () => {
         db.close()
     })
 
-    it('writes meta.schema_version on first open', () => {
+    it('stamps meta.schema_version when a cycle completes, not at open', () => {
+        // The stamp records that this cache was REBUILT for this version.
+        // Writing it at open recorded only that the cache was OPENED, and an
+        // upgrade whose rebuild was then interrupted left a current stamp
+        // over a half-built cache: catalog matching disk, nothing rendered,
+        // and every later build reporting "unchanged" over stale output.
         const db = createSqliteDatabase({
             runtimeFolder,
             version: '8.2.0',
             schemas: new Map(),
         })
         db.open()
-        const stored = db.prepare('SELECT value FROM mikser_meta WHERE key = ?').get('schema_version')
-        assert.equal(stored.value, '8.2.0')
+        const read = () => db.prepare('SELECT value FROM mikser_meta WHERE key = ?').get('schema_version')
+        assert.equal(read(), undefined, 'open alone must not stamp')
+
+        assert.equal(db.commitStamp(), true, 'a completed cycle stamps')
+        assert.equal(read().value, '8.2.0')
+
+        assert.equal(db.commitStamp(), false, 'and there is nothing left to stamp')
         db.close()
         rmSync(runtimeFolder, { recursive: true, force: true })
     })
@@ -120,6 +130,9 @@ describe('createSqliteDatabase — schema and lifecycle', () => {
         })
         db1.open()
         db1.prepare('INSERT INTO sentinel (id) VALUES (?)').run('marker')
+        // A complete cycle, which is what leaves a version to mismatch
+        // against. Without it there is no stamp and nothing to upgrade FROM.
+        db1.commitStamp()
         db1.close()
 
         const warnings = []
@@ -138,9 +151,15 @@ describe('createSqliteDatabase — schema and lifecycle', () => {
         const survivors = db2.prepare('SELECT id FROM sentinel').all()
         assert.deepEqual(survivors, [], 'cache should be empty after wipe')
 
-        // New version is stamped.
-        const stamp = db2.prepare('SELECT value FROM mikser_meta WHERE key = ?').get('schema_version')
-        assert.equal(stamp?.value, '9.0.0')
+        // The new version is stamped by the cycle that rebuilds, not by the
+        // open that wiped. Until then the cache carries no version at all,
+        // which is what makes an interrupted upgrade recoverable: the next
+        // start finds no stamp and rebuilds instead of trusting a cache that
+        // was only ever emptied.
+        const read = () => db2.prepare('SELECT value FROM mikser_meta WHERE key = ?').get('schema_version')
+        assert.equal(read(), undefined, 'the wipe alone must not claim the new version')
+        db2.commitStamp()
+        assert.equal(read()?.value, '9.0.0')
 
         // Warning surfaced.
         assert.equal(warnings.length, 1, 'expected exactly one warning')
