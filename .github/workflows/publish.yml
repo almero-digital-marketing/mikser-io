@@ -45,7 +45,24 @@ jobs:
       - name: Use an npm that can do trusted publishing
         run: npm install -g npm@latest
 
-      - run: npm ci
+      # `npm install`, not `npm ci`, and that is about this repo's shape rather
+      # than a shortcut. These packages are developed inside a workspace —
+      # /home/.../mikser/package.json declares workspaces ["mikser-io",
+      # "mikser-io-*"] — so dependencies hoist to the workspace root and each
+      # package's own package-lock.json is never read by anyone locally. They
+      # rot silently: mikser-io's had no top-level knex at all while
+      # package.json declared it, and pinned mime-types two majors back.
+      #
+      # CI checks out one repository standalone, so it is the only thing that
+      # would ever read them. `npm ci` would therefore fail on drift nobody can
+      # see and nobody has a reason to fix, forty times over.
+      - run: npm install --no-audit --no-fund
+        env:
+          # puppeteer downloads a browser on install. Nothing in the release
+          # path renders a page — the smoke test that would is deliberately
+          # not run here — so this is a slow, network-dependent step whose
+          # only contribution is a way to fail.
+          PUPPETEER_SKIP_DOWNLOAD: '1'
 
       # The tag is the release. A tag that disagrees with package.json would
       # publish a version nobody asked for, under a name that says otherwise —
@@ -61,13 +78,24 @@ jobs:
           fi
           echo "publishing $PKG"
 
-      # Unit and scenarios only, deliberately. `npm test` also runs test:smoke,
-      # which builds test/fixture and reports faults for the things a CI box
-      # does not have — no chrome for the pdf postprocessor, no OpenAI key for
-      # the vector plugin — and a coded fault is a non-zero exit. Those are
-      # environment facts, not regressions, and failing a release on them would
-      # teach everyone to ignore a red run.
+      # Unit tests only, and the reason is the workspace again rather than
+      # laziness.
+      #
+      # test:scenarios spawns real builds whose configs import sibling packages
+      # — mikser-io-layouts, mikser-io-render-liquid — and its harness reaches
+      # them by setting NODE_PATH to the PARENT directory of this checkout.
+      # That is the workspace root on a development machine and nothing at all
+      # in CI, where this repository is cloned on its own. Every scenario fails
+      # there for the same uninteresting reason.
+      #
+      # test:smoke is out for a different reason: it builds test/fixture and
+      # reports coded faults for what a CI box lacks — no chrome for the pdf
+      # postprocessor, no OpenAI key for the vector plugin — and a fault exits
+      # non-zero. Those are environment facts, and failing releases on them
+      # teaches people to ignore red runs.
+      #
+      # So 899 unit tests gate the release here, and the scenario suite stays
+      # what it already is: the thing you run in the workspace before tagging.
       - run: npm run test:unit
-      - run: npm run test:scenarios
 
       - run: npm publish --access public

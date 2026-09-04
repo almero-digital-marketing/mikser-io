@@ -1315,8 +1315,22 @@ describe('readEntityContent', () => {
         assert.match(result.contentError, /Provider "noatall" not installed \(mikser-io-provider-noatall\)/)
     })
 
-    it('scheme dispatch: reaches an installed provider end-to-end', async () => {
-        // mikser-io-provider-gdrive IS installed via the workspace.
+    it('scheme dispatch: reaches an installed provider end-to-end', async (t) => {
+        // Reaching the provider requires mikser-io-provider-gdrive to be
+        // resolvable, which is true in the workspace this package is developed
+        // in and false anywhere else. A clone of this repository on its own —
+        // which is what CI checks out — has no sibling packages, and this
+        // asserted the workspace layout rather than the dispatch.
+        //
+        // Skipped rather than relaxed: "not installed" and "not initialized"
+        // are different answers, and accepting either would let a genuine
+        // dispatch failure pass here.
+        try {
+            await import('mikser-io-provider-gdrive')
+        } catch {
+            t.skip('mikser-io-provider-gdrive is not resolvable outside the workspace')
+            return
+        }
         // The provider's lifecycle plugin hasn't been initialized in
         // this test, so its read() returns "not initialized" — which
         // confirms the dispatch reached the package and called its
