@@ -60,6 +60,9 @@ import { extractRefs, inputHashOf, inputPartsOf, diffInputParts, lookupKeys } fr
 import { filterKey } from './track.js'
 import { findById, findEntities } from './catalog.js'
 import { useDatabase, registerSchema } from './database/index.js'
+import {
+    REASON, bypassReason, resolveOutputPath, outputMissing, missingOutputIds, forgetMissingOutputs,
+} from './invalidation.js'
 
 // Schema registration. Applied at db.open(). PRIMARY KEY (id,
 // destination) — leading id column means `WHERE id = ?` queries use the
@@ -284,13 +287,6 @@ function snapToRow(snap) {
 // becomes two symptoms — one loud (every asset reported missing, at its
 // real and present path) and one silent (no outputHash recorded, leaving
 // most snapshots presence-checked only).
-export function resolveOutputPath(destination, outputFolder = runtime.options?.outputFolder) {
-    if (!destination) return undefined
-    const joined = path.join(outputFolder ?? '', destination)
-    if (existsSync(joined)) return joined
-    if (path.isAbsolute(destination) && existsSync(destination)) return destination
-    return joined
-}
 
 async function hashOutputFile(destination) {
     const filePath = resolveOutputPath(destination)
@@ -371,11 +367,6 @@ export async function sourcesOf(destination) {
 
 export function createManifest(db) {
     if (!db) throw new Error('createManifest: db is required')
-
-    // Per-instance, not module-level: tests build their own manifest via
-    // createManifest(db), and a shared memo would leak one test's output
-    // folder into the next.
-    let cachedMissingOutputs = null
 
     const stmtCollisions = db.prepare(`
         SELECT destination, count(*) AS n, group_concat(id) AS ids
@@ -682,8 +673,12 @@ export function createManifest(db) {
             // That is the situation --force exists for — the invalidation
             // graph being under suspicion — including where the preset
             // no-match warning tells the operator to use it.
-            if (runtime.options?.force) return { skip: false, reason: 'force' }
-            if (entity?.meta?.cache === false) return { skip: false, reason: 'cache-disabled' }
+            // --force and a wiped cache both mean "ignore what you think you
+            // know", and both are declared in invalidation.js so a third one
+            // added there reaches this gate without being remembered.
+            const override = bypassReason()
+            if (override) return { skip: false, reason: override }
+            if (entity?.meta?.cache === false) return { skip: false, reason: REASON.CACHE_DISABLED }
             // A render whose last attempt threw must be retried, and checked
             // before anything else: every other branch reasons about hashes,
             // and the hashes are consistent — the entity did not change, the
@@ -737,15 +732,13 @@ export function createManifest(db) {
             // rather than in the render loop because this is the function that
             // owns the word: anything asking shouldSkip() gets the same answer.
             //
-            // Checked unconditionally rather than behind a flag. It is one stat
-            // per entity that reached this point — 2.2ms for 1842 entities,
-            // the same whether the files are there or not — against a failure
-            // mode whose whole character is that nobody thinks to look for it.
-            // auditOutput() resolves destinations exactly this way, and it has
-            // to stay that way: the two disagreeing is the bug, since `--audit-output`
-            // finding what the build just called clean is what sent someone here.
-            if (snapshot.destination && !existsSync(resolveOutputPath(snapshot.destination))) {
-                return { skip: false, reason: 'output-missing', destination: snapshot.destination }
+            // Asked of invalidation.js rather than answered here, so that
+            // auditOutput, the source gate and the assets marker resolve a
+            // destination the same way. The two disagreeing is the bug —
+            // `--audit-output` finding what the build just called clean is
+            // what sends people to this function in the first place.
+            if (outputMissing(snapshot.destination)) {
+                return { skip: false, reason: REASON.OUTPUT_MISSING, destination: snapshot.destination }
             }
             if (!snapshot.refClosure?.length) return { skip: true, reason: 'unchanged' }
             const sourceLang = entity?.meta?.lang ?? null
@@ -1031,7 +1024,7 @@ export function createManifest(db) {
         // rediscover the same caveat. missingOutputIds() is memoized for the
         // cycle, so this shares the walk the source gate already paid for.
         recordedHashes() {
-            const missingOutputs = this.missingOutputIds()
+            const missingOutputs = missingOutputIds()
             const map = new Map()
             for (const row of stmtEntityInputHashes.iterate()) {
                 if (missingOutputs.has(row.id)) continue
@@ -1104,56 +1097,6 @@ export function createManifest(db) {
                 }
             }
             return edges
-        },
-
-        // The entity ids whose last render wrote a file that is no longer
-        // on disk. A dispatch hint, the same shape as queryAffected: the
-        // source checksum gate consults it so those entities are re-emitted
-        // instead of being short-circuited as unchanged.
-        //
-        // This exists because the gate that stops `rm -rf out` from being
-        // noticed is the FIRST one, not the last. An unchanged file never
-        // gets a CREATE, so it never reaches the journal, so the render loop
-        // never sees it and manifest.skipDecision — which does check for a
-        // missing output — is never asked. Fixing only the render gate makes
-        // the build correct for entities that get that far and changes
-        // nothing for the case in the report, where none of them do.
-        //
-        // One stat per recorded snapshot, once per cycle, hoisted out of the
-        // per-file path exactly like checksumsByCollection. The syscalls are
-        // ~2.2ms per 1842 paths and cost the same whether the files are there
-        // or not. At the build level it does not register: warm rebuilds of
-        // the 10k perf corpus ran 3.36s median with this against 3.56s
-        // without, i.e. nominally faster, which is only to say the difference
-        // is well inside the run-to-run spread (3.0-4.1 vs 3.5-4.7 over five
-        // runs each). Re-measure with `npm run test:perf` before trusting a
-        // claim that it got slower.
-        //
-        // Resolves destinations through resolveOutputPath, which is what
-        // auditOutput uses. The two must agree — `--audit-output` reporting
-        // files that the build just called unchanged is the symptom, not a
-        // separate diagnostic.
-        // Memoized for the cycle. Two callers ask — the source checksum gate
-        // once per scan, recordedHashes() once per layouts dispatch — and both
-        // ask before anything has rendered, so one walk answers both. Cleared
-        // at the end of onFinalize, which is where this cycle's renders are
-        // recorded and the answer stops being true.
-        missingOutputIds() {
-            if (cachedMissingOutputs) return cachedMissingOutputs
-            const missing = new Set()
-            for (const row of stmtSelectAll.iterate()) {
-                const snap = rowToSnap(row)
-                if (!snap.destination) continue
-                if (!existsSync(resolveOutputPath(snap.destination))) missing.add(snap.id)
-            }
-            cachedMissingOutputs = missing
-            return missing
-        },
-
-        // Drops the memo. Called at the end of onFinalize; exported on the
-        // surface so a test can force a re-read without a full cycle.
-        forgetMissingOutputs() {
-            cachedMissingOutputs = null
         },
 
         // Walk the output folder against recorded snapshots, returning
@@ -1543,5 +1486,5 @@ onFinalize(async () => {
     // Dropped here rather than at the start of the next cycle because in
     // watch mode there may not be one for hours, and a stale set held that
     // long would keep re-dispatching entities it saw as missing.
-    m.forgetMissingOutputs()
+    forgetMissingOutputs()
 })

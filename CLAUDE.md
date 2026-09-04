@@ -155,6 +155,24 @@ brevity.
   (PK `(id, destination)`, `refClosure` as JSON, partial index on
   `parent`). `recordedHashes` aggregates dep hashes via
   `json_each` in C rather than parsing every row in JS.
+- `invalidation.js` — **"should this work be redone?"**, and the only
+  module allowed to answer the half of it that is not layer-specific.
+  Four layers ask (source.js's checksum gate, `recordedHashes` for the
+  layouts dispatcher, `skipDecision` at the render gate, the assets
+  `.md5` marker) and each owns its own EVIDENCE. None owns what
+  OVERRIDES that evidence: `bypassReason()` is the single declaration
+  of `--force`, a wiped cache, a reload event and an output that is
+  gone, so a fifth override added there reaches every gate. Also holds
+  `resolveOutputPath` / `outputMissing` / `missingOutputIds`
+  (memoized per cycle, dropped in manifest's onFinalize), the `REASON`
+  vocabulary that `--json` carries out to callers, and `isFullCycle`.
+  A leaf module — runtime and node builtins only, reading
+  `runtime.manifest` lazily so the manifest can import it.
+  This exists because the override rules were written four times and
+  drifted: an output-existence check added to one gate was missed by
+  the other three, and a build over a deleted output folder rendered
+  nothing and exited 0. Layers may own what they know, never what
+  overrides them.
 - `server.js` — Express bring-up: CLI flags (`--server`, `--cors`,
   `--no-cors`), trust-proxy, CORS (with extensible header arrays for
   plugins to push onto), late-binding static mount + listen.

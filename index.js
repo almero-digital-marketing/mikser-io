@@ -1,6 +1,7 @@
 export { default as runtime } from './src/runtime.js'
 export * as constants from './src/constants.js'
 export * from './src/utils.js'
+export * from './src/invalidation.js'
 export * from './src/auth.js'
 export * from './src/roles.js'
 export * from './src/inventory.js'

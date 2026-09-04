@@ -10,7 +10,7 @@
 // Follows --audit-output's shape: report and exit, no build phases run.
 import { existsSync } from 'node:fs'
 import { inputHashOf, inputPartsOf, diffInputParts, lookupKeys, checksum as fileChecksum } from './utils.js'
-import { resolveOutputPath } from './manifest.js'
+import { outputMissing } from './invalidation.js'
 import { filterKey } from './track.js'
 import { findEntity, findEntities, findById } from './catalog.js'
 import runtime from './runtime.js'
@@ -141,7 +141,7 @@ export async function explain(reference) {
     // attempt — if the last render threw, that is the more useful sentence,
     // and it explains the absence too.
     const missingDestinations = snapshots
-        .filter(snap => snap.destination && !existsSync(resolveOutputPath(snap.destination)))
+        .filter(snap => outputMissing(snap.destination))
         .map(snap => snap.destination)
 
     // The catalog is as of the LAST BUILD. If the file has been edited since,
@@ -244,9 +244,7 @@ export async function explain(reference) {
             // re-renders. --explain contradicting the build is worse than
             // --explain being incomplete, because it is the tool someone
             // reaches for when the build has already surprised them.
-            missing: snap.destination
-                ? !existsSync(resolveOutputPath(snap.destination))
-                : false,
+            missing: outputMissing(snap.destination),
             outputHash: snap.outputHash ?? null,
             parent: snap.parent ?? null,
             // Which keys of its OWN meta the render read, and which keys it

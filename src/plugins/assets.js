@@ -6,9 +6,10 @@ import { mkdir, writeFile, unlink, rm, readFile, symlink, } from 'fs/promises'
 import { existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { globby } from 'globby'
+import { isFullCycle, outputMissing } from '../invalidation.js'
 import _ from 'lodash'
 import map from 'p-map'
-import { isFullCycle } from '../utils.js'
+
 
 // Normalize a `options.presets[name]` value to a consistent
 // { matches, options } shape so callers don't have to inspect which form
@@ -357,8 +358,10 @@ export function assets(options = {}) {
         // the only thing that ever said a file was missing.
         //
         // Checked first and cheaply: one stat, and if the derivative is gone
-        // no amount of marker archaeology changes the answer.
-        if (!existsSync(entity.destination)) return false
+        // no amount of marker archaeology changes the answer. Asked of
+        // invalidation.js so a derivative and a rendered page agree on what
+        // "the output is gone" means.
+        if (outputMissing(entity.destination)) return false
         let result = false
         let revisions = []
         const assetChecksum = `${entity.destination}.${entity.preset.checksum}.md5`

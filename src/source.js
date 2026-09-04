@@ -46,6 +46,7 @@ import { ACTION } from './constants.js'
 import { checksum as fileChecksum, checksumOf, junkIgnore } from './utils.js'
 import { reportGated, reportChanged } from './report.js'
 import { findById, findEntities, checksumsByCollection } from './catalog.js'
+import { bypassReason } from './invalidation.js'
 import { useDatabase } from './database/index.js'
 
 // Per-source-scan registerFile concurrency. The work is dominated by
@@ -81,20 +82,12 @@ const SCAN_CONCURRENCY = 16
 // disagree, and the losing combination (empty content + a checksum correct
 // for the finished file) is permanent, because every later sync then
 // short-circuits on "unchanged".
-// `missingOutputs`, when given, is the set of entity ids whose last render
-// wrote a file that is no longer on disk (manifest.missingOutputIds()). The
-// gate answers "has this INPUT changed", and deleting the output folder does
-// not change any input — so without this, `rm -rf out` followed by a build
-// short-circuits every file here, emits nothing, renders nothing, and reports
-// success over an empty folder. An entity whose output is gone is not
-// unchanged in any sense the caller means.
-export async function gateChecksum(file, id, { reload = false, priorChecksums, bytes, missingOutputs } = {}) {
+export async function gateChecksum(file, id, { reload = false, priorChecksums, bytes } = {}) {
     const compute = () => (bytes !== undefined ? checksumOf(bytes) : fileChecksum(file))
-    const canGate = !reload
-        && !runtime.options.force
-        && !runtime.catalog?.cacheInvalidated
-        && !missingOutputs?.has(id)
-    if (canGate) {
+    // What overrides the checksum is not this function's to decide — see
+    // invalidation.js. It used to be, and the copy in files.js then missed
+    // the output-existence clause when that was added here.
+    if (!bypassReason({ reload, id })) {
         const priorChecksum = priorChecksums
             ? priorChecksums.get(id)
             : findById(id)?.checksum
@@ -430,12 +423,6 @@ export function useSource(core, options) {
         // per-file instead of doing per-file SQL lookups. ~14× faster
         // at 14k entities (column projection vs full-entity JSON.parse).
         const priorChecksums = checksumsByCollection(collection)
-        // Prefetched once per scan, beside priorChecksums and for the same
-        // reason: the gate needs an O(1) answer per file, and this is one
-        // pass over the snapshots rather than a stat inside the per-file
-        // path. Entities listed here defeat the gate — their input is
-        // unchanged but the file they produced is gone.
-        const missingOutputs = runtime.manifest?.missingOutputIds() ?? new Set()
         // Parallel register — file read + checksum is I/O-bound. Set
         // additions, scanStats increments, and journal addEntry calls
         // are all single-threaded-JS-atomic so no locking required;
@@ -443,7 +430,7 @@ export function useSource(core, options) {
         // and INSERTs are ~10μs vs ~ms-per-file-read, so the journal
         // is never the bottleneck.
         await pMap(files, async (file) => {
-            await registerFile(file, { logger, scanned, stats: scanStats, priorChecksums, missingOutputs })
+            await registerFile(file, { logger, scanned, stats: scanStats, priorChecksums })
             if (phase === 'import') updateProgress()
         }, { concurrency: SCAN_CONCURRENCY })
 
@@ -464,7 +451,7 @@ export function useSource(core, options) {
         logger.info(scanSummary({ cap, loaded: files.length, ...scanStats }))
     })
 
-    async function registerFile(file, { logger, action = ACTION.CREATE, scanned, priorChecksums, missingOutputs } = {}) {
+    async function registerFile(file, { logger, action = ACTION.CREATE, scanned, priorChecksums } = {}) {
         // stats — when called from the scanHook the outer scan provides
         // a Map to accumulate counts. For onSync (chokidar single-file
         // events) the counter is absent and per-file tally is not
@@ -497,7 +484,7 @@ export function useSource(core, options) {
             }
         }
 
-        const chksum = await gateChecksum(file, id, { reload, priorChecksums, bytes, missingOutputs })
+        const chksum = await gateChecksum(file, id, { reload, priorChecksums, bytes })
         if (chksum === null) {
             if (stats) stats.skipped++
             // Never becomes a render task, so it would otherwise be invisible

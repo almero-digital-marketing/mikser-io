@@ -207,12 +207,9 @@ export function files(options = {}) {
             // so the next one cannot be added to that place and missed here.
             //
             // priorChecksums is still bulk-prefetched per scan so the gate
-            // reads a map instead of doing per-file SQL, and missingOutputs
-            // alongside it for the same reason; the manifest memoizes the
-            // latter for the cycle, so this shares the walk with useSource's
-            // own scans rather than paying for a second one.
+            // reads a map instead of doing per-file SQL. What overrides the
+            // checksum, the gate asks invalidation.js for itself.
             const priorChecksums = checksumsByCollection(collection)
-            const missingOutputs = runtime.manifest?.missingOutputIds() ?? new Set()
             const scanned = new Set()
             await pMap(paths, async relativePath => {
                 const { source } = await ensureLink(relativePath)
@@ -230,7 +227,7 @@ export function files(options = {}) {
                 // the catalog already has this file unchanged and there is
                 // nothing to emit. Progress ticks either way — a gated file
                 // was still looked at.
-                const newChecksum = await gateChecksum(source, id, { priorChecksums, missingOutputs })
+                const newChecksum = await gateChecksum(source, id, { priorChecksums })
                 updateProgress()
                 if (newChecksum === null) return
                 await createEntity({
