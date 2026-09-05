@@ -22,7 +22,7 @@ import { readdir } from 'node:fs/promises'
 
 import runtime from './runtime.js'
 import { readEntity, findEntities } from './catalog.js'
-import { useCollection, checksum, readEntityContent, lookupKeys } from './utils.js'
+import { useCollection, checksum, readEntityContent, lookupKeys } from './utils/index.js'
 import { nextCycleId, whenCycleCompletes } from './report.js'
 import { recordChangeSetWrite, currentChangeSet } from './changeset.js'
 

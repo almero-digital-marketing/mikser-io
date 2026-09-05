@@ -2,7 +2,7 @@ import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 
 import runtime from '../../src/runtime.js'
-import { isJunkPath, JUNK_IGNORE, junkIgnore, junkFilter } from '../../src/utils.js'
+import { isJunkPath, JUNK_IGNORE, junkIgnore, junkFilter } from '../../src/utils/index.js'
 
 afterEach(() => { delete runtime.config?.junk })
 
@@ -100,7 +100,7 @@ describe('registerJunk — plugins contribute their own artifacts', () => {
         // The engine's list is OS litter and stays that way; it has no
         // business knowing what a library's sidecar file is called. This is
         // the mechanism that lets the plugin say so.
-        const { registerJunk } = await import('../../src/utils.js')
+        const { registerJunk } = await import('../../src/utils/index.js')
         assert.equal(junkFilter()('a/page.md.example-sidecar'), false)
         registerJunk({ ignore: ['**/*.example-sidecar'], match: /\.example-sidecar$/ })
         assert.ok(junkIgnore().includes('**/*.example-sidecar'))
@@ -123,7 +123,7 @@ describe('registerJunk — plugins contribute their own artifacts', () => {
     })
 
     it('rejects a match that is neither RegExp nor function', async () => {
-        const { registerJunk } = await import('../../src/utils.js')
+        const { registerJunk } = await import('../../src/utils/index.js')
         assert.throws(() => registerJunk({ match: 'a string' }), /RegExp or a function/)
     })
 })

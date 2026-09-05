@@ -53,7 +53,7 @@ import { useLogger } from './engine/index.js'
 import { onLoaded, onPersist } from './lifecycle.js'
 import { useJournal } from './journal.js'
 import { OPERATION } from './constants.js'
-import { extractRefs, isRefKey, writeEntity, lookupKeys, refFilter } from './utils.js'
+import { extractRefs, isRefKey, writeEntity, lookupKeys, refFilter } from './utils/index.js'
 import { findEntity, findById } from './catalog.js'
 import { registerSchema, useDatabase } from './database/index.js'
 
@@ -164,7 +164,7 @@ export function createIndex(db) {
     `)
 
     // Synchronous resolution of a ref string to entity ids. Mirrors
-    // `refFilter` in utils.js — id, meta.href, meta.url, then
+    // `refFilter` in utils/ — id, meta.href, meta.url, then
     // id-minus-extension — but as sync SQL, because indexEntity runs
     // inside catalog.applyJournalMutations' transaction and
     // better-sqlite3 transactions are sync-only.
@@ -757,7 +757,7 @@ export function useRefsIndex() {
 
 // Resolve a ref to an entity using the same heuristic catalog.js's
 // findRef uses (id / meta.href / id-minus-ext) via the shared
-// `refFilter` builder in utils.js. Exported so other callers can
+// `refFilter` builder in utils/. Exported so other callers can
 // reuse the same matching rules.
 export async function refExists(ref) {
     if (!ref || typeof ref !== 'string') return false

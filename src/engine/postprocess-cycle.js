@@ -13,7 +13,7 @@ import { onBeforePostprocess, onPostprocess, postprocessEntities } from '../life
 import { loadPlugin as loadPostPlugin } from '../postprocess.js'
 import { reportError } from '../report.js'
 import { useLogger } from '../use-logger.js'
-import { changeExtension, formatErrorContext } from '../utils.js'
+import { changeExtension, formatErrorContext } from '../utils/index.js'
 import { workerMessages, workerSafeOptions } from './workers.js'
 
 export function registerPostprocessCycle() {

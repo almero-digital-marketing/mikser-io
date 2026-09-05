@@ -538,8 +538,8 @@ export async function forgetAllChangeSets() {
     } catch { /* nothing to clear */ }
 }
 
-// Published on the runtime so the write primitives in utils.js can record
-// without importing this module. utils.js loads early — before the database
+// Published on the runtime so the write primitives in utils/ can record
+// without importing this module. utils/ loads early — before the database
 // module can be imported here without closing a cycle — and an import purely
 // to reach one function is what would close it.
 runtime.recordChangeSetWrite = recordChangeSetWrite

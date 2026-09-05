@@ -5,7 +5,7 @@ import { onProcess, onFinalized } from './lifecycle.js'
 import { resetReport } from './report.js'
 import { useLogger } from './engine/index.js'
 import { ACTION } from './constants.js'
-import { junkFilter } from './utils.js'
+import { junkFilter } from './utils/index.js'
 
 const tasks = []
 

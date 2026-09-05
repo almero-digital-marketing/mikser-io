@@ -314,7 +314,18 @@ brevity.
   printed the version line and nothing else — and only the FORWARDED path
   was ever silent, which is the path the tests exercise, so nothing could
   see it.
-- `utils.js` — shared pure helpers: `mimeForEntity`, `isLoopback`,
+- `utils/` — "utils" named nothing: 37 exports whose only relationship was
+  having nowhere else to live. Split in 10.12.0 by what each group is about —
+  `entity.js` (mime, text sniffing, `readEntityContent` and its provider
+  dispatch, format/extension, `projectMeta`, `matchEntity`, `useCollection`),
+  `refs.js` (`lookupKeys` / `matchesRef` / `refFilter` / `extractRefs` — the
+  one relation in three directions), `hash.js` (input hashing and checksums),
+  `expand.js` (ADR-0007 `$`-ref resolution), `output.js` (`writeEntity`,
+  `writeOutput`, the site-root URL helpers), `errors.js`, `junk.js`,
+  `net.js`, `library.js`. `index.js` re-exports all 37, so no caller changed.
+  Nothing crossed a boundary that shared state: each group's module-level
+  constants and caches went with it.
+- The helpers themselves: `mimeForEntity`, `isLoopback`,
   `expandEntity`, `projectMeta`, `useCollection`, `useRenderer` (via
   render.js), `isTextEntity`, `readEntityContent`, `extractRefs`,
   `isRefKey`, `writeEntity`, `matchEntity`, `getFormatInfo`,

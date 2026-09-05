@@ -1,5 +1,5 @@
 import crypto from 'node:crypto'
-import { isLoopback } from './utils.js'
+import { isLoopback } from './utils/index.js'
 
 // Authentication seam (ADR-0012).
 //

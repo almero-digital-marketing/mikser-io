@@ -46,7 +46,7 @@ import YAML from 'yaml'
 import fm from 'front-matter'
 import { randomUUID } from 'node:crypto'
 import runtime from './runtime.js'
-import { readEntityContent, isTextEntity } from './utils.js'
+import { readEntityContent, isTextEntity } from './utils/index.js'
 import { useDatabase, registerSchema } from './database/index.js'
 
 export const PROVENANCE_SCHEMA = `

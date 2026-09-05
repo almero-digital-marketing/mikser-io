@@ -11,7 +11,7 @@ import * as stream from 'stream'
 import { promisify } from 'util'
 import isUrl from 'is-url'
 import map from 'p-map'
-import { matchesLibrary } from '../utils.js'
+import { matchesLibrary } from '../utils/index.js'
 
 export function resources(options = {}) {
     return ({

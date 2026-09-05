@@ -13,7 +13,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { siteRelativeUrl, siteRootFor } from '../../src/utils.js'
+import { siteRelativeUrl, siteRootFor } from '../../src/utils/index.js'
 
 const ROOTS = ['a', 'b']
 

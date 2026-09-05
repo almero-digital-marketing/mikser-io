@@ -7,7 +7,7 @@ import render from '../render.js'
 import runtime from '../runtime.js'
 import { checkReferences } from '../references.js'
 import { assetUse } from '../report.js'
-import { siteRootFor } from '../utils.js'
+import { siteRootFor } from '../utils/index.js'
 import { existsSync } from 'fs'
 
 // Warn for anything the EMITTED output points at that is not there.

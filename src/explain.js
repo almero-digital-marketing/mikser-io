@@ -9,7 +9,7 @@
 //
 // Follows --audit-output's shape: report and exit, no build phases run.
 import { existsSync } from 'node:fs'
-import { inputHashOf, inputPartsOf, diffInputParts, lookupKeys, checksum as fileChecksum } from './utils.js'
+import { inputHashOf, inputPartsOf, diffInputParts, lookupKeys, checksum as fileChecksum } from './utils/index.js'
 import { outputMissing } from './invalidation.js'
 import { filterKey } from './track.js'
 import { findEntity, findEntities, findById } from './catalog.js'

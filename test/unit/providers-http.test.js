@@ -11,7 +11,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import { readEntityContent } from '../../src/utils.js'
+import { readEntityContent } from '../../src/utils/index.js'
 import runtime from '../../src/runtime.js'
 import { __resetHttpCacheForTests } from '../../src/plugins/providers/http.js'
 

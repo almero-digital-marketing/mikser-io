@@ -30,7 +30,7 @@ import {
     ExpandError,
     useCollection,
     readEntityContent,
-} from '../../src/utils.js'
+} from '../../src/utils/index.js'
 
 // ─── normalize ──────────────────────────────────────────────────────────────
 

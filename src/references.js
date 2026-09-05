@@ -25,7 +25,7 @@ import path from 'node:path'
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { globby } from 'globby'
-import { siteRootFor } from './utils.js'
+import { siteRootFor } from './utils/index.js'
 
 // Documents that can carry a reference. Anything else in the output is either
 // an asset itself or something whose internal structure this has no business

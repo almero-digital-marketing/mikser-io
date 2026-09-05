@@ -1,5 +1,5 @@
 import { Mutex } from 'await-semaphore'
-import { AbortError } from './utils.js'
+import { AbortError } from './utils/index.js'
 
 const runtime = {
     stamp: Date.now(),

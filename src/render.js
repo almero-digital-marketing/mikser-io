@@ -7,7 +7,7 @@ import path from 'node:path'
 import _ from 'lodash'
 import Database from 'better-sqlite3'
 import { useLogger } from './engine/index.js'
-import { formatLogArgs } from './utils.js'
+import { formatLogArgs } from './utils/index.js'
 import engineRuntime from './runtime.js'
 // The report code every template-raised warning carries. Templates pass a
 // sentence, not a code — the one caller that predates this passes

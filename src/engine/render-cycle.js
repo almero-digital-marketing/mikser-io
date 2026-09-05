@@ -14,7 +14,7 @@ import { onRender } from '../lifecycle.js'
 import { renderErrorCount, reportAssetUse, reportError, reportRendered, reportSkipped } from '../report.js'
 import { createTrack, mergeTrack } from '../track.js'
 import { useLogger } from '../use-logger.js'
-import { formatErrorContext, inputHashOf, lookupKeys, projectMeta } from '../utils.js'
+import { formatErrorContext, inputHashOf, lookupKeys, projectMeta } from '../utils/index.js'
 import { workerMessages, workerSafeOptions } from './workers.js'
 
 export function registerRenderCycle() {

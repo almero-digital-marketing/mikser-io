@@ -31,7 +31,7 @@ import { readdir, readFile } from 'node:fs/promises'
 
 import runtime from './runtime.js'
 import { findEntities } from './catalog.js'
-import { readEntityContent, looksTextual } from './utils.js'
+import { readEntityContent, looksTextual } from './utils/index.js'
 
 // How much of an output file to read before deciding it is text. Same rule
 // the source read uses, so the two scopes cannot disagree about a file that

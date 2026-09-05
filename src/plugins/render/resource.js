@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { matchesLibrary, siteRelativeUrl } from '../../utils.js'
+import { matchesLibrary, siteRelativeUrl } from '../../utils/index.js'
 
 export function load({ runtime, entity, state, options, track }) {
     runtime.resource = (url) => {

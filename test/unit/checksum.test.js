@@ -4,7 +4,7 @@ import { writeFile, rm, mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import { checksum, checksumOf, inputHashOf, inputPartsOf, diffInputParts } from '../../src/utils.js'
+import { checksum, checksumOf, inputHashOf, inputPartsOf, diffInputParts } from '../../src/utils/index.js'
 
 let dir
 const tmp = async (name, buf) => {

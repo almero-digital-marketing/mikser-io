@@ -28,7 +28,7 @@ mikser-io/
     ├── render.js             Render worker function (runs in main or Piscina threads); ensureWorkerDb gives each worker a read-only sqlite handle
     ├── postprocess.js        Postprocess worker function (runs in main or Piscina threads)
     ├── track.js              Render-time dependency tracking (catalog queries auto-report via queryContext)
-    ├── utils.js              Checksum, normalize, matchEntity, changeExtension, AbortError, ExpandError, mimeForEntity, isTextEntity, readEntityContent, extractRefs, writeEntity, formatErrorContext
+    ├── utils/               entity, refs, hash, expand, output, errors, junk, net, library; index.js re-exports all 37
     ├── constants.js          OPERATION, ACTION, TASKS enums
     │
     ├── plugins/              Built-in content source and transform plugins

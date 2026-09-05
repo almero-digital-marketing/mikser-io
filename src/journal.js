@@ -31,7 +31,7 @@ import {
 } from './lifecycle.js'
 import { stopProgress, trackProgress, updateProgress } from './logger/index.js'
 import { useLogger } from './engine/index.js'
-import { AbortError } from './utils.js'
+import { AbortError } from './utils/index.js'
 import { registerSchema, useDatabase } from './database/index.js'
 import runtime from './runtime.js'
 

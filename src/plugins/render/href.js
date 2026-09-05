@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { siteRelativeUrl } from '../../utils.js'
+import { siteRelativeUrl } from '../../utils/index.js'
 
 export function load({ entity, runtime, options }) {
     const { clear } = options

@@ -11,7 +11,7 @@ import {
     recordChangeSetWrite, pendingChangeSets, clearChangeSets, forgetAllChangeSets,
     withChangeSet, currentChangeSet, closeChangeSet,
 } from '../../src/changeset.js'
-import { useCollection, writeEntity } from '../../src/utils.js'
+import { useCollection, writeEntity } from '../../src/utils/index.js'
 import { writeEntitySource } from '../../src/write.js'
 
 let root, docs

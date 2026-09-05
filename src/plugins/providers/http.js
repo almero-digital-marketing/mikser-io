@@ -2,7 +2,7 @@
 //
 // Handles `http://` and `https://` URIs inline — same way the fs reader
 // handles plain paths and `file://`. Lives under src/plugins/providers/
-// rather than embedded in utils.js because providers ARE a conceptually
+// rather than embedded in utils/ because providers ARE a conceptually
 // pluggable surface; even when they ship built-in, factoring them as
 // separate files keeps the substrate honest and makes room for future
 // schemes that earn engine-internal status (mailto:, gemini:, gopher:,

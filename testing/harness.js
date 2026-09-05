@@ -8,7 +8,7 @@
 import _ from 'lodash'
 import realRuntime from '../src/runtime.js'
 import { resetServices } from '../src/services.js'
-import { matchEntity, normalize, changeExtension, getFormatInfo, checksum, AbortError } from '../src/utils.js'
+import { matchEntity, normalize, changeExtension, getFormatInfo, checksum, AbortError } from '../src/utils/index.js'
 
 const OPERATION = {
     CREATE: 'create',

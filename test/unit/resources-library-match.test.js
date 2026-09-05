@@ -19,7 +19,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import escapeStringRegexp from 'escape-string-regexp'
 
-import { matchesLibrary, matchEntity } from '../../src/utils.js'
+import { matchesLibrary, matchEntity } from '../../src/utils/index.js'
 
 // Exactly how resources() builds the key for `{ url: '...' }`.
 const keyFor = (url) => escapeStringRegexp(url)

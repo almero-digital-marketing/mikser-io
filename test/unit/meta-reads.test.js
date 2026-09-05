@@ -14,7 +14,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { recordReads, untrack } from '../../src/track.js'
-import { expandEntity } from '../../src/utils.js'
+import { expandEntity } from '../../src/utils/index.js'
 
 const observe = (value, prefix = 'meta') => {
     const seen = new Set()

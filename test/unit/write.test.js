@@ -13,7 +13,7 @@ import runtime from '../../src/runtime.js'
 import {
     writeEntitySource, deleteEntitySource, contentAdvisories, advisoryWarning, siblingDestinations,
 } from '../../src/write.js'
-import { checksum } from '../../src/utils.js'
+import { checksum } from '../../src/utils/index.js'
 
 let root, docs
 

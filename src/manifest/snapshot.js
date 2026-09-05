@@ -7,7 +7,7 @@ import runtime from '../runtime.js'
 import { findById, findEntities } from '../catalog.js'
 import { resolveOutputPath } from '../invalidation.js'
 import { filterKey } from '../track.js'
-import { diffInputParts, extractRefs, inputHashOf, inputPartsOf } from '../utils.js'
+import { diffInputParts, extractRefs, inputHashOf, inputPartsOf } from '../utils/index.js'
 import { readFile } from 'fs/promises'
 
 export function sha1(payload) {
