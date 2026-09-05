@@ -24,10 +24,11 @@ import path from 'node:path'
 import { setupFixture, runMikser, cleanup, freshWorkdir } from './_harness.js'
 
 const CONFIG = `
-import { documents, files, assets, frontMatter, renderHbs } from 'mikser-io'
+import { documents, files, frontMatter, renderHbs } from 'mikser-io'
+import { assets, renderPreset } from 'mikser-io-assets'
 import { layouts } from 'mikser-io-layouts'
 export default { plugins: [documents(), files(), frontMatter(),
-    assets({ assetsFolder: 'derived', presets: { web: { match: ['/files/media/**'] } } }),
+    assets({ assetsFolder: 'derived', presets: { web: { match: ['/files/media/**'] } } }), renderPreset(),
     layouts(), renderHbs()] }
 `
 const PRESET = [

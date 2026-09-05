@@ -50,7 +50,7 @@ export * from './src/routes.js'
 // (core) => void closure the engine calls at onLoad time. See ADR-0010
 // for the v9 plugin shape.
 export { api }           from './src/plugins/api.js'
-export { assets }        from './src/plugins/assets.js'
+// assets moved to sibling: import from 'mikser-io-assets'
 export { sources }       from './src/plugins/sources.js'
 export { commands }      from './src/plugins/commands.js'
 export { data }          from './src/plugins/data.js'
@@ -73,15 +73,17 @@ export { yaml }          from './src/plugins/yaml.js'
 // can resolve via dynamic import. ADR-0010.
 // Renderers — these have a render() and turn an entity into a file.
 export { renderHbs }    from './src/plugins/render/hbs.js'
-export { renderPreset } from './src/plugins/render/preset.js'
 
 // Template helpers — these only install functions on `runtime` for templates
-// to call. They render nothing, and the names say so: two of the six
-// factories in this folder are renderers and four are not, so each is named
-// after the job it does rather than the object it concerns. Naming them all
-// `render*` invites adding renderPreset() expecting a helper and watching
-// every page render throw. There are no aliases for the older names.
-export { assetUrlHelper }    from './src/plugins/render/asset.js'
+// to call. They render nothing, and the names say so: one factory in this
+// folder is a renderer and three are not, so each is named after the job it
+// does rather than the object it concerns. Naming them all `render*` invites
+// adding a renderer expecting a helper and watching every page render throw.
+// There are no aliases for the older names.
+//
+// assetUrlHelper went with the assets plugin: import from 'mikser-io-assets'.
+// It reads that plugin's state to resolve a preset's format, so it is only
+// ever correct alongside it.
 export { hrefUrlHelpers }    from './src/plugins/render/href.js'
 export { resourceUrlHelper } from './src/plugins/render/resource.js'
 export { fileHelpers }       from './src/plugins/render/file.js'

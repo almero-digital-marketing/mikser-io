@@ -32,9 +32,10 @@ import { globby } from 'globby'
 import { setupFixture, runMikser, cleanup, freshWorkdir, stripAnsi } from './_harness.js'
 
 const CONFIG = `
-import { files, assets } from 'mikser-io'
+import { files } from 'mikser-io'
+import { assets, renderPreset } from 'mikser-io-assets'
 export default {
-    plugins: [files(), assets({ presets: { web: { match: ['/files/media/**'] } } })],
+    plugins: [files(), assets({ presets: { web: { match: ['/files/media/**'] } } }), renderPreset()],
 }
 `
 
@@ -261,11 +262,12 @@ describe('what the unfinished scan must NOT claim', () => {
     // will; without the preset-root filter every page on a site reads as an
     // interrupted render.
     const FULL = `
-import { documents, files, assets, frontMatter, renderHbs } from 'mikser-io'
+import { documents, files, frontMatter, renderHbs } from 'mikser-io'
+import { assets, renderPreset } from 'mikser-io-assets'
 import { layouts } from 'mikser-io-layouts'
 export default {
     plugins: [documents(), files(), frontMatter(), layouts({ autoLayouts: true }),
-        assets({ presets: { web: { match: ['/files/media/**'] } } }), renderHbs()],
+        assets({ presets: { web: { match: ['/files/media/**'] } } }), renderPreset(), renderHbs()],
 }
 `
     const derivative = () => path.join(workdir, 'assets', 'web', 'media', 'clip.bin')

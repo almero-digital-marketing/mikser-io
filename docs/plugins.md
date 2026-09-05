@@ -527,7 +527,8 @@ With this config:
 
 ```js
 // mikser.config.js
-import { files, resources, assets, api } from 'mikser-io'
+import { files, resources, api } from 'mikser-io'
+import { assets, renderPreset } from 'mikser-io-assets'
 
 export default {
     plugins: [

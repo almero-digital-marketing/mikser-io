@@ -3,20 +3,22 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 
 import {
-    assetUrlHelper, hrefUrlHelpers, resourceUrlHelper, fileHelpers,
-    renderHbs, renderPreset,
+    hrefUrlHelpers, resourceUrlHelper, fileHelpers, renderHbs,
 } from '../../index.js'
 
-// The `render` prefix was doing two jobs. Two of the six factories in
-// src/plugins/render really are renderers — they have a render() and turn an
-// entity into a file. The other four only install helpers on `runtime` for
-// templates to call. Naming all six after the object they concern rather than
-// the job they do led someone to add renderPreset() expecting a template
-// helper and watch every page render throw: the inference was wrong and
-// entirely reasonable.
+// The `render` prefix was doing two jobs. One of the four factories left in
+// src/plugins/render really is a renderer — it has a render() and turns an
+// entity into a file. The other three only install helpers on `runtime` for
+// templates to call. Naming them after the object they concern rather than
+// the job they do led someone to add a renderer expecting a template helper
+// and watch every page render throw: the inference was wrong and entirely
+// reasonable.
+//
+// assetUrlHelper and renderPreset went to mikser-io-assets; the same
+// distinction is asserted there, against that package's own exports, because
+// a convention that spans two packages has to hold in both.
 describe('helper factories are named for their role', () => {
     const helpers = [
-        ['assetUrlHelper', assetUrlHelper, 'asset'],
         ['hrefUrlHelpers', hrefUrlHelpers, 'href'],
         ['resourceUrlHelper', resourceUrlHelper, 'resource'],
         ['fileHelpers', fileHelpers, 'file'],
@@ -31,10 +33,9 @@ describe('helper factories are named for their role', () => {
         })
     }
 
-    it('the two real renderers keep their names and DO have render()', () => {
-        // Renaming these would have been the mistake the exercise is about.
+    it('the real renderer keeps its name and DOES have render()', () => {
+        // Renaming this would have been the mistake the exercise is about.
         assert.equal(typeof renderHbs({}).render, 'function')
-        assert.equal(typeof renderPreset({}).render, 'function')
     })
 })
 

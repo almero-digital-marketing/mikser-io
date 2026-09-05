@@ -28,12 +28,13 @@ import assert from 'node:assert/strict'
 import { setupFixture, runMikser, cleanup, freshWorkdir } from './_harness.js'
 
 const config = (presets) => `
-import { documents, files, assets, frontMatter, renderHbs, assetUrlHelper } from 'mikser-io'
+import { documents, files, frontMatter, renderHbs } from 'mikser-io'
+import { assets, assetUrlHelper, renderPreset } from 'mikser-io-assets'
 import { layouts } from 'mikser-io-layouts'
 export default {
     plugins: [
         documents(), files(), frontMatter(),
-        assets({ assetsFolder: 'derived', presets: ${presets} }),
+        assets({ assetsFolder: 'derived', presets: ${presets} }), renderPreset(),
         layouts(), renderHbs(), assetUrlHelper(),
     ],
 }

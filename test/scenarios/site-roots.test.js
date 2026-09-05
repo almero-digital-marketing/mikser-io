@@ -24,13 +24,14 @@ import {
 } from './_harness.js'
 
 const CONFIG = `
-import { documents, files, assets, frontMatter, renderHbs, assetUrlHelper, shares } from 'mikser-io'
+import { documents, files, frontMatter, renderHbs, shares } from 'mikser-io'
+import { assets, assetUrlHelper, renderPreset } from 'mikser-io-assets'
 import { layouts } from 'mikser-io-layouts'
 export default {
     siteRoots: ['a', 'b'],
     plugins: [
         documents(), files(), frontMatter(),
-        assets({ assetsFolder: 'derived', presets: { web: { match: ['/files/media/**'] } } }),
+        assets({ assetsFolder: 'derived', presets: { web: { match: ['/files/media/**'] } } }), renderPreset(),
         // A site root is a DEPLOYABLE unit: out/a is served alone, so anything
         // its pages reference has to exist under it. Sharing the derivatives
         // into each root is what makes that true, and it is what the url change

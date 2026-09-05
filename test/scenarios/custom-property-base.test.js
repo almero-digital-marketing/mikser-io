@@ -93,14 +93,15 @@ describe('a url() inside a custom property', () => {
 })
 
 const ASSETS_CONFIG = `
-import { documents, files, assets, frontMatter, renderHbs, assetUrlHelper } from 'mikser-io'
+import { documents, files, frontMatter, renderHbs } from 'mikser-io'
+import { assets, assetUrlHelper, renderPreset } from 'mikser-io-assets'
 import { layouts } from 'mikser-io-layouts'
 export default {
     plugins: [documents(), files(), frontMatter(),
         assets({ assetsFolder: 'derived', presets: {
             web:   { match: ['/files/media/web/**'] },
             strip: { match: ['/files/media/strip/**'] },
-        } }),
+        } }), renderPreset(),
         layouts(), renderHbs(), assetUrlHelper()],
 }
 `

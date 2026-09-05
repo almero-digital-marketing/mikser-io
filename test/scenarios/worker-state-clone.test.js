@@ -20,13 +20,14 @@ import assert from 'node:assert/strict'
 import { setupFixture, runMikser, cleanup, freshWorkdir } from './_harness.js'
 
 const CONFIG = `
-import { documents, files, assets, frontMatter, renderHbs, assetUrlHelper } from 'mikser-io'
+import { documents, files, frontMatter, renderHbs } from 'mikser-io'
+import { assets, assetUrlHelper, renderPreset } from 'mikser-io-assets'
 import { layouts } from 'mikser-io-layouts'
 export default {
     plugins: [
         documents(), files(), frontMatter(),
         // The plugin whose state carried the uncloneable value.
-        assets({ assetsFolder: 'derived', presets: { web: { match: ['/files/media/**'] } } }),
+        assets({ assetsFolder: 'derived', presets: { web: { match: ['/files/media/**'] } } }), renderPreset(),
         layouts({ autoLayouts: false, match: { '@/**': 'page' } }),
         renderHbs(), assetUrlHelper(),
     ],

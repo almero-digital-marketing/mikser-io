@@ -42,9 +42,10 @@ const MULTI = PRESET.replace(
     + "    await writeFile(entity.destination.replace(/\\.[^.]+$/, '.poster.jpg'), 'poster')")
 
 const config = (extra = '') => `
-import { files, assets } from 'mikser-io'
+import { files } from 'mikser-io'
+import { assets, renderPreset } from 'mikser-io-assets'
 export default {
-    plugins: [files(), assets({ presets: { web: { match: ['/files/media/**'] } }${extra} })],
+    plugins: [files(), assets({ presets: { web: { match: ['/files/media/**'] } }${extra} }), renderPreset()],
 }
 `
 

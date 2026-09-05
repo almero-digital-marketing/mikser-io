@@ -1,8 +1,10 @@
 import { fileURLToPath } from 'node:url'
 import {
-    documents, frontMatter, yaml, files, resources, assets,
-    renderHbs, hrefUrlHelpers, assetUrlHelper, resourceUrlHelper,
+    documents, frontMatter, yaml, files, resources, renderHbs, hrefUrlHelpers, resourceUrlHelper,
 } from 'mikser-io'
+import {
+    assets, assetUrlHelper, renderPreset,
+} from 'mikser-io-assets'
 import { layouts }        from 'mikser-io-layouts'
 import { renderLiquid }   from 'mikser-io-render-liquid'
 import { renderEta }      from 'mikser-io-render-eta'
@@ -55,7 +57,7 @@ export default async ({ options }) => ({
                     '/resources/**/*.mp4',
                 ],
             },
-        }),
+        }), renderPreset(),
         renderHbs(),
         renderLiquid(),
         renderEta(),

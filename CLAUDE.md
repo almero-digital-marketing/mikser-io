@@ -293,6 +293,8 @@ brevity.
   collection a project registers through `sources()`, which produced 63
   false warnings per build on a real site.
 - **A preset `.md5` marker means a render FINISHED, and its absence is read.**
+  (Now in `mikser-io-assets`; kept here because the invariant reaches into
+  core's manifest and invalidation, and because core is where it was wrong.)
   Presets are the one place user code is handed a final output path and left
   to fill it, and a half-written derivative there is not self-correcting:
   the marker is keyed on the SOURCE checksum, which an interruption does not
@@ -544,6 +546,19 @@ not bundled because the engine is renderer-agnostic — each plugin
 encodes a particular recipe (SSG, MJML, PDF, email) rather than
 substrate.
 
+- **`mikser-io-assets`** — preset derivatives. `assets()` runs presets and
+  produces derived files, `renderPreset()` is the renderer they dispatch
+  through, `assetUrlHelper()` provides `runtime.asset()` to templates. Split
+  out of core in 10.12.0: it encodes one recipe for producing files from
+  files, the same way layouts encodes one for producing render tasks. What
+  stayed is substrate — the render track that records which asset URLs a
+  template asked for (`track.assets`), and `reportMissingAssets` at finalize,
+  both of which already guarded for the plugin's absence. `renderPreset()`
+  must be declared in the plugins array now: it was resolved implicitly by
+  render.js's last fallback, a path into core's own `src/plugins/render/`,
+  and that is also why preset renders stay INLINE — a worker resolves by
+  package name (`mikser-io-render-<name>`), which this package does not
+  answer to.
 - **`mikser-io-layouts`** — the canonical SSG-flavor task-production
   policy. Owns multi-match layout assignment (`meta.layout` /
   `meta.layouts` dual key + `autoLayouts` peel ladder), per-layout
@@ -567,7 +582,6 @@ substrate.
 
 - `documents` — file→entity sync for the documents collection
 - `files` — file→entity sync for the files collection
-- `assets` — asset references and copy
 - `resources` — resource references
 - `front-matter` — YAML frontmatter extraction (HTML/MD files)
 - `yaml` — YAML format support (.yml/.yaml entities)

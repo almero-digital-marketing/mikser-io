@@ -41,10 +41,11 @@ async function readPresetEntity(workdir) {
 }
 
 const config = (match) => `
-import { documents, files, assets, frontMatter, renderHbs } from 'mikser-io'
+import { documents, files, frontMatter, renderHbs } from 'mikser-io'
+import { assets, renderPreset } from 'mikser-io-assets'
 export default {
     plugins: [documents(), files(), frontMatter(),
-        assets({ presets: { web: { match: ${JSON.stringify(match)} } } }), renderHbs()],
+        assets({ presets: { web: { match: ${JSON.stringify(match)} } } }), renderPreset(), renderHbs()],
 }
 `
 
@@ -151,7 +152,7 @@ export default { plugins: [documents(), frontMatter(), layouts(), renderHbs()] }
         // explained afterwards that nothing had acted on it.
         //
         // The assets plugin declares the option itself now, so a config
-        // without assets() does not have the flag at all — the mistake is
+        // without assets(), renderPreset() does not have the flag at all — the mistake is
         // refused by name before a single entity is rendered, which is what
         // every other misspelled flag already gets.
         const { code, combined } = await runMikser(workdir, ['--render-presets'])

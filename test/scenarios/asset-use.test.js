@@ -30,12 +30,13 @@ import {
 } from './_harness.js'
 
 const CONFIG = `
-import { documents, files, assets, frontMatter, renderHbs, assetUrlHelper } from 'mikser-io'
+import { documents, files, frontMatter, renderHbs } from 'mikser-io'
+import { assets, assetUrlHelper, renderPreset } from 'mikser-io-assets'
 import { layouts } from 'mikser-io-layouts'
 export default {
     plugins: [
         documents(), files(), frontMatter(),
-        assets({ presets: { web: { match: ['/files/media/**'] } } }),
+        assets({ presets: { web: { match: ['/files/media/**'] } } }), renderPreset(),
         layouts(), renderHbs(), assetUrlHelper(),
     ],
 }
