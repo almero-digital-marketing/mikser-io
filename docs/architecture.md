@@ -16,7 +16,7 @@ mikser-io/
     ├── journal.js            Per-cycle queue persisted to mikser_journal (auto-persist on yielded entities; survives crashes so --resume can pick up)
     ├── catalog.js            Persistent entity registry (mikser_entities sqlite table + 10k LRU on findById)
     ├── refs.js               Inverse-reference graph (mikser_refs sqlite table)
-    ├── manifest.js           Render snapshots (mikser_snapshots sqlite table)
+    ├── manifest/            schema, snapshot build/parse, sources, prepared statements, the onLoaded/onFinalize cycle; index.js keeps createManifest
     ├── database/             createSqliteDatabase, registerSchema, useDatabase, sift→SQL translator, queryContext (AsyncLocalStorage)
     ├── subscriptions.js      subscribe() primitive (journal-walk + graph-dispatch modes)
     ├── source.js             useSource — folder-of-files import pattern shared by documents/files (and used by sibling mikser-io-layouts)

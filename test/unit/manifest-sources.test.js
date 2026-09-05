@@ -12,7 +12,7 @@ import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 
 import runtime from '../../src/runtime.js'
-import { sourcesBehind, sourcesOf, createManifest, SNAPSHOTS_SCHEMA, FAILURES_SCHEMA } from '../../src/manifest.js'
+import { sourcesBehind, sourcesOf, createManifest, SNAPSHOTS_SCHEMA, FAILURES_SCHEMA } from '../../src/manifest/index.js'
 import { createSqliteDatabase } from '../../src/database/index.js'
 
 const ENTITIES = [

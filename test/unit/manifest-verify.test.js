@@ -28,7 +28,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 
 import runtime from '../../src/runtime.js'
-import { createManifest, SNAPSHOTS_SCHEMA, FAILURES_SCHEMA } from '../../src/manifest.js'
+import { createManifest, SNAPSHOTS_SCHEMA, FAILURES_SCHEMA } from '../../src/manifest/index.js'
 import { resolveOutputPath } from '../../src/invalidation.js'
 import { createSqliteDatabase } from '../../src/database/index.js'
 

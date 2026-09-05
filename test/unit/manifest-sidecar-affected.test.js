@@ -19,7 +19,7 @@ import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 
 import runtime from '../../src/runtime.js'
-import { createManifest, SNAPSHOTS_SCHEMA, FAILURES_SCHEMA } from '../../src/manifest.js'
+import { createManifest, SNAPSHOTS_SCHEMA, FAILURES_SCHEMA } from '../../src/manifest/index.js'
 import { createSqliteDatabase } from '../../src/database/index.js'
 
 function makeDb() {

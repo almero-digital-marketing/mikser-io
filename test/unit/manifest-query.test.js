@@ -19,7 +19,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import runtime from '../../src/runtime.js'
-import { createManifest, SNAPSHOTS_SCHEMA, FAILURES_SCHEMA } from '../../src/manifest.js'
+import { createManifest, SNAPSHOTS_SCHEMA, FAILURES_SCHEMA } from '../../src/manifest/index.js'
 import { createSqliteDatabase } from '../../src/database/index.js'
 
 // The real schema, imported rather than copied — a copy drifts the moment

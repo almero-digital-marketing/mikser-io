@@ -169,7 +169,21 @@ brevity.
   against `INDEXED_COLUMNS`; un-pushed clauses fall through to
   JS-side sift. `query-context.js` is the AsyncLocalStorage that
   lets catalog queries auto-report into the render-time `track`.
-- `manifest.js` — render snapshots in `mikser_snapshots` table
+- `manifest/` — split in 10.12.0 along the parts that move cleanly:
+  `schema.js` (the two tables), `snapshot.js` (entity + deps → a snapshot row
+  and back, plus `hashOutputFile`), `sources.js` (`sourcesBehind` /
+  `sourcesOf`), `statements.js` (all 25 prepared statements, built once per
+  handle and returned as one object so `createManifest` destructures them and
+  every method body reads as it did), `cycle.js` (the onLoaded/onFinalize
+  hooks — opening against the cycle's database, then draining the journal,
+  hashing what was written and committing in one transaction). `index.js`
+  keeps `createManifest` whole. Its ~25 methods share one closure over those
+  statements, so splitting them further means passing a context object —
+  a design change rather than a move, and deliberately not done here.
+  `sharedDb`/`sharedManifest` live in `cycle.js`, the only place either is
+  assigned, and `createManifest` is passed IN to `registerManifestHooks`
+  rather than imported, so the two files do not import each other.
+- The manifest itself — render snapshots in `mikser_snapshots` table
   (PK `(id, destination)`, `refClosure` as JSON, partial index on
   `parent`). `recordedHashes` aggregates dep hashes via
   `json_each` in C rather than parsing every row in JS.
