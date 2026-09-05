@@ -72,7 +72,7 @@ runtime
 ├── state              Arbitrary plugin state — catalog/refs/manifest are NOT here; they live as their own sqlite-backed facades below
 ├── catalog            entity catalog facade (set by catalog.js) — findEntity / findEntities / iterateEntities / queryEntities / readEntity / subscribe / assertExpand. Backed by mikser_entities + 10k LRU on findById.
 ├── refs               inverse-ref graph facade (set by refs.js) — inboundFor / outboundFor / allRefs / size / rename / subscribeGraph / inverseClosureOf. Backed by mikser_refs.
-├── manifest           render snapshot facade (set by manifest.js) — shouldSkip / record / recordedHashes. Backed by mikser_snapshots.
+├── manifest           render snapshot facade (set by manifest/cycle.js) — shouldSkip / record / recordedHashes. Backed by mikser_snapshots.
 ├── lookupHref         Sync href→entity lookup; available inside Piscina workers (each opens its own read-only sqlite handle on first task)
 ├── validators[]       Array of validation functions
 ├── mutex              Semaphore for process() serialisation
@@ -155,7 +155,7 @@ mikser_journal  (RENDER rows)
      │
      ▼
 [RENDER phase]
-  engine.js dispatches RENDER rows → render() per row, dispatch mode
+  engine/render-cycle.js dispatches RENDER rows → render() per row, dispatch mode
   picked per row from { INLINE, SERIAL, WORKER }
      │
      ▼
@@ -173,7 +173,7 @@ mikser_journal  (POSTPROCESS rows)
      │
      ▼
 [POSTPROCESS phase]
-  engine.js dispatches POSTPROCESS rows → postprocess() per row
+  engine/render-cycle.js dispatches POSTPROCESS rows → postprocess() per row
   (same INLINE/SERIAL/WORKER dispatch model as render)
      │
      ▼
@@ -322,7 +322,7 @@ export { default as runtime } from './src/runtime.js'
 export * as constants from './src/constants.js'
 
 // Utilities
-export * from './src/utils.js'         // checksum(), normalize(), matchEntity(), AbortError, etc.
+export * from './src/utils/index.js'         // checksum(), normalize(), matchEntity(), AbortError, etc.
 
 // Lifecycle hooks and entity operations
 export * from './src/lifecycle.js'     // onXxx(), createEntity(), updateEntity(), deleteEntity(), renderEntity(), etc.
@@ -332,7 +332,7 @@ export * from './src/database/index.js' // useDatabase, registerSchema
 export * from './src/journal.js'        // addEntry, addEntries, updateEntry, useJournal, clearJournal
 export * from './src/catalog.js'        // findEntity, findEntities, iterateEntities, queryEntities, readEntity, assertExpand
 export * from './src/refs.js'           // refExists (runtime.refs.* is the main surface)
-export * from './src/manifest.js'       // (runtime.manifest.* is the main surface)
+export * from './src/manifest/index.js'       // (runtime.manifest.* is the main surface)
 
 // Dependency tracking + subscriptions
 export * from './src/track.js'
@@ -349,7 +349,7 @@ export * from './src/manager.js'        // watch(), schedule(), createdHook/upda
 export * from './src/logger/index.js'   // trackProgress, stopProgress, updateProgress, setLogLevel, etc.
 
 // setup() and render dispatcher entry
-export * from './src/engine.js'         // setup()
+export * from './src/engine/index.js'         // setup()
 export * from './src/render.js'         // useRenderer
 
 // Folder-of-files import helper

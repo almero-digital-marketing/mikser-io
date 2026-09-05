@@ -53,8 +53,8 @@ These options are part of `runtime.options` and apply to the engine itself.
 | `watch` | `-w, --watch` | boolean | `false` | Watch source folders for changes and rebuild incrementally. |
 | `force` | `-f, --force` | boolean | `false` | Rebuild everything; disable incremental dispatch. |
 | `resume` | `-R, --resume` | boolean | `false` | Continue from journal entries left by a previous interrupted run; skip the initial filesystem scan. The journal table survives crashes, so an interrupted cycle can be picked up by re-running with `--resume`. |
-| `verify` | `--audit-output` | boolean | `false` | Verify the output folder against the manifest snapshot — report drift instead of building. |
-| `log` | `-l, --log` | string | — | Log level for this run: `trace`, `debug`, `info`, `notice`, `warn`, `error`, `fatal`, `silent`. Replaces the old `--debug` / `--trace` booleans, which could not express "warnings only" and, in `--debug`'s case, did nothing at all — it moved the logger's level while the terminal stream kept the one it was built with. |
+| — | `--audit-output` | boolean | `false` | Check every tree mikser writes into against the manifest snapshots — report drift instead of building. Command line only; there is no config key. |
+| `log` | `-l, --log` | string | — | Log level for this run: `trace`, `debug`, `info`, `notice`, `warn`, `error`, `fatal`, `silent`. A level above `info` suppresses the version banner too. |
 | `logInstall` | `--log-install` | string | — | Set the level on a **running** instance, so its own rebuilds are verbose too — the case a per-request flag cannot serve. Expires after 30 minutes, dies with the process, and is disclosed in the build report under `logLevel`. |
 | `logReset` | `--log-reset` | boolean | `false` | Return a running instance to its configured level. |
 | `threads` | — | number | `4` | Worker thread count for the Piscina pools (`renderWorkers`, `postprocessWorkers`). Both pools are lazy (`minThreads: 0` + `idleTimeout: 30_000`) so INLINE-only workloads spin up zero workers. |
@@ -232,40 +232,29 @@ The renderers (`render-hbs`, `render-eta`, `render-liquid`) consume the stripped
 
 ECT layouts (`mikser-io-render-ect`) still file-load via ECT's own resolver — YAML at the top of `.ect` files renders as literal text. Pick `hbs` / `eta` / `liquid` for layouts that need self-describing metadata.
 
-### `assets`
+### `assets` *(moved to `mikser-io-assets`)*
+
+Preset derivatives are a sibling package as of 10.12.0. There is no `assets`
+key in `mikser.config.js`: options are factory arguments like every other
+plugin (ADR-0010).
 
 ```js
-export default {
-  assets: {
-    assetsFolder: 'assets',     // Source folder for assets. Default: 'assets'
-    outputFolder: '',           // Output subfolder. Default: root
+import { assets, renderPreset, assetUrlHelper } from 'mikser-io-assets'
 
-    // Preset definitions: preset name → match patterns (and optional config).
-    // Two shapes accepted:
-    presets: {
-      // 1. Bare string or array — backwards-compatible match patterns.
-      'thumbnail': ['@/images/*'],
-      'hero': '@/images/hero*',
-
-      // 2. Object with `match` and per-preset `options` — options merge
-      //    over the preset module's own defaults at render time
-      //    (config-side overrides win on overlap).
-      'medium-image': {
-        match: ['@/images/*', '@/files/photos/*'],
-        options: {
-          width: 800,
-          height: 600,
-          quality: 80,
-        },
-      },
-    }
-  }
-}
+plugins: [
+    assets({
+        presets: { web: { match: ['/files/media/**'] } },
+        // auditIgnore: ['**/*.poster.jpg'],   // extras a preset writes
+    }),
+    renderPreset(),
+    assetUrlHelper(),
+]
 ```
 
-Per-preset `options` from config let a generic preset module (e.g. a `resize` package that reads `options.width` / `options.height`) be reused with different parameters per project — no need to fork the module for each variant. Module-side defaults under `options` still apply for anything the config doesn't override.
-
-Caveat: changing config-side options doesn't automatically invalidate already-rendered assets on disk. Bump the preset module's `revision` export to force a re-render, or run `mikser --clear`.
+`--assets <folder>`, `--presets <folder>` and `--render-presets [name]` are
+declared by that package, so a config without `assets()` does not have them —
+the flag is refused by name rather than accepted and ignored. Full reference:
+[mikser-io-assets](https://github.com/almero-digital-marketing/mikser-io-assets#readme).
 
 ### `resources`
 

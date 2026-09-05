@@ -38,7 +38,7 @@ substrate runs:
 - Video / audio / archives / data-export — same shape
 
 The engine has no opinion on what a renderer produces. `render.js`
-and `postprocess.js` are abstract worker entries; `manifest.js`
+and `postprocess.js` are abstract worker entries; `manifest/`
 tracks snapshots of *any* output; refs invalidation re-runs
 *any* render task. SSG is the dominant case in v9 because it's
 where the dogfooding lives, not because the architecture only
@@ -395,7 +395,7 @@ brevity.
   when it looks like one (`'hash' in format`); without that, `asset 'web'
   '/x.jpg'` built `/assets/web/x.[object Object]` — the bug the finalize
   check found on its first run, present since the helper took a format.
-- `matchesLibrary` (utils.js) — a resources library key is a REGEX source
+- `matchesLibrary` (utils/library.js) — a resources library key is a REGEX source
   (`escapeStringRegexp(url)`), and it has two consumers: the plugin's
   discovery walk, which decides what to DOWNLOAD, and the `resource` render
   helper, which builds the url. They read the same string with two matchers
@@ -405,7 +405,7 @@ brevity.
   building links to the missing files. Green build, missing images; found
   when the reference check read the output back. Both now call one function
   so they cannot drift.
-- `siteRelativeUrl` / `siteRootFor` (utils.js) — every url helper (`asset`,
+- `siteRelativeUrl` / `siteRootFor` (utils/output.js) — every url helper (`asset`,
   `href`, `resource`) builds an output-root absolute destination and
   relativises it from the page. With one site per build the output folder IS
   the deployed root and that is right; with several it is not, and each url
@@ -653,7 +653,7 @@ scheme. Two schemes are handled inline by built-in providers
 (no separate package required, ships with mikser-io):
 
 - **No scheme / plain path / `file://`** — filesystem read. Lives
-  inline in `src/utils.js readEntityContent` because the engine
+  inline in `src/utils/entity.js readEntityContent` because the engine
   already touches the filesystem everywhere.
 - **`http://` / `https://`** — `src/plugins/providers/http.js`.
   Conditional GET with ETag + Last-Modified, in-memory response
@@ -779,7 +779,7 @@ Test coverage: `test/unit/source-sweep.test.js`.
 - **Engine-set entity fields under `entity.options`**, not
   `_`-prefixed top-level.
 - **No cross-plugin imports.** Plugins compose through lifecycle +
-  `runtime.options.*`. Shared pure helpers go in `src/utils.js`.
+  `runtime.options.*`. Shared pure helpers go in `src/utils/`.
   Audit: `grep -rEn "from '\./|await import\('\./" src/plugins/*.js`
   should return nothing.
 - **Single source of truth fixes.** For cross-plugin bugs, ask
@@ -835,7 +835,7 @@ Test coverage: `test/unit/source-sweep.test.js`.
   (image/video/PDF) are `$`-keyed **served paths** (`/img/X.jpg`,
   `/media/clip.mp4` — the path content authors, = the entity's
   `meta.url`), resolving via a new `refFilter` `{ 'meta.url': … }`
-  clause (utils.js) backed by an indexed `meta_url` column
+  clause (utils/refs.js) backed by an indexed `meta_url` column
   (catalog.js + the `INDEXED_COLUMNS` map in sift-to-sql.js; schema
   9.0.1 → 9.0.2). No collection-prefixed ids leak into content.
   Id-refs were tried and rejected — gpoint references content by

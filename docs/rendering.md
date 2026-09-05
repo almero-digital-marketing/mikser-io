@@ -10,7 +10,7 @@ Rendering is triggered by RENDER operations in the journal. Each entry describes
 RENDER journal entries
         │
         ▼
-   onRender hook (engine.js)
+   onRender hook (engine/render-cycle.js)
         │
         ├── For each unique entity:destination pair
         │

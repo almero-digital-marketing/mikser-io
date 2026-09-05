@@ -250,221 +250,44 @@ See the [mikser-io-layouts README](https://github.com/almero-digital-marketing/m
 
 ---
 
-### `assets`
+### `assets` *(sibling: `mikser-io-assets`)*
 
-The assets plugin runs **user-authored preset modules** over binary inputs (images, video, audio, anything) and writes processed outputs. Each preset is a plain Node module — whatever you can call from Node, you can run as a build step. No DSL, no constrained options bag, no vendor pipeline to fight with.
+Runs **user-authored preset modules** over binary inputs — images, video,
+audio, anything — and writes the derived files. A preset is a plain Node
+module: whatever you can call from Node you can run as a build step. No DSL,
+no constrained options bag, no vendor pipeline to fight with. Image resizing
+with sharp, video transcoding with ffmpeg, AI upscaling via Replicate,
+watermarking with canvas — each is a preset. The plugin does not decide what
+is possible; the preset does.
 
-That makes the assets plugin **the most powerful primitive in mikser**: an open-ended build-time processing layer with full Node capabilities. Image resizing with sharp, video transcoding with ffmpeg, AI upscaling via Replicate, watermarking with canvas, custom multi-output pipelines composed across all of the above — each is a preset module. The plugin doesn't decide what's possible; the preset does.
-
-#### Config
-
-```js
-assets: {
-    assetsFolder: 'assets',         // working folder for presets — default 'assets'
-    outputFolder: 'public',         // where the processed outputs land — default root
-
-    // Each preset name maps to a list of source globs. A source matches
-    // multiple presets if needed (one image → thumbnail + hero + og-card).
-    presets: {
-        thumbnail: ['/files/images/*.{jpg,png}',  '/resources/**/*.{jpg,png}'],
-        hero:      ['/files/images/hero-*.jpg'],
-        'video-web': ['/files/videos/*.mp4',       '/resources/**/*.mp4'],
-        'image-2x': ['/files/images/*.jpg'],
-        upscaled:  ['/files/photos/raw-*.jpg'],
-    },
-}
+```bash
+npm install mikser-io-assets
 ```
 
-`presets/<name>.js` next to your `mikser.config.js` is the preset module for that name.
-
-#### Where a preset comes from
-
-A preset name resolves in two places, local first:
-
-1. **`presets/<name>.js`** in your project — the common case.
-2. **An npm package `mikser-io-preset-<name>`** — when no local file exists, the plugin resolves the name from your project's `node_modules`. Install a shared preset (`npm install mikser-io-preset-thumbnail`) and reference it by name in `assets.presets` with no local file. Same resolution convention as `post-*` plugins.
-
-A local file always wins over an npm package of the same name — drop `presets/thumbnail.js` to override one preset from a package while leaving the rest. The two have different update lifetimes: local presets reload on file change in watch mode; npm presets are versioned by their package (bump the dependency to update). `node_modules` is never watched.
-
-If a configured preset name resolves to neither a local file nor an npm package, the plugin logs `Preset not found: <name> ...` and skips it — the rest of the build proceeds.
-
-#### Preset module shape
-
-A preset is a default-exported async function. It receives the entity being processed (with `source`, `destination`, `preset`, `name`, etc.), runs whatever code it needs, and resolves (or rejects) when done.
-
 ```js
-export const revision = 1     // bump to force re-render (cache-bust)
-export const format = 'webp'  // output format hint (used in the destination filename)
+import { assets, renderPreset, assetUrlHelper } from 'mikser-io-assets'
 
-export default async ({ entity, runtime, logger }) => {
-    // entity.source       — input file on disk
-    // entity.destination  — where to write the result
-    // entity.preset       — config of the matching preset (name, source, options)
-    // entity.name         — original entity name (e.g. '/files/images/hero.jpg')
-    // runtime / logger    — mikser context, including runtime.options for paths
-}
+plugins: [
+    assets({ presets: { web: { match: ['/files/media/**'] } } }),
+    renderPreset(),          // the renderer presets dispatch through
+    assetUrlHelper(),        // runtime.asset() for templates
+]
 ```
 
-That's the whole contract. Three real examples follow.
+`renderPreset()` is not optional. It was resolved implicitly while this code
+lived in the engine, whose renderer lookup falls back to a path inside its own
+`src/plugins/render/` — that path no longer holds it.
 
-#### Example 1 — Video transcoding via ffmpeg
+Split out of core in 10.12.0: it encodes one recipe for producing files from
+files, the way `layouts` encodes one for producing render tasks. What stayed
+in the engine is substrate — the render track that records which asset URLs a
+template asked for, and the finalize check that reports the ones nothing
+produced, both of which work whether or not this package is installed.
 
-A 720×1080 portrait MP4 at 600kbps for the web. fluent-ffmpeg streams progress events back into mikser's logger so the build progress bar reflects encoder progress in real time.
-
-```js
-// presets/video-web.js
-import ffmpeg from 'fluent-ffmpeg'
-
-export const revision = 7
-export const format = 'mp4'
-
-export default ({ entity: { name, source, destination, preset }, logger }) => {
-    return new Promise((resolve, reject) => {
-        ffmpeg(source)
-            .videoCodec('libx264')
-            .size('810x1080')
-            .videoBitrate(600)
-            .outputOptions('-strict -2')
-            .on('progress', ({ percent }) =>
-                logger.trace(`Progress: [${preset.name}] ${name} ${Math.round(percent)}%`))
-            .on('error', reject)
-            .on('end', resolve)
-            .save(destination)
-    })
-}
-```
-
-10 lines of glue around ffmpeg. Every published video in the catalog gets transcoded; rebuilds skip unchanged inputs because the journal tracks file mtimes; bumping `revision` re-encodes everything (useful when you change the bitrate).
-
-#### Example 2 — Image variants via sharp
-
-Resize + format negotiation. Most projects want srcset variants in WebP and AVIF; this preset emits both with a single sharp pipeline.
-
-```js
-// presets/image-2x.js
-import sharp from 'sharp'
-import { dirname, basename, extname, join } from 'node:path'
-import { mkdir } from 'node:fs/promises'
-
-export const revision = 3
-
-export default async ({ entity: { source, destination }, logger }) => {
-    const dir   = dirname(destination)
-    const stem  = basename(destination, extname(destination))
-    await mkdir(dir, { recursive: true })
-
-    const pipeline = sharp(source).rotate()       // honor EXIF orientation
-    // 2× variants for each format
-    await Promise.all([
-        pipeline.clone().resize({ width: 1600 }).webp({ quality: 85 }).toFile(join(dir, `${stem}@2x.webp`)),
-        pipeline.clone().resize({ width: 1600 }).avif({ quality: 60 }).toFile(join(dir, `${stem}@2x.avif`)),
-        pipeline.clone().resize({ width: 800  }).webp({ quality: 85 }).toFile(join(dir, `${stem}.webp`)),
-        pipeline.clone().resize({ width: 800  }).avif({ quality: 60 }).toFile(join(dir, `${stem}.avif`)),
-    ])
-    logger.trace('image-2x emitted 4 variants for %s', source)
-}
-```
-
-One preset, four output files per input image. The render-href plugin can then rewrite `<img src="hero.jpg">` to the `@2x.webp` URL with a fallback `<source>` chain — but that's a render-time concern, not the asset plugin's.
-
-#### Example 3 — AI enhancement via Replicate
-
-The interesting one. Hand a raw photo to a model on Replicate (here, an image upscaler), poll for completion, fetch the result, write it to disk. The preset is a normal Node module — `fetch` is just `fetch`, no special bridging.
-
-```js
-// presets/upscaled.js
-import { writeFile } from 'node:fs/promises'
-
-export const revision = 2
-export const format = 'jpg'
-
-const REPLICATE_MODEL = 'nightmareai/real-esrgan'
-const REPLICATE_VERSION = '...'   // pin a model version
-
-export default async ({ entity: { source, destination }, logger }) => {
-    // 1. Upload source — Replicate accepts a public URL or base64 data URI
-    const data = await readFile(source)
-    const dataUri = `data:image/jpeg;base64,${data.toString('base64')}`
-
-    // 2. Kick off the prediction
-    const start = await fetch('https://api.replicate.com/v1/predictions', {
-        method: 'POST',
-        headers: {
-            'authorization': `Token ${process.env.REPLICATE_TOKEN}`,
-            'content-type':  'application/json',
-        },
-        body: JSON.stringify({
-            version: REPLICATE_VERSION,
-            input:   { image: dataUri, scale: 4 },
-        }),
-    }).then(r => r.json())
-
-    // 3. Poll until succeeded
-    let prediction = start
-    while (prediction.status === 'starting' || prediction.status === 'processing') {
-        await new Promise(r => setTimeout(r, 1500))
-        prediction = await fetch(start.urls.get, {
-            headers: { authorization: `Token ${process.env.REPLICATE_TOKEN}` },
-        }).then(r => r.json())
-        logger.trace('replicate %s: %s', start.id, prediction.status)
-    }
-    if (prediction.status !== 'succeeded') {
-        throw new Error(`Replicate failed: ${prediction.error}`)
-    }
-
-    // 4. Download the result and write it where mikser expects
-    const buffer = Buffer.from(await fetch(prediction.output).then(r => r.arrayBuffer()))
-    await writeFile(destination, buffer)
-}
-```
-
-What's unique here is that **none of this required a plugin to mikser**. The preset *is* the plugin code. You can call any third-party service, run any local model (via `@xenova/transformers`, llama.cpp, ONNX runtime, whatever), shell out to anything (`child_process` to a custom binary), or compose multiple steps:
-
-```js
-// presets/hero-deluxe.js — multi-step pipeline
-import sharp from 'sharp'
-import { upscaleViaReplicate } from './_replicate.js'
-import { applyWatermark } from './_watermark.js'
-
-export const revision = 1
-export default async ({ entity: { source, destination } }) => {
-    const upscaled  = await upscaleViaReplicate(source)
-    const watermark = await applyWatermark(upscaled, { text: '© Acme Co 2026' })
-    await sharp(watermark).resize({ width: 2400 }).avif({ quality: 70 }).toFile(destination)
-}
-```
-
-This is the property no other SSG / CMS exposes at this level. Astro's `<Image>` resizes; that's it. Hugo's image processing has a fixed set of operations. Sanity's image CDN runs the transforms it decided to support. mikser's preset is whatever you write — including operations that don't exist anywhere else (upscaling specific to your domain, watermarks driven by per-image rules, multi-format outputs with vendor-specific encoders).
-
-#### Composition with `resources`
-
-The assets plugin processes whatever's on disk. Source files don't have to start in your repo — the **resources plugin** (next section) pulls them from external systems (company content servers, S3, vendor APIs) into the working folder so assets can then process them. That composition is where the "advanced pipeline" idea pays off — see the end-of-section example for the full chain.
-
-#### Watch support
-
-Yes — the plugin watches both the source files and the preset modules. Editing a preset re-processes every input that matches it; editing a source re-processes just that input.
-
-
-**Derivatives with no source are removed.** A derivative outlived its source:
-deleting a file removed its catalog row and its published copy and left the
-derived file, because the delete handler dropped the in-memory mapping and
-nothing on disk. Narrowing a preset's `match` left one the same way. A stale
-derivative passes every check — the url resolves and the bytes are there —
-so the only cleanup was `--clear`, or deleting it by hand.
-
-The post-cycle pass that already walks the revision markers now also asks, per
-derivative, whether it still has a source that this preset still covers. It is
-answered from the **catalog**, not from the delete event: a delete entry is
-sparse (`{ id, type, collection }`) in every source plugin, so it cannot say
-where the derivative went, while the catalog answers whatever route the orphan
-arrived by — including ones that predate the fix. Reported as
-`Assets removed: N derivative(s) with no source`.
-
-It does nothing when the catalog is empty. Every check concludes "no source,
-therefore orphan", and an empty catalog answers that for every derivative on
-the site, so a failed import would otherwise delete the whole assets folder.
-
----
+See the [mikser-io-assets README](https://github.com/almero-digital-marketing/mikser-io-assets#readme)
+for the full reference: preset module shape, `revision` and the
+completed-render marker, recovery from an interrupted derive, `auditIgnore`,
+`--render-presets`, and worked ffmpeg / sharp examples.
 
 ### `resources`
 

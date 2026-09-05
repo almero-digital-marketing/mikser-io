@@ -98,7 +98,7 @@ The most common confusion when starting out is *which artifact lives where, at w
 | Asset variants | `assets/<preset>/` (preset outputs) | `assets` plugin | `onRender` |
 | Persistent entity registry | `mikser_entities` table in `runtime/mikser.sqlite` | `catalog.js` | `onPersist` |
 | Inverse-reference graph | `mikser_refs` table in `runtime/mikser.sqlite` | `refs.js` | `onPersist` |
-| Render snapshots (manifest) | `mikser_snapshots` table in `runtime/mikser.sqlite` | `manifest.js` | `onPersist` / `onFinalize` |
+| Render snapshots (manifest) | `mikser_snapshots` table in `runtime/mikser.sqlite` | `manifest/` | `onPersist` / `onFinalize` |
 | Per-cycle operations (journal) | `mikser_journal` table in `runtime/mikser.sqlite` | every plugin | every phase |
 | Front-matter schemas | `schemas/` | `mikser-io-schemas` | `onValidate` |
 | Rendered HTML | `out/<route>.html` | post plugins + http server | `onRender` |

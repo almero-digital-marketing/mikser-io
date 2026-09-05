@@ -286,9 +286,9 @@ onFinalized(async () => {
 ```
 
 **What Mikser does here:**
-- `catalog.js` / `refs.js` / `manifest.js` commit their per-cycle
+- `catalog.js` / `refs.js` / `manifest/` commit their per-cycle
   transaction against `mikser.sqlite` (skipped if no changes)
-- `engine.js` cleans up broken symlinks in the output folder
+- `engine/finalize.js` cleans up broken symlinks in the output folder
 - `journal.js` clears the per-cycle queue: `DELETE FROM mikser_journal`.
   Anything still in the table when the process exits is left for the
   next `--resume` run.

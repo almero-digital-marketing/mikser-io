@@ -344,8 +344,18 @@ sentence someone may later reword.
 
 ### `--audit-output`
 
-Walks the output folder against the recorded snapshots and reports drift
-instead of building. Four categories, and the split matters:
+Walks every tree mikser writes into, against the recorded snapshots, and
+reports drift instead of building.
+
+Every tree, not just the output folder: preset derivatives live at the
+working-folder root and reach the site through a symlink the walk does not
+follow, so anything unclaimed there used to be invisible to the one check
+whose job is "what is on disk that mikser did not record". Plugins declare
+their trees on `runtime.options.auditRoots` as `{ path, ignore }`, which is
+also how a plugin states what is bookkeeping rather than output — a `.md5`
+beside every derivative would otherwise be one orphan per derivative.
+
+Five categories, and the split matters:
 
 | Category | Meaning | Severity |
 | --- | --- | --- |
@@ -367,8 +377,16 @@ missing or mismatched, `1` if only warnings, `0` when clean, and `2` when
 there is no manifest to check against.
 
 ```bash
-npx mikser --audit-output || echo "output folder has drifted"
+npx mikser --audit-output || echo "the output has drifted"
 ```
+
+A preset that writes **more than one file** — a poster frame beside a video —
+leaves the extras genuinely unclaimed, because the engine records the one
+destination it handed over. They are reported, correctly, and that would be a
+permanent non-zero exit for a legitimate preset. `assets({ auditIgnore: [...] })`
+is how a project says those are expected. Stated rather than inferred:
+guessing which unclaimed files are intentional is how a check learns to cry
+wolf.
 
 A destination is resolved against the output folder first and, when that
 finds nothing, treated as a filesystem path — assets carry an absolute
@@ -956,6 +974,107 @@ Nothing clears a fault. The condition is fixed by an operator, and the restart
 that follows is what clears it — an engine deciding on a subsystem's behalf
 that it has recovered would be inventing the one fact this surface exists to
 report honestly.
+
+## Codes
+
+Every warning and fault carries a `code`, and the code is the stable part —
+`--json` keys `warnings` and `faults` by it, `mikser_ping` surfaces faults by
+it, and a check that greps message text breaks the first time someone
+improves the wording. Assert on codes.
+
+```bash
+npx mikser --json | jq '[.warnings[].code] | group_by(.) | map({(.[0]): length}) | add'
+npx mikser --json | jq -e '[.warnings[] | select(.code == "reference-broken")] | length == 0'
+```
+
+Severity is the level the record was logged at: `warn` becomes a warning in
+the report, `error` **with a code** becomes a fault. An error without a code
+is one render that threw, not a subsystem declaring it cannot work — that
+distinction is the whole of [Faults](#faults) above.
+
+### What was written
+
+| Code | Severity | Means |
+| --- | --- | --- |
+| `reference-broken` | warn | A `src` / `href` / `url()` in the emitted output resolves to no file. |
+| `reference-over-deep` | warn | It resolves only because a `..` run was floored at the site root. Loads today; breaks one nesting level deeper. |
+| `reference-wrong-base` | warn | Nothing at the path written, but the file exists elsewhere — resolved against the wrong site root. |
+| `reference-no-derivative` | warn | A reference to a preset derivative that nothing produced. |
+| `reference-broken-summary`, `reference-over-deep-summary` | warn | The counts, so a check can assert on one line rather than N. |
+| `asset-missing` | warn | A template asked for an asset URL that is not in the output. Complements the reference scan: this one sees URLs that never reach an HTML file — a feed, a sitemap — and knows the entity. |
+| `asset-missing-summary` | warn | The count. |
+| `destination-collision` | warn | Two or more entities wrote the same destination this cycle. Usually produces **no** mismatch, because each render hashes the file after writing and the loser reads the winner's bytes. |
+| `empty-output` | warn | A render succeeded and produced a zero-byte file. |
+| `output-drift` | warn | The same inputs produced different bytes than last time — a non-deterministic renderer, or an input nothing is tracking. |
+| `output-drift-summary` | warn | The count. |
+
+### Derivatives (`mikser-io-assets`)
+
+| Code | Severity | Means |
+| --- | --- | --- |
+| `preset-unfinished` | warn | A derivative the manifest claims is on disk with no completed-render marker beside it — a derive that was killed. It is being re-derived; the file that was there is not trustworthy. |
+| `preset-no-match` | warn | A configured preset matched none of the entities evaluated this run. Phrased as what was observed: an incremental cycle legitimately evaluates a handful. |
+| `preset-unknown` | warn | `--render-presets` named a preset that is not configured. |
+
+### Configuration and stores
+
+| Code | Severity | Means |
+| --- | --- | --- |
+| `config-coverage-partial` | warn | This Node build has no module loader hooks, so the config stamp covers the entry file alone. Editing an imported module will not invalidate the cache. |
+| `durable-open` | error | The durable store could not be opened. Auth grants and the change-set log are unavailable. |
+| `durable-migration` | error | A registered migration failed. |
+| `durable-gitignore` | error | The durable store could not be added to `.gitignore` — it holds credentials and the working folder is usually a repo. |
+| `change-set-log` | error | Writes still land on disk but cannot be listed or undone. |
+
+### Process and control
+
+| Code | Severity | Means |
+| --- | --- | --- |
+| `instance-listen-failed` | warn | The control socket could not be opened, so other mikser commands in this folder will start their own engine instead of forwarding. |
+| `command-from-cli` | warn | A hook command was supplied on the command line. Deliberately loud: this build is running code that is not in the config. |
+| `command-hook-not-reached` | warn | A command was attached to a hook the cycle never reached. |
+| `command-install-without-instance` | warn | `--command-install` with nothing listening to install it on. |
+| `log-level-installed` | warn | This instance is running at a level installed with `--log-install` — not the configured level, and not this build asking for it. Carries its expiry. |
+
+### Sources and progress
+
+| Code | Severity | Means |
+| --- | --- | --- |
+| `observer-bad-uri` | warn | An observer's `uri` is not an absolute URL, so no webhook can be routed to it. |
+| `untracked-file-read` | warn | A template read a file outside every folder mikser takes entities from, so it has no entity and changing it invalidates nothing. |
+| `progress` | info | A long phase reporting where it has got to. See [Progress](#progress). |
+| `progress-finished` | info | A phase completed: what it was, how much it carried, what it cost. |
+| `progress-unfinished` | warn | A phase stopped before finishing. |
+
+## Progress
+
+Progress is **tracked always, drawn only where a bar belongs, and narrated
+only for phases that run long**. Off a TTY — CI, a pipe, `--json` — there is
+no bar, and the same facts arrive as records:
+
+```
+[progress-finished] Documents import finished: 5 in 1ms
+[progress] Rendering: 4500/6000 — /documents/p2356.md
+[progress-finished] Rendering finished: 6000 in 3.2s
+```
+
+Three rules, and each exists because the obvious alternative was wrong:
+
+- **`progress-finished` is never gated.** Every phase says it ran and what it
+  cost, at any duration. With the commentary throttled it is the only record
+  most phases produce, and off a TTY it is the only place phase timings come
+  from at all.
+- **The running commentary is one line per 30 seconds**, not per item and not
+  per quartile. A quartile is a fraction of the *work*, so it says nothing
+  about how often a line appears — four records in three seconds on a fast
+  phase, four across an hour on a slow one.
+- **A duration is a measurement, never a zero.** Phases are timed with
+  `performance.now()`, so `0.12ms` rather than the `0s` that a whole class of
+  phases used to report.
+
+A bar never starts while stdout carries a document (`--json`, `--tool`,
+`--tools`): the gauge writes to stdout, and forwarded to an instance it landed
+inside the JSON.
 
 ## When mikser is silent
 
