@@ -835,7 +835,17 @@ The full version, with what each code means: docs/diagnostics.md`)
         // creates for itself. By `import` every onLoaded has run and the
         // registry is complete. Nothing is imported, because this exits first,
         // the same way --explain and --audit-output do.
-        if (runtime.options.tools || runtime.options.tool) {
+        //
+        // --audit-output is here for the same reason, found the same way. It
+        // asks which trees hold outputs, and a plugin cannot answer until its
+        // own onLoaded has run — the assets plugin resolves the folder its
+        // derivatives live in there, because `--assets` is a plugin option
+        // and stage two of the parse is what makes it readable. Dispatched
+        // from the engine's onLoaded it ran ahead of all of them, so the one
+        // check that reports unclaimed files could not see the one tree whose
+        // files reach the site through a symlink it does not follow. It
+        // reported `0 orphaned` over any amount of debris.
+        if (runtime.options.tools || runtime.options.tool || runtime.options.auditOutput) {
             const code = await runReportOnly()
             if (code !== null) process.exit(code)
         }
@@ -877,14 +887,16 @@ The full version, with what each code means: docs/diagnostics.md`)
         // one implementation, so a forwarded --audit-output cannot disagree with a
         // local one about what it checked.
         //
-        // --tools and --tool are NOT among them: they are dispatched at `import`
-        // instead, because the tool registry is not complete until every
-        // plugin's onLoaded has run and this hook runs ahead of all of them.
+        // --tools, --tool and --audit-output are NOT among them: they are
+        // dispatched at `import` instead, because what they read is not
+        // complete until every plugin's onLoaded has run and this hook runs
+        // ahead of all of them — the tool registry for the first two, the set
+        // of trees that hold outputs for the third.
         // The import dispatch existed already and was documented as
         // load-bearing, but this call reached the same code first and exited,
         // so it never ran — and every tool a plugin registers was missing from
         // the CLI while the listing looked healthy, just short.
-        if (!runtime.options.tools && !runtime.options.tool) {
+        if (!runtime.options.tools && !runtime.options.tool && !runtime.options.auditOutput) {
             const code = await runReportOnly()
             if (code !== null) process.exit(code)
         }

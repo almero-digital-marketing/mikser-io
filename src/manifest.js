@@ -1102,7 +1102,7 @@ export function createManifest(db) {
         // Walk the output folder against recorded snapshots, returning
         // a diff describing missing / mismatched / orphaned /
         // unverifiable. Backs `mikser --audit-output`. Pure: no mutations.
-        async auditOutput({ outputFolder } = {}) {
+        async auditOutput({ outputFolder, roots } = {}) {
             outputFolder = outputFolder || runtime.options.outputFolder
             const missing = []
             const mismatched = []
@@ -1112,16 +1112,12 @@ export function createManifest(db) {
                 const snap = rowToSnap(row)
                 if (!snap.destination) continue
                 const filePath = resolveOutputPath(snap.destination, outputFolder)
-                // Orphan detection compares against a globby walk of
-                // outputFolder, so `claimed` has to hold exactly the relative
-                // form that walk produces. A destination resolving outside
-                // outputFolder can never appear in it and is not claimable;
-                // one inside it must be claimed by its relative path, not by
-                // the raw string with its leading slashes stripped.
-                const relative = path.relative(outputFolder, filePath)
-                if (relative && !relative.startsWith('..') && !path.isAbsolute(relative)) {
-                    claimed.add(relative)
-                }
+                // Claimed by ABSOLUTE path, so the set does not depend on the
+                // relative form any particular walk produces. It was keyed on
+                // a path relative to outputFolder, which worked only while
+                // that was the one tree walked — and quietly claimed nothing
+                // for every destination outside it.
+                claimed.add(path.resolve(filePath))
                 if (!existsSync(filePath)) {
                     missing.push({ id: snap.id, destination: snap.destination })
                     continue
@@ -1150,15 +1146,47 @@ export function createManifest(db) {
                 }
             }
             const { globby } = await import('globby')
-            const onDisk = await globby('**/*', {
-                cwd: outputFolder,
-                onlyFiles: true,
-                followSymbolicLinks: false,
-            })
+            // Every tree mikser writes into, not only the output folder.
+            //
+            // Preset derivatives live at the working-folder root and reach
+            // the site through a symlink, which the walk does not follow — so
+            // a file nothing claims there was invisible to this check, which
+            // is the one place the concept of an orphan exists. Plugins
+            // declare their own trees on `runtime.options.auditRoots`,
+            // carrying their own ignore patterns, so nothing here has to know
+            // what a preset is or that a `.md5` beside a derivative is
+            // bookkeeping rather than output.
+            const declared = [{ path: outputFolder }, ...(roots ?? runtime.options.auditRoots ?? [])]
+            const walked = []
+            for (const root of declared) {
+                const resolved = path.resolve(root.path ?? root)
+                // A root inside one already walked would report every file in
+                // it twice.
+                const nested = walked.some(({ resolved: seen }) =>
+                    resolved === seen || resolved.startsWith(seen + path.sep))
+                if (nested) continue
+                walked.push({ resolved, ignore: root.ignore ?? [] })
+            }
             const orphaned = []
-            for (const rel of onDisk) {
-                if (claimed.has(rel)) continue
-                orphaned.push({ path: rel })
+            for (const { resolved, ignore } of walked) {
+                const onDisk = await globby('**/*', {
+                    cwd: resolved,
+                    onlyFiles: true,
+                    followSymbolicLinks: false,
+                    ignore,
+                })
+                for (const rel of onDisk) {
+                    if (claimed.has(path.join(resolved, rel))) continue
+                    // Relative to the output folder for the output folder, as
+                    // before; relative to the working folder for anything
+                    // else, because `web/media/x.jpg` alone does not say which
+                    // tree it is in.
+                    const isOutput = resolved === path.resolve(outputFolder)
+                    const display = isOutput
+                        ? rel
+                        : path.relative(runtime.options.workingFolder ?? resolved, path.join(resolved, rel))
+                    orphaned.push({ path: display, root: resolved })
+                }
             }
             // Reported alongside, not as a mismatch: two entities claiming one
             // destination usually produces NO mismatch at all, because each

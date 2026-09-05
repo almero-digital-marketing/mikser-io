@@ -505,6 +505,7 @@ export function assets(options = {}) {
         runtime.engine ??= {}
         runtime.engine.assets = { explainMissing }
 
+
         // `??`, not `||`: an option commander did not see is undefined, and
         // falling through to the config is the point. `||` would also fall
         // through for an intentional empty string, which is a different
@@ -516,6 +517,28 @@ export function assets(options = {}) {
 
         runtime.options.assets = runtime.options.assets ?? options.assetsFolder ?? 'assets'
         runtime.options.assetsFolder = path.join(runtime.options.workingFolder, runtime.options.assets)
+        // This tree holds outputs too, and --audit-output could not see it:
+        // it walks the output folder, and derivatives reach the site through
+        // a symlink the walk does not follow. Declared rather than hardcoded
+        // in the manifest, with the ignore that only this plugin can state —
+        // a `.md5` beside a derivative is bookkeeping, and without excluding
+        // them every derivative on the site would report one orphan.
+        //
+        // `auditIgnore` is the escape hatch for a preset that writes MORE
+        // than one file. The engine records the one destination it handed
+        // over, so a poster frame written beside a video is genuinely
+        // unclaimed and genuinely reported — correct, and a permanent
+        // non-zero exit for a legitimate preset if there were no way to say
+        // "these are expected". Stated in config, next to the preset that
+        // produces them, rather than inferred.
+        const auditRoot = {
+            path: runtime.options.assetsFolder,
+            ignore: ['**/*.md5', ...(options.auditIgnore ?? [])],
+        }
+        runtime.options.auditRoots = [
+            ...(runtime.options.auditRoots ?? []).filter(root => root.path !== auditRoot.path),
+            auditRoot,
+        ]
         logger.debug('Assets folder: %s', runtime.options.assetsFolder)
 
         // --clear means "throw away what was derived and build it again", and

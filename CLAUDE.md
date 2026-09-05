@@ -367,6 +367,27 @@ brevity.
   per-domain deploy, so it is left alone and the reference check reports it
   rather than this inventing a path. Nothing declared → `''` → byte-identical
   output, which is the compatibility guarantee.
+- **`--audit-output` walks every tree that holds outputs, not just
+  `outputFolder`.** Preset derivatives live at the working-folder root and
+  reach the site through a symlink the walk does not follow, so the one check
+  whose job is "what is on disk that mikser did not record" reported
+  `0 orphaned` over any amount of debris in the one tree where debris
+  accumulates. Plugins DECLARE their trees on `runtime.options.auditRoots`
+  as `{ path, ignore }`, so nothing in core knows what a preset is or that a
+  `.md5` beside a derivative is bookkeeping — without that ignore every
+  derivative on a site reports exactly one orphan. `claimed` is keyed on
+  ABSOLUTE paths; keyed relative to `outputFolder` it silently claimed
+  nothing for any destination outside it. Roots nested inside an
+  already-walked one are skipped, or `--assets out/derived` lists every file
+  twice. **The dispatch is at `import`, not the engine's `onLoaded`** — same
+  reason `--tool`/`--tools` moved there: the engine's own onLoaded is
+  registered during setup(), ahead of every plugin's, so an audit dispatched
+  from it asked which trees hold outputs before a single plugin had answered,
+  and the declaration was correct but arrived too late to be read. A preset
+  that writes MORE than one file leaves the extras genuinely unclaimed and
+  genuinely reported; `assets({ auditIgnore: [...] })` is how a project says
+  they are expected, because otherwise a legitimate preset shape is a
+  permanent non-zero exit.
 - `references.js` — the OTHER half of the broken-link answer: reads the
   EMITTED output (html + css) and resolves every `src` / `href` / `poster`
   / `srcset` / `url()` the way a browser does. Complements
