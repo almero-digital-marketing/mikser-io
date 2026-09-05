@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import _ from 'lodash'
 import Database from 'better-sqlite3'
-import { useLogger } from './engine.js'
+import { useLogger } from './engine/index.js'
 import { formatLogArgs } from './utils.js'
 import engineRuntime from './runtime.js'
 // The report code every template-raised warning carries. Templates pass a

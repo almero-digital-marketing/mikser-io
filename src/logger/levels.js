@@ -11,7 +11,7 @@
 // decides only what should be in force.
 
 import runtime from '../runtime.js'
-import { useLogger } from '../engine.js'
+import { useLogger } from '../use-logger.js'
 import { onFinalized } from '../lifecycle.js'
 import { applyStreamLevel, streamLevel } from './streams.js'
 

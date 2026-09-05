@@ -3,7 +3,7 @@ import chokidar from 'chokidar'
 import cron from 'node-cron'
 import { onProcess, onFinalized } from './lifecycle.js'
 import { resetReport } from './report.js'
-import { useLogger } from './engine.js'
+import { useLogger } from './engine/index.js'
 import { ACTION } from './constants.js'
 import { junkFilter } from './utils.js'
 

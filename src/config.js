@@ -1,5 +1,5 @@
 import runtime from './runtime.js'
-import { useLogger } from './engine.js'
+import { useLogger } from './engine/index.js'
 import { onLoad } from './lifecycle.js'
 import { checksum, checksumOf } from './utils.js'
 import path from 'node:path'

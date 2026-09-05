@@ -1,4 +1,4 @@
-import { useLogger } from './engine.js'
+import { useLogger } from './engine/index.js'
 import { onLoad } from './lifecycle.js'
 import { resetServices } from './services.js'
 import runtime from './runtime.js'

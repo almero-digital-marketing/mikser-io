@@ -36,7 +36,7 @@ import { chmod } from 'node:fs/promises'
 import runtime from './runtime.js'
 import { onLoaded } from './lifecycle.js'
 import { renderErrorCount } from './report.js'
-import { runReportOnly } from './engine.js'
+import { runReportOnly } from './engine/index.js'
 import {
     setLogLevel, restingLogLevel, applyLogRequest, LOG_LEVELS,
 } from './logger/index.js'

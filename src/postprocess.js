@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, unlink } from 'node:fs/promises'
 import { readFile, writeFile } from 'node:fs/promises'
 import _ from 'lodash'
-import { useLogger } from './engine.js'
+import { useLogger } from './engine/index.js'
 import engineRuntime from './runtime.js'
 
 export async function loadPlugin(pluginName, workingFolder, loggerOverride) {

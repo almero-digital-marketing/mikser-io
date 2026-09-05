@@ -25,7 +25,7 @@ import { fileURLToPath } from 'node:url'
 import { networkInterfaces } from 'node:os'
 
 import runtime from './runtime.js'
-import { useLogger } from './engine.js'
+import { useLogger } from './engine/index.js'
 import { onInitialized, onLoad, onLoaded } from './lifecycle.js'
 
 // Every non-loopback IPv4 address this machine answers on.

@@ -10,7 +10,7 @@
 import Gauge from 'gauge'
 import path from 'node:path'
 import runtime from '../runtime.js'
-import { useLogger } from '../engine.js'
+import { useLogger } from '../use-logger.js'
 
 
 // Gauge instance and current-bar state. Built lazily on first

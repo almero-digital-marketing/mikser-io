@@ -11,7 +11,7 @@ mikser-io/
 │
 └── src/
     ├── runtime.js            Singleton object — global state and lifecycle coordination
-    ├── engine.js             setup(), CLI option parsing, render + postprocess dispatchers, lazy Piscina pools
+    ├── engine/               setup() and the lifecycle phases, one file each: boot, dispatch, render-cycle, postprocess-cycle, finalize; plus report-only, checks and workers. index.js wires them in order
     ├── lifecycle.js          Hook registration functions + entity write helpers
     ├── journal.js            Per-cycle queue persisted to mikser_journal (auto-persist on yielded entities; survives crashes so --resume can pick up)
     ├── catalog.js            Persistent entity registry (mikser_entities sqlite table + 10k LRU on findById)
@@ -78,7 +78,7 @@ runtime
 ├── mutex              Semaphore for process() serialisation
 ├── abortController    Current run's AbortController
 │
-├── engine             Service objects (set by engine.js)
+├── engine             Service objects (set by engine/index.js)
 │   ├── logger              pino instance
 │   ├── commander           Commander instance
 │   ├── renderWorkers       Lazy Piscina pool (minThreads: 0, idleTimeout: 30_000)

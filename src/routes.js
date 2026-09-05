@@ -31,7 +31,7 @@
 // convention.
 
 import runtime from './runtime.js'
-import { useLogger } from './engine.js'
+import { useLogger } from './engine/index.js'
 
 // Inventory of mounted routes. Plain array, mirroring runtime.validators
 // — appended to at mount time (onLoaded-ish), read by consumers later.

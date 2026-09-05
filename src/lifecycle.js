@@ -1,6 +1,6 @@
 import runtime from './runtime.js'
 import { OPERATION } from './constants.js'
-import { useLogger } from './engine.js'
+import { useLogger } from './engine/index.js'
 import { addEntry, addEntries } from './journal.js'
 
 export async function createEntity(entity) {

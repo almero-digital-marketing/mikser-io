@@ -127,7 +127,25 @@ brevity.
   module-level. `REFS_SCHEMA` is exported so tests build against the
   real schema instead of a copy. Prepared statements through the
   shared sqlite handle.
-- `engine.js` — `setup()`, lifecycle wiring, render + postprocess
+- `engine/` — `setup()` was 1163 lines in one function, a sequence of hook
+  registrations that each closed over nothing but `runtime` and its own
+  locals. Split along those seams in 10.12.0, one file per phase, each
+  exporting a `register*` function that `index.js` calls in order:
+  `boot.js` (onInitialize/onInitialized/onLoad — the parse, the folders, the
+  stores), `dispatch.js` (where the report-and-exit commands fire, and why it
+  is two hooks), `render-cycle.js` (the render dispatcher, the largest single
+  thing at 432 lines), `postprocess-cycle.js`, `finalize.js`. Beside them:
+  `report-only.js` (`runReportOnly`, the one implementation a forwarded
+  request and a local run share), `checks.js` (the end-of-cycle output reads
+  — broken references, missing assets), `workers.js` (`workerSafeOptions` and
+  the Piscina log bridge). Three things are depth-sensitive and were each
+  wrong once during the move: `../../package.json`, the Piscina worker
+  entries (`new URL('../render.js', import.meta.url)` — they resolve against
+  the FILE, so a worker would have looked for `src/engine/render.js`), and
+  the dynamic `import('../explain.js')`. `registerBoot(options)` takes
+  `setup`'s own argument, the one closure that was not self-contained: a
+  programmatic caller passes resolved options and skips the CLI parse.
+- The engine, as a whole: `setup()`, lifecycle wiring, render + postprocess
   dispatchers, manifest tracking. Owns the Piscina worker pools
   (`renderWorkers`, `postprocessWorkers`); both are lazy
   (`minThreads: 0` + `idleTimeout: 30_000`) so INLINE-only workloads
@@ -342,9 +360,9 @@ brevity.
   a path from a naming convention instead of looking an entity up, so
   they cannot fail: a preset that never ran yields a well-formed link to
   nothing on a green build. Each records its destination via
-  `track.asset()`; `engine.js` checks the collected set against
+  `track.asset()`; `engine/checks.js` checks the collected set against
   `outputFolder` in `onFinalized` (`reportAssetUse` / `assetUse` in
-  report.js, `reportMissingAssets` in engine.js), warning under
+  report.js, `reportMissingAssets` in engine/checks.js), warning under
   `asset-missing` / `asset-missing-summary`. `existsSync` FOLLOWS
   symlinks, which is required — the assets folder is deployed into the
   output as a symlink. Handlebars appends an options object to every
@@ -474,7 +492,7 @@ brevity.
   wrote. Report-only commands (`--tool`, `--tools`, `--audit-output`,
   `--explain`) forward too — they read, so a local run damaged nothing,
   but a catalogue another process is mid-write in is not one anyone can
-  answer from. `runReportOnly()` in engine.js is the one implementation
+  answer from. `runReportOnly()` in engine/report-only.js is the one implementation
   both paths call. `--server` / `--watch` are NOT forwardable — they ask
   to BECOME the instance, and a running engine cannot open a port on
   someone's behalf — so they exit 1 with a message when one is already
