@@ -1,0 +1,361 @@
+// Building the logger: pino, the pretty terminal format, and the streams a
+// record fans out to.
+//
+// One pino instance, several destinations, because they are different facts:
+//   1. an inline pino-pretty stream writing to a Writable that coordinates
+//      with the progress bar (see progress.js)
+//   2. a warn-level stream that feeds the build report's `warnings` and
+//      `faults` views
+//   3. zero or more third-party transports, declared in config or registered
+//      by a plugin through addLogTransport()
+//
+// The LEVEL policy — what a person asked for, what is installed on a running
+// instance, what a request may change for its duration — is levels.js. This
+// module owns the mechanism it calls.
+
+import pino from 'pino'
+import pretty from 'pino-pretty'
+import { Writable } from 'node:stream'
+import runtime from '../runtime.js'
+import { onLoad } from '../lifecycle.js'
+import { captureWarning, captureFault } from '../report.js'
+import { pauseBar, resumeBar } from './progress.js'
+
+// want visibility above info noise but aren't warnings.
+const CUSTOM_LEVELS = { notice: 35 }
+
+// pino's numeric levels. The report keeps warn and error in separate buckets,
+// so the capture stream routes on these rather than taking everything the
+// stream hands it as one kind of thing.
+const WARN_LEVEL = 40
+const ERROR_LEVEL = 50
+
+// Plugin-side log transport registry — paired with `addLogTransport`
+// below. Two-state lifecycle:
+//
+//   - Before createMikserLogger() runs (the plugin factory phase, when
+//     mikser.config.js is being import()'d and the factories embedded
+//     in `plugins: []` are calling addLogTransport synchronously), the
+//     entries land in pendingTransports. createMikserLogger drains it
+//     alongside the declarative runtime.config.logging.transports when
+//     it builds the multistream.
+//
+//   - After createMikserLogger() has run, `currentStreams` and
+//     `currentLevel` are populated. Any later addLogTransport call
+//     (e.g. from a plugin's onLoaded hook, or a deferred integration)
+//     builds the new stream, pushes it onto currentStreams, and swaps
+//     runtime.engine.logger to a fresh pino instance backed by the
+//     updated multistream. useLogger() reads runtime.engine.logger
+//     fresh on each call, so the new transport starts receiving
+//     records immediately for every subsequent log call.
+//
+// The shape `{ level?, target, options? }` mirrors what
+// runtime.config.logging.transports already accepts.
+const pendingTransports = []
+let currentStreams = null
+let currentLevel   = 'info'
+
+// Per-level icons prepended via pino-pretty's messageFormat. Empty
+// strings for levels we don't want to decorate — debug/trace are noisy
+// enough already. messageFormat receives `log.level` as a number, so we
+// reverse-map via LEVEL_LABELS to get the icon — pino-pretty's third
+// argument to messageFormat looks like a level label but is actually a
+// sentinel string for the string-template form, not the real label.
+const ICONS = {
+    fatal:  '💥 ',
+    error:  '🔴 ',
+    warn:   '🟡 ',
+    notice: '🟢 ',
+    info:   '',
+    debug:  '',
+    trace:  '',
+}
+const LEVEL_LABELS = {
+    60: 'fatal',
+    50: 'error',
+    40: 'warn',
+    35: 'notice',
+    30: 'info',
+    20: 'debug',
+    10: 'trace',
+}
+
+// Writable that pino-pretty writes formatted lines into. Coordinates
+// with the progress bar through pauseBar/resumeBar: clears it, prints the log
+// line, restores it. When no bar is active — boot, a pipe, a level that
+// suppresses it — those are no-ops and this is a thin pass-through.
+function createTerminalStream() {
+    return new Writable({
+        write(chunk, enc, cb) {
+            pauseBar()
+            // --json puts a machine-readable document on stdout, so every
+            // log line has to go somewhere else or the document cannot be
+            // parsed. stderr rather than silence: the operator still sees
+            // the build, and `mikser --explain x --json | jq` still works —
+            // which is the entire point of the flag.
+            // --tool is the same contract: stdout carries the tool's result and
+            // nothing else, because an agent reading CLI output pipes it.
+            const out = (runtime.options?.json || runtime.options?.tool || runtime.options?.tools)
+                ? process.stderr : process.stdout
+            out.write(chunk, enc)
+            resumeBar()
+            cb()
+        },
+    })
+}
+
+// Build the mikser logger. Called by engine.setup() at the start of
+// the boot, and called again at onLoad (this module's onLoad hook,
+// which fires after config.js's) so transports declared in
+// runtime.config.logging.transports are picked up.
+//
+// `level` is pino's log level — set to whatever runtime.options.{debug,
+// trace} resolves to, defaulting to 'info'.
+export function createMikserLogger(level = 'info') {
+    const terminalStream = createTerminalStream()
+
+    // A terminal is watched as it happens. A file is read afterwards.
+    //
+    // The minimal format below is right for the first and wrong for the
+    // second, and until now it was used for both — so a supervisor's log was
+    // a wall of undated lines wearing ANSI escapes. Reconstructing an
+    // incident from one meant ordering events by file mtimes and git commit
+    // dates because the build's own log could not say when anything happened,
+    // and every excerpt had to be piped through sed to be readable.
+    //
+    // Decided from the stream these lines actually land on, which is stderr
+    // under --json / --tool (stdout carries the document there). The logger is
+    // rebuilt at onLoad, by which point those options are parsed, so the
+    // second construction gets it right even if the first cannot.
+    //
+    // Same signal the progress bar already uses — a gauge is pointless in a
+    // file for the same reason a timestamp is pointless on a terminal.
+    const target = (runtime.options?.json || runtime.options?.tool || runtime.options?.tools)
+        ? process.stderr : process.stdout
+    const attended = Boolean(target.isTTY)
+
+    const prettyStream = pretty({
+        destination:   terminalStream,
+        // NO_COLOR is honoured on a terminal too; nobody wants escapes in a
+        // file regardless.
+        colorize:      attended && !process.env.NO_COLOR,
+        // `SYS:standard` carries the date, milliseconds AND the UTC offset.
+        // The offset is not decoration: the incident that prompted this
+        // needed a container's clock lined up against commit dates in
+        // another zone, and a bare wall-clock time cannot answer that.
+        ...(attended ? {} : { translateTime: 'SYS:standard' }),
+        // apt-like minimal format: hide pid / hostname, and suppress the
+        // level prefix entirely via a customPrettifier that returns an empty
+        // string. The icon prepended by messageFormat (🟡 / 🔴 / 🟢 / …) is
+        // what signals level. The raw pino record still carries `level`, so
+        // third-party transports get full structured data. `time` is dropped
+        // only when someone is watching.
+        ignore:        attended ? 'pid,hostname,time' : 'pid,hostname',
+        // The terminal gets the SENTENCE; the structured fields go to the
+        // report and to transports.
+        //
+        // Warnings carry `{ code, ...fields }` so the build report has
+        // something assertable, and pino-pretty would otherwise print that
+        // object under every one of them — turning a one-line warning into a
+        // six-line block. The fields are still on the raw record, which is
+        // what the report stream and every transport read, so nothing is lost
+        // by not showing them twice.
+        hideObject:    true,
+        customLevels:  'notice:35',
+        customPrettifiers: {
+            level: () => '',
+        },
+        // The CODE, on the line a person is reading.
+        //
+        // A finding had two names: the report called it `output-drift` and the
+        // console said "produced different bytes from the same inputs", and
+        // nothing on the console contained the string someone reading
+        // docs/diagnostics.md would grep for. So a script watching the build
+        // matched prose — the half that is free to be reworded — while the
+        // stable identifier existed only in a document that script was not
+        // reading.
+        //
+        // Printed here because this is the one function every line passes
+        // through, so the code cannot be attached to the record and missing
+        // from the terminal: they come from the same field. `hideObject` still
+        // suppresses the rest of the structured fields, which belong in the
+        // report and would turn a one-line warning into a block.
+        //
+        // Only where there is a code. An ordinary info line has no identity to
+        // print and gains nothing from a bracket.
+        messageFormat: (log, key) => {
+            const icon = ICONS[LEVEL_LABELS[log.level]] ?? ''
+            const code = typeof log.code === 'string' && log.code ? `[${log.code}] ` : ''
+            return icon + code + (log[key] ?? '')
+        },
+    })
+
+    const streams = [{ level, stream: prettyStream }]
+
+    // The build report's `warnings` and `faults` are views of this stream
+    // rather than channels of their own. Anything that calls logger.warn is a
+    // warning and anything that calls logger.error with a `code` is a fault,
+    // wherever it was raised — including inside a render worker, whose logger
+    // already comes back over the IPC port and is re-emitted here, so no
+    // separate transport is needed to carry either out of a thread.
+    //
+    // One stream, two destinations, because the two are different facts and
+    // the report keeps them apart. A warning says something shipped and is
+    // wrong; a coded error says a subsystem cannot work at all. `errors` in
+    // the report is neither — it means a render THREW and wrote nothing, and
+    // stays exactly what it was.
+    //
+    // Uncoded error records are not captured. Those are events about one
+    // thing (`Render error: doc-1`), which already travels in `errors` with
+    // the entity attached, and a fault needs an identity to be one condition
+    // rather than forty. Note that `logger.error(err, msg)` puts an errno
+    // under `err` rather than at the top level, so a raw throw logged that way
+    // does not accidentally become a fault.
+    streams.push({
+        level: 'warn',
+        stream: new Writable({
+            write(chunk, _encoding, callback) {
+                for (const line of String(chunk).split('\n')) {
+                    if (!line) continue
+                    try {
+                        const record = JSON.parse(line)
+                        if (record.level === WARN_LEVEL) captureWarning(record)
+                        else if (record.level >= ERROR_LEVEL && record.code) captureFault(record)
+                    } catch { /* not a record we can read; the terminal still got it */ }
+                }
+                callback()
+            },
+        }),
+    })
+
+    // Two sources of transports merged into one list:
+    //
+    //   - runtime.config.logging.transports (declarative — user-config-
+    //     driven). The historical surface; still works unchanged.
+    //   - pendingTransports (plugin-side, drained here). Plugin factories
+    //     that called addLogTransport at config-load time land here.
+    //
+    // Each entry is `{ level?, target, options? }` — same shape
+    // pino.transport() accepts. Transport workers that fail to load
+    // (missing dep, bad config) surface to stderr but don't crash the
+    // engine — the terminal stream stays alive.
+    const declared = runtime.config?.logging?.transports ?? []
+    for (const t of [...declared, ...pendingTransports]) {
+        const s = buildTransportStream(t, level)
+        if (s) streams.push(s)
+    }
+    pendingTransports.length = 0
+
+    currentStreams = streams
+    currentLevel   = level
+
+    return pino(
+        {
+            level: 'trace',          // accept everything; per-stream level filters from there
+            customLevels: CUSTOM_LEVELS,
+        },
+        pino.multistream(streams)
+    )
+}
+
+// Construct a multistream entry for a transport descriptor. Returns
+// null when the underlying pino.transport() call throws (missing
+// dependency, bad options) — caller treats null as "skip".
+function buildTransportStream(entry, defaultLevel) {
+    try {
+        return {
+            level:  entry.level ?? defaultLevel,
+            stream: pino.transport({ target: entry.target, options: entry.options }),
+        }
+    } catch (err) {
+        process.stderr.write(
+            `Logger: failed to load transport "${entry.target}": ${err.message}\n`
+        )
+        return null
+    }
+}
+
+// Add a log transport from anywhere in mikser-io's lifecycle —
+// typically from a plugin's factory (the canonical Better Stack /
+// Datadog / Loki / Axiom / Sentry shape) or from a plugin's onLoaded
+// hook for deferred / runtime-resolved integrations.
+//
+// Behavior depends on when this is called:
+//
+//   - Before createMikserLogger() has run (factory phase during
+//     config.js's onLoad — plugin factories called inside the user's
+//     mikser.config.js evaluate here): the entry queues. The next
+//     createMikserLogger() call drains the queue.
+//
+//   - After createMikserLogger() has run (plugin onLoaded, any later
+//     hook, runtime injection): the new pino.transport stream is
+//     built and pushed onto the live multistream, then runtime.engine
+//     .logger is swapped to a fresh pino backed by the updated list.
+//     useLogger() reads runtime.engine.logger on each call, so all
+//     subsequent log emissions reach the new transport.
+//
+// Returns true when the transport was queued or successfully added,
+// false when transport stream construction failed (the load error
+// already went to stderr via buildTransportStream).
+export function addLogTransport(entry) {
+    if (currentStreams === null) {
+        pendingTransports.push(entry)
+        return true
+    }
+    const s = buildTransportStream(entry, currentLevel)
+    if (!s) return false
+    currentStreams.push(s)
+    if (runtime.engine) {
+        runtime.engine.logger = pino(
+            { level: 'trace', customLevels: CUSTOM_LEVELS },
+            pino.multistream(currentStreams),
+        )
+    }
+    return true
+}
+
+
+// The level MECHANISM: swap the terminal stream's level and rebuild the pino
+// instance around it. levels.js owns when this happens and to what; this owns
+// how, because `currentStreams` and the pino construction live here.
+//
+// MUTATING runtime.engine.logger is what makes it take effect: useLogger()
+// reads `runtime.engine?.logger` fresh on every call.
+export function applyStreamLevel(level) {
+    if (currentStreams === null || !runtime.engine) return false
+    currentStreams[0] = { ...currentStreams[0], level }
+    currentLevel = level
+    runtime.engine.logger = pino(
+        { level: 'trace', customLevels: CUSTOM_LEVELS },
+        pino.multistream(currentStreams),
+    )
+    return true
+}
+
+// The level the streams are actually running at, which is not necessarily the
+// one configured — see levels.js.
+export function streamLevel() {
+    return currentLevel
+}
+
+// Replace the bootstrap logger (built by engine.setup() with the
+// terminal-only stream) with one that includes any third-party
+// transports from runtime.config.logging.transports. Runs at onLoad
+// AFTER config.js's onLoad — module-load order in mikser-io/index.js
+// imports config.js before this file, so this hook registers later and
+// fires later.
+//
+// MUTATING runtime.engine.logger means useLogger() — which reads
+// `runtime.engine?.logger` fresh on each call — sees the new instance
+// from this point on. Captured-in-closure copies (`const logger =
+// useLogger()`) from earlier setup callbacks keep the old one, but by
+// this phase those callbacks have all run; the captured copies belong
+// to closures that have already executed.
+onLoad(() => {
+    if (!runtime.engine?.logger) return
+    const haveDeclared = (runtime.config?.logging?.transports?.length ?? 0) > 0
+    const havePending  = pendingTransports.length > 0
+    if (!haveDeclared && !havePending) return
+    const level = runtime.engine.logger.level
+    runtime.engine.logger = createMikserLogger(level)
+})

@@ -216,9 +216,18 @@ brevity.
   never cleared per cycle, and surfaced in `mikser_ping`. The log call is
   the only registration for either; there is no `reportWarning()` or
   `registerFault()` and there must not be.
-- `logger.js` — pino + pino-pretty (inline) + gauge progress + custom
-  Writable for progress coordination + `pino.multistream` for
-  third-party shipping. Two registration surfaces for transports:
+- `logger/` — three jobs that shared a name until 10.12.0, split so each is
+  findable: `streams.js` builds the logger and decides where a record goes
+  (pino + pino-pretty inline + the warn stream feeding the report's
+  warnings/faults + third-party transports); `levels.js` owns which level is
+  in force — configured, installed on a running instance, or set for one
+  request — and calls streams' `applyStreamLevel` for the mechanism;
+  `progress.js` owns the gauge and the coded records that stand in for it.
+  Dependencies run one way, levels → streams → progress: progress owns the
+  gauge and exports `pauseBar`/`resumeBar`, so the log stream asks it to step
+  aside rather than reaching for it. `index.js` is the barrel — importers use
+  `./logger/index.js` and the split is invisible to them.
+  Two registration surfaces for transports, both in `streams.js`:
   - `runtime.config.logging.transports` — declarative; user config.
   - `addLogTransport({ target, options?, level? })` — public export;
     plugins call this from their factory (queues until logger build)

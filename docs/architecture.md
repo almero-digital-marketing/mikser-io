@@ -24,7 +24,7 @@ mikser-io/
     ├── config.js             Config file loading
     ├── plugins.js            Plugin resolution and loading
     ├── manager.js            File watching and cron scheduling
-    ├── logger.js             Progress bars and log formatting (wraps pino so progress lines don't get mangled); pino.multistream for third-party shipping
+    ├── logger/               streams.js (pino + pretty + multistream), levels.js (which level is in force), progress.js (the gauge and the records that replace it); index.js is the barrel
     ├── render.js             Render worker function (runs in main or Piscina threads); ensureWorkerDb gives each worker a read-only sqlite handle
     ├── postprocess.js        Postprocess worker function (runs in main or Piscina threads)
     ├── track.js              Render-time dependency tracking (catalog queries auto-report via queryContext)
@@ -346,7 +346,7 @@ export * from './src/plugins.js'
 export * from './src/manager.js'        // watch(), schedule(), createdHook/updatedHook/deletedHook/triggeredHook
 
 // Logger / progress
-export * from './src/logger.js'         // useLogger, trackProgress, stopProgress, updateProgress, etc.
+export * from './src/logger/index.js'   // trackProgress, stopProgress, updateProgress, setLogLevel, etc.
 
 // setup() and render dispatcher entry
 export * from './src/engine.js'         // setup()

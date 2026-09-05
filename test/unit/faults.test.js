@@ -12,7 +12,7 @@ import assert from 'node:assert/strict'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 
-import { createMikserLogger } from '../../src/logger.js'
+import { createMikserLogger } from '../../src/logger/index.js'
 import { recordChangeSetWrite, forgetAllChangeSets, pendingChangeSets } from '../../src/changeset.js'
 import { faults, resetFaults, buildReport, requestReport, resetReport } from '../../src/report.js'
 import runtime from '../../src/runtime.js'

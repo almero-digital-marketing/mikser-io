@@ -10,7 +10,7 @@
 // reworded — which is exactly the kind of assertion that should not break
 // when someone improves the wording.
 import runtime from './runtime.js'
-import { installedLogLevel } from './logger.js'
+import { installedLogLevel } from './logger/index.js'
 import { isReportOnlyRun } from './tools.js'
 
 // A transport that can serve the build report declares itself here, at

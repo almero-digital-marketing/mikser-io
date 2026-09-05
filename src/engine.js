@@ -27,7 +27,7 @@ import { attachServerCliOptions, setupServer } from './server.js'
 import {
     createMikserLogger, rememberBaseLevel, applyLogRequest,
     LOG_LEVELS, INSTALLED_LOG_TTL_MS,
-} from './logger.js'
+} from './logger/index.js'
 import { inputHashOf } from './utils.js'
 import { createTrack, mergeTrack } from './track.js'
 import { queryContext } from './database/query-context.js'

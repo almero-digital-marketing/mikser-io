@@ -17,7 +17,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { addLogTransport, createMikserLogger } from '../../src/logger.js'
+import { addLogTransport, createMikserLogger } from '../../src/logger/index.js'
 import runtime from '../../src/runtime.js'
 
 describe('addLogTransport', () => {

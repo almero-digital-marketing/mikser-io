@@ -39,7 +39,7 @@ import { renderErrorCount } from './report.js'
 import { runReportOnly } from './engine.js'
 import {
     setLogLevel, restingLogLevel, applyLogRequest, LOG_LEVELS,
-} from './logger.js'
+} from './logger/index.js'
 import { emitReport } from './report.js'
 import { pluginOptionsFrom } from './cli.js'
 

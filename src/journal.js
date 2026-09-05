@@ -29,7 +29,7 @@ import {
     onCancelled,
     onFinalized,
 } from './lifecycle.js'
-import { stopProgress, trackProgress, updateProgress } from './logger.js'
+import { stopProgress, trackProgress, updateProgress } from './logger/index.js'
 import { useLogger } from './engine.js'
 import { AbortError } from './utils.js'
 import { registerSchema, useDatabase } from './database/index.js'

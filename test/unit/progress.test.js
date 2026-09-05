@@ -34,7 +34,7 @@ import assert from 'node:assert/strict'
 import runtime from '../../src/runtime.js'
 import {
     trackProgress, updateProgress, stopProgress, formatDuration, PROGRESS_INTERVAL_MS,
-} from '../../src/logger.js'
+} from '../../src/logger/index.js'
 
 let records
 const priorEngine = runtime.engine
