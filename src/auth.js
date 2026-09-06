@@ -286,6 +286,28 @@ export function anyOf(...verifiers) {
 // four — the same partial answer, one layer down.
 export const CAPABILITY_WILDCARD = '*'
 
+// Which of these capabilities the principal does NOT hold — the first one, or
+// null when it holds them all.
+//
+// The plural is the point. Almost every gate in the tree needs a SET, not one:
+// writing to a drive endpoint needs `drive:<name>` to reach it and
+// `drive:<name>:write` to change it, and "may ALSO write" means the base is a
+// prerequisite rather than an alternative. Each surface worked that out for
+// itself and they disagreed — the WebDAV mount required both, the tool over
+// the same endpoint required only the second, so one grant was refused a PUT
+// and allowed the identical write through the other door.
+//
+// Returning the MISSING capability rather than a boolean is what lets a
+// refusal name the one that is actually absent, which is the difference
+// between "you lack drive:documents" and "you lack drive:documents:write" when
+// the operator granted exactly one of them.
+export function missingCapability(principal, capabilities = []) {
+    for (const capability of [].concat(capabilities)) {
+        if (!hasCapability(principal, capability)) return capability
+    }
+    return null
+}
+
 export function hasCapability(principal, capability) {
     if (!capability) return true
     const caps = principal?.capabilities

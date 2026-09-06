@@ -586,6 +586,20 @@ brevity.
   probe. Field paths are free; line/col is computed on demand and cached
   in `mikser_provenance` against the entity's checksum, so a build pays
   nothing.
+- **`hasCapability` / `missingCapability` are the only implementations of
+  "may this principal".** No surface re-derives either. `missingCapability`
+  takes a SET and returns the first one NOT held, because almost every gate
+  needs a set: writing to a drive endpoint needs `drive:<name>` to reach it
+  and `drive:<name>:write` to change it, and "may ALSO write" makes the base a
+  prerequisite rather than an alternative. Returning the missing capability
+  rather than a boolean is what lets a refusal name the one actually absent.
+  Both bugs this replaced were the same shape — a plugin deciding for itself:
+  drive's tools held a private `capabilities.includes(...)`, so the `*`
+  wildcard reached the WebDAV mount and stopped at the tools over the same
+  endpoint; and those tools checked only the `:write` half, so a grant with
+  `:write` and no base was refused a PUT and allowed the identical write
+  through the other door. Read and write are DIFFERENT call paths in drive
+  (`holds` versus `missingCapability`), so a test covering one covers neither.
 - `routes.js` — HTTP route registry. Plugins mount on
   `runtime.options.app` directly; the Express router stack has the
   paths but not the intent (loopback-only? streaming?). So plugins
