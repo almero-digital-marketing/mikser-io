@@ -27,7 +27,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import YAML from 'yaml'
 
-import { writeEntity, registerSourceFormat, sourceFormatFor } from '../../src/utils/index.js'
+import { writeEntity, registerSourceFormat, sourceFormatFor, validateSource } from '../../src/utils/index.js'
 
 let dir
 beforeEach(async () => { dir = await mkdtemp(path.join(tmpdir(), 'mikser-write-')) })
@@ -145,5 +145,31 @@ describe('the registry', () => {
         // A caller holding only a uri is one this still has to answer for.
         assert.equal(sourceFormatFor({ uri: '/x/y.yaml' }).name, 'yaml')
         assert.equal(sourceFormatFor({ uri: '/x/y.json' }).name, 'json')
+    })
+})
+
+// Whether a proposed source still parses, asked before it lands.
+//
+// This is the guarantee a whole-file write cannot offer: a model that emits
+// invalid YAML for a 900-line file is found out at the next build, by which
+// time the file is already on disk. An edit that can be checked first can be
+// refused instead.
+describe('validateSource', () => {
+    it('passes what parses and names what does not', () => {
+        assert.equal(validateSource({ format: 'yml' }, 'a: 1\n'), null)
+        assert.match(validateSource({ format: 'yml' }, 'a: [1\n b: 2\n') ?? '', /\S/)
+        assert.equal(validateSource({ format: 'json' }, '{"a":1}'), null)
+        assert.match(validateSource({ format: 'json' }, '{"a":') ?? '', /\S/)
+    })
+
+    it('says nothing about a format it has no parser for', () => {
+        // The answer to "is this valid" for a stylesheet is not this module's
+        // to give, and inventing one would refuse edits it cannot judge.
+        assert.equal(validateSource({ format: 'css' }, 'body{'), null)
+        assert.equal(validateSource({ format: 'liquid' }, '{% if %}'), null)
+    })
+
+    it('checks the front-matter block and ignores the body', () => {
+        assert.equal(validateSource({ format: 'md' }, '---\ntitle: x\n---\n# anything { at all\n'), null)
     })
 })

@@ -54,21 +54,33 @@ import { lstat, mkdir, open, readFile, stat, unlink, writeFile } from 'node:fs/p
 //
 //   test(entity, raw)      does this handler own this source?
 //   write({ raw, patch })  the complete new file contents
+//   validate(text)         null if it parses, else why not — so an edit can
+//                          be refused before it lands rather than found at
+//                          the next build
 //
 // `patch` rather than a merged meta, deliberately: a handler that can edit its
 // source in place should be allowed to. The yaml one does, so comments and
 // untouched values survive an edit that names one key.
 const sourceFormats = []
 
-export function registerSourceFormat(name, { test, write }) {
+export function registerSourceFormat(name, { test, write, validate = null }) {
     if (!name || typeof test !== 'function' || typeof write !== 'function') {
         throw new Error('registerSourceFormat(name, { test, write }) requires all three')
     }
-    sourceFormats.unshift({ name, test, write })
+    sourceFormats.unshift({ name, test, write, validate })
     return () => {
         const at = sourceFormats.findIndex(h => h.name === name)
         if (at >= 0) sourceFormats.splice(at, 1)
     }
+}
+
+// Does this text still parse as what the file is? `null` when it does, and
+// when the format has no parser to ask — the answer to "is this valid" for a
+// stylesheet is not this module's to give.
+export function validateSource(entity, text) {
+    const handler = sourceFormatFor(entity, text)
+    if (typeof handler?.validate !== 'function') return null
+    try { return handler.validate(text) } catch (err) { return err.message }
 }
 
 export function sourceFormatFor(entity, raw = '') {
@@ -101,6 +113,12 @@ function applyPatch(target, patch) {
 // first, so it is checked last: this is the catch-all.
 registerSourceFormat('front-matter', {
     test: () => true,
+    // Only the block is parseable; the body is whatever the renderer makes of
+    // it. A file with no front matter has nothing here to be wrong.
+    validate(text) {
+        if (!fm.test(text)) return null
+        try { fm(text); return null } catch (err) { return err.message }
+    },
     write({ raw, patch }) {
         const parsed = fm.test(raw) ? fm(raw) : null
         const body = parsed ? (parsed.body ?? '') : raw
@@ -119,6 +137,10 @@ registerSourceFormat('front-matter', {
 // re-flows block scalars to its own width, so hand-wrapped prose moves. That
 // is a formatting change, where re-serializing would have been a content one.
 registerSourceFormat('yaml', {
+    validate(text) {
+        const errors = yaml.parseAllDocuments(text).flatMap(document => document.errors)
+        return errors.length ? errors[0].message : null
+    },
     // On the format alone. `fm.test` is not a safe second opinion here: a
     // multi-document YAML file has a `---` between its documents and reads as
     // front matter to it, so consulting it sent exactly the files with the
@@ -143,6 +165,10 @@ registerSourceFormat('yaml', {
 // round-trip — but the indent is read off the file rather than imposed, so a
 // one-key patch does not reformat every line of a 4-space document.
 registerSourceFormat('json', {
+    validate(text) {
+        if (!text.trim()) return null
+        try { JSON.parse(text); return null } catch (err) { return err.message }
+    },
     test: (entity) => formatOf(entity) === 'json',
     write({ raw, patch }) {
         const current = raw.trim() ? JSON.parse(raw) : {}

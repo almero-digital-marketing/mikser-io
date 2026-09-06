@@ -15,5 +15,5 @@ export { checksum, checksumOf, diffInputParts, inputHashOf, inputPartsOf, normal
 export { JUNK_IGNORE, isJunkPath, junkFilter, junkIgnore, registerJunk } from './junk.js'
 export { matchesLibrary } from './library.js'
 export { isLoopback, loopbackOnly } from './net.js'
-export { siteRelativeUrl, siteRootFor, writeEntity, writeOutput, registerSourceFormat, sourceFormatFor } from './output.js'
+export { siteRelativeUrl, siteRootFor, writeEntity, writeOutput, registerSourceFormat, sourceFormatFor, validateSource } from './output.js'
 export { extractRefs, isRefKey, lookupKeys, matchesRef, refFilter } from './refs.js'
