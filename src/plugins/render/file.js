@@ -164,5 +164,5 @@ export function load({ runtime, options, track, logger }) {
 }
 
 export function fileHelpers(options = {}) {
-    return { name: options.name ?? 'file', options, load }
+    return { name: options.name ?? 'file', options, load, module: import.meta.url }
 }

@@ -30,39 +30,29 @@ function repositoryUrl(repository) {
         .replace(/\.git$/, '')
 }
 
-// Which plugins are actually RUNNING, as opposed to merely installed.
+// Every mikser package INSTALLED beside this one, described.
 //
-// The distinction is the useful half: a package in node_modules that no config
-// loads explains nothing about the site's behaviour, and an agent told
-// otherwise will look for a feature that is not switched on.
-function activeNames() {
-    const active = new Set()
-    const named = (short) => (short.startsWith('mikser-io') ? short : `mikser-io-${short}`)
-
-    // Every plugin that mounts a route already names itself there — the
-    // strongest signal available, and one that stays correct as plugins are
-    // added, because registerRoute requires it.
-    for (const route of runtime.routes ?? []) {
-        if (route?.plugin) active.add(named(route.plugin))
-    }
-    // Renderers and postprocessors are registered by name rather than by
-    // package, and the package name is that name in a fixed shape.
-    for (const name of runtime.renderers?.keys() ?? []) active.add(`mikser-io-render-${name}`)
-    for (const name of runtime.postprocessors?.keys() ?? []) active.add(`mikser-io-post-${name}`)
-    // A lifecycle plugin that mounts nothing is recognised by the surface it
-    // publishes on the runtime.
-    if (runtime.options?.layouts) active.add('mikser-io-layouts')
-    if (runtime.options?.preview) active.add('mikser-io-preview')
-    // The engine itself is always running; saying otherwise would be odd.
-    active.add('mikser-io')
-    return active
-}
-
-// Every mikser package installed beside this one, described.
+// Installed, and nothing more. This list used to carry an `active` flag,
+// derived by probing whatever surfaces a plugin happened to expose — a route
+// here, a CLI flag there. Two things were wrong with it and only the second
+// was dangerous.
 //
-// `active` is reported only where it can be established: a lifecycle plugin
-// that publishes nothing on the runtime cannot be detected, and saying `false`
-// for it would be a claim rather than an absence of one.
+// The probe went stale silently: it tested `runtime.options.layouts`, which
+// stopped being layouts' API object two majors ago and is now the `--layouts`
+// folder flag, so layouts read as inactive on every site that did not pass a
+// flag it has no reason to pass. It also tested `runtime.options.preview` for
+// a package, `mikser-io-preview`, that does not exist.
+//
+// And the flag was three-valued in code and two-valued in its contract:
+// present meant running, absent meant EITHER not running or not detectable,
+// and an agent told to read it "to know what the system can do" could only
+// read absence as off. On a real site that said no schema validation and no
+// git sync while both were running — and git sync is the only route by which
+// an agent's own edit reaches the repository.
+//
+// What is running is now answered by the runtime recording what it loads, in
+// plugins.js. This answers a different and still useful question: what is on
+// disk, what version, and where to read about it.
 export function inventory({ workingFolder = runtime.options?.workingFolder } = {}) {
     const root = path.join(workingFolder ?? '.', 'node_modules')
     let names = []
@@ -72,7 +62,6 @@ export function inventory({ workingFolder = runtime.options?.workingFolder } = {
         return []
     }
 
-    const active = activeNames()
     const plugins = []
     for (const name of names.sort()) {
         try {
@@ -82,7 +71,6 @@ export function inventory({ workingFolder = runtime.options?.workingFolder } = {
                 name,
                 version: manifest.version ?? null,
                 ...(manifest.description ? { summary: manifest.description } : {}),
-                ...(active.has(name) ? { active: true } : {}),
                 ...(manifest.homepage ? { homepage: manifest.homepage } : {}),
                 ...(repository ? { repository } : {}),
                 npm: `https://www.npmjs.com/package/${name}`,
@@ -90,4 +78,26 @@ export function inventory({ workingFolder = runtime.options?.workingFolder } = {
         } catch { /* unreadable manifest — say nothing rather than something wrong */ }
     }
     return plugins
+}
+
+// What this runtime LOADED — the answer to "what is running".
+//
+// Read from the record plugins.js keeps as it loads, not derived from
+// surfaces afterwards. Every loaded plugin appears, including one that named
+// nothing: `package: null` means "running, and did not say what it is", which
+// is a different statement from not running and must never be collapsed into
+// one. Nothing here is ever absent because it could not be detected — a plugin
+// that is loaded is in this list.
+export function loadedPlugins({ workingFolder = runtime.options?.workingFolder } = {}) {
+    const root = path.join(workingFolder ?? '.', 'node_modules')
+    const versionOf = (name) => {
+        if (!name) return null
+        try {
+            return JSON.parse(readFileSync(path.join(root, name, 'package.json'), 'utf8')).version ?? null
+        } catch { return null }
+    }
+    return (runtime.plugins ?? []).map(entry => ({
+        ...entry,
+        ...(entry.package ? { version: versionOf(entry.package) } : {}),
+    }))
 }

@@ -212,6 +212,7 @@ export function observer(options = {}) {
 
         return {
             format,
+            module: import.meta.url,
         }
     }
 }

@@ -41,5 +41,5 @@ export function load({ entity, runtime, options }) {
 }
 
 export function hrefUrlHelpers(options = {}) {
-    return { name: options.name ?? 'href', options, load }
+    return { name: options.name ?? 'href', options, load, module: import.meta.url }
 }

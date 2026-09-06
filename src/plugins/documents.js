@@ -29,6 +29,6 @@ export function documents(options = {}) {
             phase: 'import',
         })
 
-        return { collection, type }
+        return { collection, type, module: import.meta.url }
     }
 }

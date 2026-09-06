@@ -20,5 +20,10 @@ export function frontMatter(options = {}) {
                 }
             }
         })
+
+        // Names this package to the runtime's loaded-plugin record — see
+        // plugins.js. A plugin that declares nothing still reports as loaded,
+        // but as `package: null`.
+        return { module: import.meta.url }
     }
 }

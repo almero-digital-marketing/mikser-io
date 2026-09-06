@@ -245,6 +245,7 @@ export function resources(options = {}) {
         return {
             collection,
             type,
+            module: import.meta.url,
         }
     }
 }

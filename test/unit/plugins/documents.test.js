@@ -17,7 +17,10 @@ describe('documents plugin', () => {
     it('exposes the documents collection identifier', () => {
         const h = createHarness()
         const result = documents()(h.core)
-        assert.deepEqual(result, { collection: 'documents', type: 'document' })
+        assert.equal(result.collection, 'documents')
+        assert.equal(result.type, 'document')
+        // How the runtime knows this plugin loaded, and from where.
+        assert.match(result.module, /plugins\/documents\.js$/)
     })
 
     it('registers onLoaded, onImport, and a documents onSync handler', () => {

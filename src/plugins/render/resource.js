@@ -24,5 +24,5 @@ export function load({ runtime, entity, state, options, track }) {
 }
 
 export function resourceUrlHelper(options = {}) {
-    return { name: options.name ?? 'resource', options, load }
+    return { name: options.name ?? 'resource', options, load, module: import.meta.url }
 }

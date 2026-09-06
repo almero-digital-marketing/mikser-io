@@ -304,6 +304,6 @@ export function commands(options = {}) {
             reportUnfired()
         })
 
-        return { executeCommand }
+        return { executeCommand, module: import.meta.url }
     }
 }

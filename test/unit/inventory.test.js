@@ -72,15 +72,28 @@ describe('the plugin inventory', () => {
         assert.equal(liquid.version, '5.0.0')
     })
 
-    it('marks the plugins that are actually running', () => {
-        // Installed and active are different facts. An agent told a plugin is
-        // present will look for a feature that is not switched on.
+    it('says nothing about what is running', () => {
+        // It used to. `active: true` was derived by probing surfaces, and the
+        // probe went stale silently: it tested `runtime.options.layouts`,
+        // which stopped being layouts' API object two majors ago and is now
+        // the `--layouts` folder flag, so layouts read as inactive on every
+        // site that did not pass it. Another tested `mikser-io-preview`, a
+        // package that does not exist.
+        //
+        // Worse, absence meant EITHER not running or not detectable, and the
+        // ping description told an agent to read the list to learn what the
+        // system can do. It reported git sync and schema validation as off
+        // while both were running.
+        //
+        // What is running is answered by the runtime's own record of what it
+        // loaded — see loadedPlugins() and the loaded-plugins scenario. This
+        // list answers what is INSTALLED, and must claim nothing further.
         runtime.routes = [{ plugin: 'drive', path: '/drive' }]
         runtime.renderers = new Map([['liquid', {}]])
-        const active = inventory().filter(p => p.active).map(p => p.name)
-        assert.deepEqual(active.sort(), ['mikser-io', 'mikser-io-drive', 'mikser-io-render-liquid'])
-        assert.equal(inventory().find(p => p.name === 'mikser-io-git').active, undefined,
-            'installed but not loaded — and absent rather than false, which would be a claim')
+        for (const plugin of inventory()) {
+            assert.ok(!('active' in plugin),
+                `${plugin.name} must not claim to be running or not running`)
+        }
     })
 
     it('says nothing when there is nothing to read', () => {

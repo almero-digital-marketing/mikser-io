@@ -273,6 +273,7 @@ export function files(options = {}) {
         return {
             collection,
             type,
+            module: import.meta.url,
         }
     }
 }

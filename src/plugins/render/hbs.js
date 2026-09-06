@@ -327,5 +327,6 @@ export function renderHbs(options = {}) {
         load,
         render,
         parseReferences,
+        module: import.meta.url,
     }
 }

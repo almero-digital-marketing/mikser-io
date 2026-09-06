@@ -17,7 +17,10 @@ describe('files plugin', () => {
     it('returns its collection identifier', () => {
         const h = createHarness()
         const result = files()(h.core)
-        assert.deepEqual(result, { collection: 'files', type: 'file' })
+        assert.equal(result.collection, 'files')
+        assert.equal(result.type, 'file')
+        // How the runtime knows this plugin loaded, and from where.
+        assert.match(result.module, /plugins\/files\.js$/)
     })
 
     it('registers onLoaded, onImport, and a files onSync handler', () => {

@@ -1,6 +1,9 @@
 import { useLogger } from './engine/index.js'
 import { onLoad } from './lifecycle.js'
 import { resetServices } from './services.js'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { existsSync, readFileSync } from 'node:fs'
 import runtime from './runtime.js'
 
 import * as core from '../index.js'
@@ -40,6 +43,9 @@ onLoad(() => {
     // always sees a Map, never undefined.
     runtime.renderers      = runtime.renderers      ?? new Map()
     runtime.postprocessors = runtime.postprocessors ?? new Map()
+    // Rebuilt, not appended to: loadPlugins runs again on a config change, and
+    // a list that accumulated would report every plugin twice.
+    runtime.plugins = []
 
     const factoryEntries = []
     let registeredRenderers = 0
@@ -62,6 +68,8 @@ onLoad(() => {
                     continue
                 }
                 runtime.renderers.set(name, entry)
+                recordPlugin({ kind: 'renderer', name,
+                               package: packageOfModule(entry.module), module: entry.module ?? null })
                 registeredRenderers++
                 continue
             }
@@ -72,6 +80,8 @@ onLoad(() => {
                     continue
                 }
                 runtime.postprocessors.set(name, entry)
+                recordPlugin({ kind: 'postprocessor', name,
+                               package: packageOfModule(entry.module), module: entry.module ?? null })
                 registeredPostprocessors++
                 continue
             }
@@ -140,16 +150,82 @@ onLoad(() => {
             logger.error('Plugin factory threw on registration: %s', err.message)
             continue
         }
-        const label = descriptor?.collection ?? descriptor?.type ?? `plugin-${index + 1}`
+        // `plugin-7` names nothing a reader can act on. A plugin that
+        // declared its module has already said where it is, so the file's own
+        // stem is a better name than its position in an array.
+        const declaredName = descriptor?.module
+            ? path.basename(String(descriptor.module).split('?')[0]).replace(/\.[cm]?js$/, '')
+            : null
+        const label = descriptor?.collection ?? descriptor?.type ?? declaredName ?? `plugin-${index + 1}`
+        const registered = []
         for (const name of hookNames) {
-            for (const hook of runtime.hooks[name].slice(before.get(name))) {
+            const added = runtime.hooks[name].slice(before.get(name))
+            if (added.length) registered.push(name)
+            for (const hook of added) {
                 // A plugin registering the same function twice keeps its first
                 // label rather than being renamed by a later registration.
                 if (typeof hook === 'function' && !hook.mikserPlugin) hook.mikserPlugin = label
             }
         }
+        // Recorded whether or not it named itself. A plugin that declares
+        // nothing is still loaded, and the list must say so — that is the
+        // whole difference between this and the probe it replaces.
+        recordPlugin({
+            kind: 'lifecycle',
+            label,
+            package: packageOfModule(descriptor?.module),
+            module: descriptor?.module ?? null,
+            ...(descriptor?.collection ? { collection: descriptor.collection } : {}),
+            hooks: registered,
+        })
     }
 })
+
+
+// The package a module belongs to, read from the nearest package.json.
+//
+// Walked up from the file rather than pattern-matched on the path: a plugin
+// developed in a workspace sits at `~/Projects/mikser/mikser-io-git`, and the
+// same plugin installed sits at `<site>/node_modules/mikser-io-git`. Only the
+// manifest is true in both, and only the manifest is true for a plugin whose
+// package is not named for it.
+function packageOfModule(moduleUrl) {
+    if (typeof moduleUrl !== 'string') return null
+    let dir
+    try {
+        dir = path.dirname(moduleUrl.startsWith('file:') ? fileURLToPath(moduleUrl) : moduleUrl)
+    } catch { return null }
+    for (let depth = 0; depth < 12; depth++) {
+        const manifest = path.join(dir, 'package.json')
+        if (existsSync(manifest)) {
+            try { return JSON.parse(readFileSync(manifest, 'utf8')).name ?? null } catch { return null }
+        }
+        const parent = path.dirname(dir)
+        if (parent === dir) break
+        dir = parent
+    }
+    return null
+}
+
+// What this runtime LOADED, recorded as it loads it.
+//
+// Not derived afterwards. The previous answer was assembled by inventory.js
+// from whatever surfaces happened to be observable — a route here, a CLI flag
+// there — which made "is this plugin running" a question about how well the
+// probe was maintained rather than about the plugin. It reported layouts as
+// not running on every site that did not pass `--layouts`, because the flag it
+// probed had stopped being an API object two majors earlier and nothing failed
+// when it went stale.
+//
+// A plugin names itself by returning `module: import.meta.url` from its
+// factory, the same self-naming `registerRoute` and `provideService` already
+// require. One that names nothing is still recorded and still reported as
+// LOADED — its `package` is null, which says "this is running and did not say
+// what it is", never "this is not running".
+function recordPlugin(entry) {
+    runtime.plugins = runtime.plugins ?? []
+    runtime.plugins.push(entry)
+}
 
 function kebabToCamel(s) {
     return s.replace(/-([a-z])/g, (_, c) => c.toUpperCase())
