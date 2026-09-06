@@ -183,6 +183,6 @@ export function preview(options = {}) {
         })
     })
 
-    return { name: 'preview' }
+    return { name: 'preview', module: import.meta.url }
     }
 }

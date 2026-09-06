@@ -31,8 +31,10 @@ export function sources(options = {}) {
         const { useLogger } = core
         if (!collections.length) {
             // No collections is a legitimate config (a flag turned them all
-            // off); nothing to register, and nothing to complain about.
-            return
+            // off); nothing to register, and nothing to complain about. Still
+            // names itself: the plugin IS loaded, and a config that turned its
+            // collections off must not make it look undetectable.
+            return { module: import.meta.url }
         }
         for (const [collection, config] of collections) {
             const {
@@ -63,6 +65,9 @@ export function sources(options = {}) {
             })
         }
         useLogger?.()?.debug('Sources registered: %s', collections.map(([c]) => c).join(', '))
+        // Names this package to the runtime's loaded-plugin record, so ping
+        // reports it as running rather than as undetectable.
+        return { module: import.meta.url }
     }
 }
 
