@@ -22,7 +22,7 @@ import { readdir, readFile } from 'node:fs/promises'
 
 import runtime from './runtime.js'
 import { readEntity, findEntities } from './catalog.js'
-import { useCollection, checksum, readEntityContent, lookupKeys, validateSource } from './utils/index.js'
+import { useCollection, checksum, checksumOf, readEntityContent, lookupKeys, validateSource } from './utils/index.js'
 import { nextCycleId, whenCycleCompletes } from './report.js'
 import { recordChangeSetWrite, currentChangeSet } from './changeset.js'
 
@@ -275,7 +275,10 @@ export async function writeEntitySource({
     // AFTER the write, so a set only ever claims paths that actually moved.
     // Claiming on intent would make a failed write undoable, and undoing a
     // write that never happened is a way to delete someone else's file.
-    if (changeSet) recordChangeSetWrite({ changeSet, summary, principal, uri })
+    // The checksum of what was just written, so a consumer can tell later
+    // whether what it wrote is still there. See the change-set log's
+    // 002-write-checksums migration.
+    if (changeSet) recordChangeSetWrite({ changeSet, summary, principal, uri, checksum: checksumOf(content) })
 
     const result = {
         ok: true, collection, relativePath,

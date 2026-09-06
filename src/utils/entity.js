@@ -3,6 +3,7 @@ import path from 'path'
 import runtime from '../runtime.js'
 import yaml from 'yaml'
 
+import { checksumOf } from './hash.js'
 import { isRefKey } from './refs.js'
 import { contentType } from 'mime-types'
 import { minimatch } from 'minimatch'
@@ -449,7 +450,11 @@ export function useCollection(runtime, name) {
             // of change sets still produces undoable work — the alternative is
             // every writer remembering, and the one that forgets is the one
             // whose edit cannot be taken back.
-            runtime.recordChangeSetWrite?.({ uri })
+            // The checksum goes with it, from the bytes just written. Same
+            // reason the recording is here: a consumer asking later whether
+            // its write is still on disk needs to know what it wrote, and the
+            // only place that reliably knows is the write itself.
+            runtime.recordChangeSetWrite?.({ uri, checksum: checksumOf(content) })
             return uri
         },
 

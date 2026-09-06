@@ -84,6 +84,27 @@ registerMigrations('change-sets', [
             })
         },
     },
+    {
+        // What the write actually put there.
+        //
+        // Without it, a set that produced no commit is ambiguous in a way that
+        // matters: the file on disk being identical to the last commit means
+        // EITHER the write matched what was already committed, or something
+        // replaced it before the commit pass ran. The first is a no-op; the
+        // second is lost work. From disk alone they are the same picture, and
+        // a real one was misread as the harmless case on a live site.
+        //
+        // Recorded at write time, so a consumer can ask afterwards whether
+        // what it wrote is still there. Nullable: a writer that does not know
+        // its own bytes records nothing, and a consumer must then say it
+        // cannot tell rather than assume either way.
+        name: '002-write-checksums',
+        up: async (knex) => {
+            await knex.schema.alterTable('mikser_change_set_paths', (table) => {
+                table.string('checksum')
+            })
+        },
+    },
 ])
 
 // How many sets to keep. An undo log is only useful while the change is
@@ -197,7 +218,7 @@ async function settled() {
     try { await queue } catch { /* reported at the point of failure */ }
 }
 
-async function persist(knex, set, rel, operation, entityId) {
+async function persist(knex, set, rel, operation, entityId, checksum) {
     // COALESCE rather than a plain merge: the first write's summary is the
     // request's own description of itself, and a later write in the same set
     // must not overwrite it with its own. `excluded` is the pseudo-table on
@@ -220,9 +241,17 @@ async function persist(knex, set, rel, operation, entityId) {
         })
 
     await knex('mikser_change_set_paths')
-        .insert({ change_set: set.id, path: rel, operation, entity_id: entityId ?? null })
+        .insert({ change_set: set.id, path: rel, operation, entity_id: entityId ?? null,
+                  checksum: checksum ?? null })
         .onConflict(['change_set', 'path'])
-        .merge({ operation: knex.raw('excluded.operation') })
+        // The LATEST write to a path is the one that says what should be there
+        // now, so its checksum replaces the earlier one — but only when it has
+        // one, or a writer that knows its bytes is overwritten by one that
+        // does not and the path silently becomes unverifiable.
+        .merge({
+            operation: knex.raw('excluded.operation'),
+            checksum: knex.raw('COALESCE(excluded.checksum, mikser_change_set_paths.checksum)'),
+        })
 
     await prune(knex)
 }
@@ -267,7 +296,7 @@ async function rowsToSets(knex, rows) {
     const paths = await knex('mikser_change_set_paths')
         .whereIn('change_set', rows.map(row => row.id))
         .orderBy('path')
-        .select('change_set', 'path', 'operation')
+        .select('change_set', 'path', 'operation', 'checksum')
 
     const bySet = new Map()
     for (const row of paths) {
@@ -292,6 +321,10 @@ async function rowsToSets(knex, rows) {
             outcome: row.outcome ?? null,
             paths: mine.map(p => p.path),
             deletions: mine.filter(p => p.operation === 'delete').map(p => p.path),
+            // path -> the checksum of what was written there, for the paths
+            // whose writer knew. Absent means unverifiable, not unchanged.
+            checksums: Object.fromEntries(
+                mine.filter(p => p.checksum).map(p => [p.path, p.checksum])),
         }
     })
 }
@@ -312,6 +345,9 @@ function memorySets(filter = () => true) {
         outcome: set.outcome ?? null,
         paths: [...set.paths.keys()],
         deletions: [...set.paths.entries()].filter(([, op]) => op === 'delete').map(([p]) => p),
+        // Same shape as the durable path, so a consumer reads one contract
+        // whether or not a database is configured.
+        checksums: Object.fromEntries(set.checksums ?? []),
     }))
 }
 
@@ -336,6 +372,11 @@ function relativeToWorkingFolder(uri) {
 // First one wins: later writes in the same set are the same request.
 export function recordChangeSetWrite({
     changeSet, summary, principal, uri, operation = 'write', undoOf, entityId,
+    // The checksum of the bytes just written, when the caller knows them.
+    // Optional on purpose: a writer that does not have the content in hand
+    // records nothing rather than a wrong value, and a consumer reading the
+    // log must treat its absence as "cannot tell".
+    checksum,
 } = {}) {
     // An explicit id always wins; otherwise take whatever set is in effect.
     // A write with neither stays unclaimed, which is the correct outcome for
@@ -373,6 +414,7 @@ export function recordChangeSetWrite({
     if (!set.undoOf && undoOf) set.undoOf = undoOf
     set.updatedAt = Date.now()
     set.paths.set(rel, operation)
+    if (checksum) (set.checksums ??= new Map()).set(rel, checksum)
 
     if (db()) {
         // Snapshotted, because the queued write runs later and the set keeps
@@ -381,7 +423,7 @@ export function recordChangeSetWrite({
         const snapshot = { ...set }
         enqueue(async () => {
             const knex = db()
-            if (knex) await persist(knex, snapshot, rel, operation, entityId)
+            if (knex) await persist(knex, snapshot, rel, operation, entityId, checksum)
         })
     }
     return set.id
