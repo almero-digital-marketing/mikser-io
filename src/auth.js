@@ -1,5 +1,7 @@
 import crypto from 'node:crypto'
 import { isLoopback } from './utils/index.js'
+import { currentPrincipal } from './principal.js'
+import runtime from './runtime.js'
 
 // Authentication seam (ADR-0012).
 //
@@ -285,6 +287,44 @@ export function anyOf(...verifiers) {
 // so a wildcard added here alone would have worked on two surfaces out of
 // four — the same partial answer, one layer down.
 export const CAPABILITY_WILDCARD = '*'
+
+// Writing to a collection is scoped to that collection.
+//
+//   write:<collection>     may change what is in it
+//
+// One name, asked by every write surface, so `write:documents` means the same
+// thing whether the write arrives over MCP, over the api, or from a plugin.
+// Reads are not scoped here: the api bounds them with `api:list` and the drive
+// with `drive:<endpoint>`, and inventing a third read rule would give three
+// answers to one question.
+export const writeCapabilityFor = (collection) => `write:${collection}`
+
+// Off until an operator turns it on, and turned on by granting.
+//
+// Enforcing immediately would refuse every write on every deployment that
+// exists, since nobody holds a capability that did not exist until now. So
+// the rule is the one the rest of this file already uses for principals,
+// applied to the catalogue: a site that declares no `write:` capability is
+// not using collection scoping, and its writes are bounded by whatever
+// bounded them before. The first `write:` grant turns it on for EVERY
+// collection at once — which is surprising exactly once, and is the only
+// reading that does not leave a half-enforced site.
+function collectionScopingConfigured(catalogue) {
+    return Object.values(catalogue ?? {}).flat()
+        .some(capability => String(capability).startsWith('write:'))
+}
+
+// The capability missing to write to this collection, or null when the write
+// may proceed. `catalogue` says whether the site uses collection scoping at
+// all; `principal` defaults to whoever the surface established.
+export function missingCollectionWrite(collection, {
+    principal = currentPrincipal(),
+    catalogue = runtime.options?.roles?.catalogue,
+} = {}) {
+    if (!collection) return null
+    if (!collectionScopingConfigured(catalogue)) return null
+    return missingCapability(principal, writeCapabilityFor(collection))
+}
 
 // Which of these capabilities the principal does NOT hold — the first one, or
 // null when it holds them all.

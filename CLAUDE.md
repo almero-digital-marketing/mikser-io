@@ -600,6 +600,29 @@ brevity.
   `:write` and no base was refused a PUT and allowed the identical write
   through the other door. Read and write are DIFFERENT call paths in drive
   (`holds` versus `missingCapability`), so a test covering one covers neither.
+- **Writing to a collection needs `write:<collection>`**, decided by
+  `missingCollectionWrite` and enforced in `useCollection().write`/`.remove` —
+  the lowest write primitive, for the reason the change-set hook sits there
+  too: a plugin that has never heard of capabilities is still bounded by them,
+  and the writer that forgets is the one that leaks. It THROWS rather than
+  returning a refusal, because `write` returns a uri and has no refusal
+  channel. **Off until an operator grants one**: a catalogue declaring no
+  `write:` capability is not using collection scoping, so every existing
+  deployment writes as before, and the first grant turns it on for every
+  collection at once. Reads are not scoped here — the api bounds them with
+  `api:list`, the drive with `drive:<endpoint>`, and a third read rule would
+  give three answers to one question.
+- **`principal.js` holds WHO is acting, and a principal is an object.** It
+  exists because the thing already reaching the write primitives was not one:
+  `writeEntitySource` takes a `principal` and MCP puts the display string
+  `"dk@almero.bg (admins)"` there, built for the change-set log. Asked
+  `hasCapability(thatString, ...)` it reads `undefined.capabilities`, takes
+  the not-capability-scoped branch, and returns TRUE — a check that looks like
+  protection and allows everything. `withPrincipal` ignores anything that is
+  not an object for exactly that reason. `currentPrincipal()` is null when
+  nothing established a context, and that means UNKNOWN rather than "nobody":
+  a lifecycle hook, a library caller and a plugin doing its own work all write
+  without one, and refusing there would break every build.
 - `routes.js` — HTTP route registry. Plugins mount on
   `runtime.options.app` directly; the Express router stack has the
   paths but not the intent (loopback-only? streaming?). So plugins

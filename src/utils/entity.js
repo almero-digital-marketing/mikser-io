@@ -8,6 +8,7 @@ import { contentType } from 'mime-types'
 import { minimatch } from 'minimatch'
 import { mkdir, open, readFile, unlink, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
+import { missingCollectionWrite } from '../auth.js'
 
 // Extension → mime type lookup for rendered outputs. Used anywhere an
 // entity's destination is being served over HTTP (the api plugin's
@@ -371,6 +372,24 @@ export function projectMeta(meta) {
  *   remove(relativePath: string): Promise<void>,
  * }}
  */
+// Refuse a write the acting principal may not make.
+//
+// Here rather than at each caller, and for the reason the change-set hook one
+// line below is here: this is the lowest write primitive, so a plugin that
+// has never heard of capabilities is still bounded by them. The alternative
+// is every writer remembering, and the one that forgets is the one that
+// leaks.
+//
+// Throws rather than returning a refusal because `write` has no refusal
+// channel — it returns a uri — and a caller that ignores a falsy return would
+// report success for a write that never happened.
+function refuseUnlessMayWrite(collection) {
+    const missing = missingCollectionWrite(collection)
+    if (!missing) return
+    throw new Error(`Refused: writing to ${collection} needs ${missing}, `
+        + 'which this credential does not carry.')
+}
+
 export function useCollection(runtime, name) {
     function resolveFolder() {
         const folder = runtime?.options?.[`${name}Folder`]
@@ -402,6 +421,7 @@ export function useCollection(runtime, name) {
         resolveWithin,
 
         async write(relativePath, content = '') {
+            refuseUnlessMayWrite(name)
             const uri = resolveWithin(relativePath)
             await mkdir(path.dirname(uri), { recursive: true })
             await writeFile(uri, content, 'utf8')
@@ -415,6 +435,7 @@ export function useCollection(runtime, name) {
         },
 
         async remove(relativePath) {
+            refuseUnlessMayWrite(name)
             const uri = resolveWithin(relativePath)
             await unlink(uri)
             runtime.recordChangeSetWrite?.({ uri, operation: 'delete' })
