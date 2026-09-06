@@ -98,7 +98,10 @@ const SCAN_CONCURRENCY = 16
 // trains the reader to skip the real one.
 //
 // A collection with nothing registered keeps the plain file hash, which is
-// right for every ordinary source.
+// right for every ordinary source. A registered recompute may ALSO return null
+// for an individual entity, meaning "this one is not composed" — layouts needs
+// that for its sidecars, which live in the same collection and are gated on
+// their own bytes.
 const sourceChecksums = new Map()
 
 export function registerSourceChecksum(collection, recompute) {
