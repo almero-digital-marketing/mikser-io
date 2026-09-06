@@ -149,6 +149,13 @@ export default async ({ entity, options, config, context, state, logger, port, t
         } catch { /* package not installed at this level — fine, try next */ }
 
         const resolveLocations = [
+            // What the descriptor itself said, first: it is the only entry
+            // that does not guess from the name. Everything below assumes a
+            // package called `mikser-io-<pluginName>`, which is true of every
+            // plugin named for its renderer and false of every one that ships
+            // alongside other things — mikser-io-assets ships two. See
+            // workerSafeOptions.
+            options.pluginModules?.[pluginName],
             path.join(options.workingFolder, 'node_modules', `mikser-io-${pluginName}/index.js`),
             nodeModulesResolved,
             path.join(options.workingFolder, 'plugins', `${pluginName}.js`),
@@ -322,7 +329,22 @@ export default async ({ entity, options, config, context, state, logger, port, t
     }
 
     const rendererPlugin = plugins[`render-${renderer}`]
-    const output = await rendererPlugin?.render({ entity, options, config: rendererPlugin?.options, context, plugins, runtime, state, logger, track })
+    // A missing HELPER announces itself — the template asks for something that
+    // is not there and the engine reports a render error. A missing RENDERER
+    // did not: the optional call returned undefined, the entity produced no
+    // output, and the only trace was one log line above. That is how
+    // `render-preset` went unresolvable on workers for two releases while
+    // every build stayed green.
+    //
+    // An entity was asked for and nothing rendered it. That is a fault, and it
+    // reads as one now.
+    if (typeof rendererPlugin?.render !== 'function') {
+        throw new Error(`Renderer "${renderer}" is not loaded, so ${entity?.id ?? 'this entity'} `
+            + `cannot be rendered. Its plugin resolved to nothing: either it is missing from the `
+            + `config, or it is a plugin a worker cannot find by name — see the "Render plugin `
+            + `render-${renderer} not found" line above.`)
+    }
+    const output = await rendererPlugin.render({ entity, options, config: rendererPlugin.options, context, plugins, runtime, state, logger, track })
 
     // One shape for both dispatch modes, so the engine unpacks in one place
     // rather than branching on how the render happened. An inline render folds

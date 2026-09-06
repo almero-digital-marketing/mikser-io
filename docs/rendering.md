@@ -174,6 +174,37 @@ export async function render({ entity, options, config, context, plugins, runtim
 
 Only the renderer plugin (named `render-{options.renderer}`) is expected to export `render()`. Other plugins (loaded via `context.plugins`, `entity.meta.plugins`, `options.plugins`) typically only export `load()`.
 
+### Declare `module` if your package is not named for your plugin
+
+On the main thread a plugin is found in the runtime registry, under the `name`
+its descriptor carries. A **worker** is another thread with another runtime
+singleton, so its registry is empty and it resolves by name instead: plugin
+`render-preset` is looked for in a package called `mikser-io-render-preset`.
+
+That guess is right whenever the package is named for the plugin. It is wrong
+whenever one package ships a plugin under some other name — and then the
+failure is asymmetric, which is what makes it expensive: the main thread works,
+and only entities dispatched with `task: worker` break. A missing helper throws
+`Missing helper: "..."` and the page is never written; a missing renderer is a
+render fault naming the renderer.
+
+A descriptor can say where it lives:
+
+```js
+export function renderPreset(options = {}) {
+    return { name: options.name ?? 'preset', options, load, render, module: import.meta.url }
+}
+```
+
+`import.meta.url` and not the package name, because it points at the file that
+exports `load` / `render` at module level — which is what the worker imports —
+so nothing has to be re-exported from the package index to make it reachable.
+
+The field is optional and only consulted on a worker. A package named
+`mikser-io-render-<name>` or `mikser-io-post-<name>` needs nothing. Everything
+else should declare it; `mikser-io-assets` ships two such plugins (`preset` and
+`asset`) and declares both.
+
 ---
 
 ## Renderer Plugins

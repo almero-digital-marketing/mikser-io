@@ -28,7 +28,7 @@ Plugins are standard ESM imports. There's no name-based search path — whatever
 - Sibling plugins each export a named factory: `import { vector } from 'mikser-io-vector'`.
 - Project-local plugins live anywhere — drop the file, import by relative path: `import myPlugin from './plugins/my-plugin.js'`.
 
-Renderer and postprocessor packages **are** listed in `plugins: []` alongside lifecycle plugins. They return descriptors (`{ name, options, load?, render? }` or `{ name, options, postprocess, ... }`) instead of `(core) => void` closures; the loader stores them in `runtime.renderers` / `runtime.postprocessors` and the dispatcher picks them up by name when a layout requests them.
+Renderer and postprocessor packages **are** listed in `plugins: []` alongside lifecycle plugins. They return descriptors (`{ name, options, load?, render? }` or `{ name, options, postprocess, ... }`) instead of `(core) => void` closures; the loader stores them in `runtime.renderers` / `runtime.postprocessors` and the dispatcher picks them up by name when a layout requests them. If your package is **not** named `mikser-io-render-<name>` / `mikser-io-post-<name>`, add `module: import.meta.url` to the descriptor — a worker has no registry to read and otherwise resolves the name to a package that does not exist. See [rendering.md](rendering.md#declare-module-if-your-package-is-not-named-for-your-plugin).
 
 ---
 

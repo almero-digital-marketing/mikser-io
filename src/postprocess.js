@@ -7,7 +7,7 @@ import _ from 'lodash'
 import { useLogger } from './engine/index.js'
 import engineRuntime from './runtime.js'
 
-export async function loadPlugin(pluginName, workingFolder, loggerOverride) {
+export async function loadPlugin(pluginName, workingFolder, loggerOverride, pluginModules) {
     // Worker contexts don't have access to the engine's pino instance
     // via useLogger() — callers from inside the Piscina dispatch pass
     // their port-forwarded logger explicitly so plugin-load failures
@@ -28,6 +28,9 @@ export async function loadPlugin(pluginName, workingFolder, loggerOverride) {
     } catch { /* package not installed at this level — fine, try next */ }
 
     const resolveLocations = [
+        // See render.js: what the descriptor declared, before anything that
+        // guesses a package name from the plugin name.
+        pluginModules?.[pluginName],
         path.join(workingFolder, 'node_modules', `mikser-io-${pluginName}/index.js`),
         nodeModulesResolved,
         path.join(workingFolder, 'plugins', `${pluginName}.js`),
@@ -110,7 +113,7 @@ export default async ({ entity, options, config, context, state, logger, port })
         .filter(p => p && p.indexOf('post-') == 0))
 
     for (let pluginName of pluginsToLoad) {
-        const plugin = await loadPlugin(pluginName, options.workingFolder, logger)
+        const plugin = await loadPlugin(pluginName, options.workingFolder, logger, options.pluginModules)
         if (!plugin) continue
         plugins[pluginName] = plugin
     }
