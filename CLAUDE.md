@@ -314,6 +314,24 @@ brevity.
   printed the version line and nothing else — and only the FORWARDED path
   was ever silent, which is the path the tests exercise, so nothing could
   see it.
+- **`writeEntity` puts meta back the way the file CARRIES it**, through the
+  `registerSourceFormat` registry in `utils/output.js` — the same shape, and
+  the same last-registered-wins dispatch, as `registerProvenanceFormat`. It
+  assumed front matter for everything, which for a `.yml` or `.json` entity —
+  which IS its meta, with no body — was not a formatting quirk but
+  destruction: with no `---` to find, the whole document became the BODY and
+  the patch was written above it as fresh front matter. `refs.rename` reaches
+  this for every entity referencing a renamed one, the largest fan-out any
+  request has. Three built-ins: front-matter (the catch-all, registered first
+  so it is checked last), yaml, json. The yaml one patches the document AST
+  rather than re-serializing, so comments and unnamed values survive — it
+  re-flows block scalars, which is a formatting change where a re-serialize
+  would have been a content one. It dispatches on FORMAT alone: a
+  multi-document YAML file has `---` between documents and reads as front
+  matter to the detector, so consulting it sent exactly the files with most to
+  lose down the wrong path. And it parses ALL documents, because
+  `parseDocument` on a multi-document source returns one carrying errors that
+  throws on stringify.
 - `utils/` — "utils" named nothing: 37 exports whose only relationship was
   having nowhere else to live. Split in 10.12.0 by what each group is about —
   `entity.js` (mime, text sniffing, `readEntityContent` and its provider

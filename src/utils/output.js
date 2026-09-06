@@ -37,44 +37,133 @@ import { lstat, mkdir, open, readFile, stat, unlink, writeFile } from 'node:fs/p
 // Returns the absolute path that was written. The watcher will see the
 // change just like any external edit — the entity re-enters the lifecycle
 // naturally on the next cycle.
+// How a source file carries its meta, and how to put it back.
+//
+// Front matter is one answer, not the answer. A `.yml` or `.json` entity IS
+// its meta — there is no body — and treating every file as front-matter did
+// not merely format it oddly, it destroyed it: with no `---` to find, the
+// whole document was taken as the BODY and the patch written above it as
+// fresh front matter. A one-key rename turned a price list into a two-key
+// document with the real one quoted underneath as inert text, and nothing
+// threw. refs.rename reaches this for every referring entity, which is the
+// largest fan-out any single request has.
+//
+// Registered and dispatched the way provenance registers its readers: last
+// registered is checked first, and the catch-all goes in first so it is
+// consulted last. A format plugin adds its own without touching this file.
+//
+//   test(entity, raw)      does this handler own this source?
+//   write({ raw, patch })  the complete new file contents
+//
+// `patch` rather than a merged meta, deliberately: a handler that can edit its
+// source in place should be allowed to. The yaml one does, so comments and
+// untouched values survive an edit that names one key.
+const sourceFormats = []
+
+export function registerSourceFormat(name, { test, write }) {
+    if (!name || typeof test !== 'function' || typeof write !== 'function') {
+        throw new Error('registerSourceFormat(name, { test, write }) requires all three')
+    }
+    sourceFormats.unshift({ name, test, write })
+    return () => {
+        const at = sourceFormats.findIndex(h => h.name === name)
+        if (at >= 0) sourceFormats.splice(at, 1)
+    }
+}
+
+export function sourceFormatFor(entity, raw = '') {
+    for (const handler of sourceFormats) {
+        try {
+            if (handler.test(entity, raw)) return handler
+        } catch { /* a handler that throws is a handler that declines */ }
+    }
+    return sourceFormats[sourceFormats.length - 1]
+}
+
+// The format an entity is in, by what the catalog recorded and, failing that,
+// by its extension — a caller holding only a uri is one this must still answer
+// for.
+function formatOf(entity) {
+    if (entity?.format) return String(entity.format).toLowerCase()
+    return path.extname(entity?.uri ?? '').replace(/^\./, '').toLowerCase()
+}
+
+function applyPatch(target, patch) {
+    const next = { ...target }
+    for (const [key, value] of Object.entries(patch)) {
+        if (value === null) delete next[key]
+        else next[key] = value
+    }
+    return next
+}
+
+// A text document with a `---` block, or one that should grow one. Registered
+// first, so it is checked last: this is the catch-all.
+registerSourceFormat('front-matter', {
+    test: () => true,
+    write({ raw, patch }) {
+        const parsed = fm.test(raw) ? fm(raw) : null
+        const body = parsed ? (parsed.body ?? '') : raw
+        const meta = applyPatch(parsed?.attributes ?? {}, patch)
+        // No meta left — write just the body, rather than a `---`/`---` shell
+        // that some tooling reads as broken front matter.
+        if (Object.keys(meta).length === 0) return body
+        return `---\n${yaml.stringify(meta)}---\n${body}`
+    },
+})
+
+// A YAML document is meta all the way down.
+//
+// Patched through the document AST rather than re-serialized, so comments and
+// every value the patch does not name survive. Not byte-perfect: the emitter
+// re-flows block scalars to its own width, so hand-wrapped prose moves. That
+// is a formatting change, where re-serializing would have been a content one.
+registerSourceFormat('yaml', {
+    // On the format alone. `fm.test` is not a safe second opinion here: a
+    // multi-document YAML file has a `---` between its documents and reads as
+    // front matter to it, so consulting it sent exactly the files with the
+    // most to lose down the wrong path.
+    test: (entity) => ['yml', 'yaml'].includes(formatOf(entity)),
+    write({ raw, patch }) {
+        // Every document, not the first. parseDocument on a multi-document
+        // source returns one carrying errors, and stringifying it throws —
+        // loud, but it refuses a file it could have patched. The meta belongs
+        // to the first document; the rest are copied through untouched.
+        const documents = raw.trim() ? yaml.parseAllDocuments(raw) : [yaml.parseDocument('')]
+        const target = documents[0]
+        for (const [key, value] of Object.entries(patch)) {
+            if (value === null) target.deleteIn([key])
+            else target.setIn([key], value)
+        }
+        return documents.map(document => document.toString()).join('')
+    },
+})
+
+// JSON has no comments to keep and no body to preserve, so this is a plain
+// round-trip — but the indent is read off the file rather than imposed, so a
+// one-key patch does not reformat every line of a 4-space document.
+registerSourceFormat('json', {
+    test: (entity) => formatOf(entity) === 'json',
+    write({ raw, patch }) {
+        const current = raw.trim() ? JSON.parse(raw) : {}
+        const indent = raw.match(/^[ \t]+/m)?.[0] ?? '  '
+        return JSON.stringify(applyPatch(current, patch), null, indent) + '\n'
+    },
+})
+
 export async function writeEntity(entity, patch = {}) {
     if (!entity?.uri) {
         throw new Error('writeEntity: entity.uri is required')
     }
 
-    let currentMeta = {}
-    let body = ''
+    let raw = ''
     try {
-        const content = await readFile(entity.uri, 'utf8')
-        if (fm.test(content)) {
-            const parsed = fm(content)
-            currentMeta = parsed.attributes ?? {}
-            body = parsed.body ?? ''
-        } else {
-            body = content
-        }
+        raw = await readFile(entity.uri, 'utf8')
     } catch (err) {
         if (err.code !== 'ENOENT') throw err
-        // Fresh file — start from an empty meta + body.
+        // Fresh file — the handler starts from empty source.
     }
-
-    const newMeta = { ...currentMeta }
-    for (const [k, v] of Object.entries(patch)) {
-        if (v === null) delete newMeta[k]
-        else newMeta[k] = v
-    }
-
-    let newContent
-    if (Object.keys(newMeta).length > 0) {
-        // yaml.stringify always emits a trailing newline.
-        const yamlStr = yaml.stringify(newMeta)
-        newContent = `---\n${yamlStr}---\n${body}`
-    } else {
-        // No meta left — write just the body. Avoids `---\n---\n<body>`
-        // shells that some tooling treats as "broken frontmatter."
-        newContent = body
-    }
-
+    const newContent = sourceFormatFor(entity, raw).write({ raw, patch, entity })
     await mkdir(path.dirname(entity.uri), { recursive: true })
     await writeFile(entity.uri, newContent, 'utf8')
     // The other file-writing primitive. A rename cascade rewrites every
