@@ -9,7 +9,7 @@
 //
 // Follows --audit-output's shape: report and exit, no build phases run.
 import { existsSync } from 'node:fs'
-import { inputHashOf, inputPartsOf, diffInputParts, lookupKeys, checksum as fileChecksum } from './utils/index.js'
+import { inputHashOf, inputPartsOf, diffInputParts, lookupKeys, checksum as fileChecksum, isLocalUri, uriScheme } from './utils/index.js'
 import { recomputeSourceChecksum } from './source.js'
 import { outputMissing } from './invalidation.js'
 import { filterKey } from './track.js'
@@ -163,7 +163,26 @@ export async function explain(reference) {
     // nothing is registered — every ordinary source — is the file hash the
     // right comparison, and there it still is.
     let source = null
-    if (entity.uri) {
+    // A provider-backed entity has no local file, and asking the filesystem
+    // about `https://...` returns ENOENT — which this used to report as
+    // "file is gone", and the verdict then told the reader a build would
+    // DELETE the entity. It would do no such thing: mikser-io-csv pulls rows
+    // over http and the entity is perfectly healthy.
+    //
+    // Whether the remote moved is a real question, but it is not one a local
+    // checksum can answer, and answering it here would put a network fetch
+    // inside a read-only explain. So the comparison is declined, out loud.
+    if (entity.uri && !isLocalUri(entity.uri)) {
+        source = {
+            uri: entity.uri,
+            scheme: uriScheme(entity.uri),
+            catalogChecksum: entity.checksum ?? null,
+            remote: true,
+            // No `differs`. Absent would read as false to anything checking
+            // truthiness, so the reason it is absent is stated instead.
+            notCompared: 'the source is fetched by a provider, so there is no local file to compare against',
+        }
+    } else if (entity.uri) {
         try {
             const onDisk = await fileChecksum(entity.uri)
             const composed = await recomputeSourceChecksum(entity)
@@ -307,7 +326,10 @@ export async function explain(reference) {
         })),
         // What a plain build would do next, stated plainly.
         verdict: contestedVerdict(competingFor(snapshots, entity.id))
-            ?? (source?.error === 'file is gone'
+            ?? (source?.remote
+            ? `source is fetched over ${source.scheme} — a build asks its provider, and no local `
+              + 'file was compared here'
+            : source?.error === 'file is gone'
             ? 'source file is gone — a build would DELETE this entity and unlink its output'
             : source?.differs
                 ? 'source differs from the catalog — a build would re-import it first, then re-render. '

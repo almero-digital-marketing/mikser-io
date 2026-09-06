@@ -149,6 +149,25 @@ const providerModuleCache = new Map()
 // built-in filesystem read.
 const URI_SCHEME_RE = /^([a-z][a-z0-9+\-.]*):\/\//i
 
+// The scheme a uri names, lowercased, or null when it names none.
+//
+// `null` and `file` both mean the local filesystem — that is the split
+// readEntityContent below dispatches on, and anything else asking "is there a
+// file here to read" has to make the same distinction. Exported so it is made
+// once: mikser_explain used to run a filesystem checksum over `https://...`,
+// get ENOENT, and report "source file is gone — a build would DELETE this
+// entity", about a healthy entity a provider had fetched.
+export function uriScheme(uri) {
+    if (typeof uri !== 'string') return null
+    return URI_SCHEME_RE.exec(uri)?.[1]?.toLowerCase() ?? null
+}
+
+// Does this uri point at something on the local filesystem?
+export function isLocalUri(uri) {
+    const scheme = uriScheme(uri)
+    return scheme === null || scheme === 'file'
+}
+
 // Resolve `<scheme>` to the package `mikser-io-provider-<scheme>` and
 // import it. Cached per scheme; same package convention as renderers
 // (`mikser-io-render-<name>`) and postprocessors (`mikser-io-post-<name>`).

@@ -8,7 +8,7 @@
 // This is the surface. Everything imported from './utils/index.js' is
 // re-exported here, so the split costs no caller anything.
 
-export { changeExtension, getFormatInfo, isTextEntity, looksTextual, matchEntity, mimeForEntity, projectMeta, readEntityContent, useCollection } from './entity.js'
+export { changeExtension, getFormatInfo, isLocalUri, isTextEntity, looksTextual, matchEntity, mimeForEntity, projectMeta, readEntityContent, uriScheme, useCollection } from './entity.js'
 export { AbortError, formatErrorContext, formatLogArgs } from './errors.js'
 export { ExpandError, expandEntity } from './expand.js'
 export { checksum, checksumOf, diffInputParts, inputHashOf, inputPartsOf, normalize } from './hash.js'
