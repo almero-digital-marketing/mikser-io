@@ -1,6 +1,6 @@
 {
   "name": "mikser-io",
-  "version": "10.14.0",
+  "version": "11.0.0",
   "files": [
     "app.js",
     "index.js",
