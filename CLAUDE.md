@@ -814,7 +814,7 @@ Test coverage: `test/unit/source-sweep.test.js`.
 - **MCP tools** (as a client sees them): `mikser_<verb>` or
   `mikser_<subsystem>_<verb>`:
   `mikser_query_entities`, `mikser_read_entity`, `mikser_update_entity`,
-  `mikser_delete_entity`, `mikser_render`, `mikser_refs_inbound`,
+  `mikser_edit_entity`, `mikser_delete_entity`, `mikser_render`, `mikser_refs_inbound`,
   `mikser_refs_outbound`, `mikser_refs_broken`, `mikser_refs_rename`,
   `mikser_layouts_inspect`, `mikser_preview_render`,
   `mikser_preview_ui`, `mikser_ui_action`, `mikser_ping`.

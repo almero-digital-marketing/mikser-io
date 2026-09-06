@@ -495,7 +495,8 @@ Query types throughout: function, lodash match object, or `undefined` for all.
 
 `updateEntity` is a catalog operation. `writeEntitySource` writes the FILE, with
 the checks that make a whole-file rewrite safe to perform without having watched
-the file the whole time.
+the file the whole time. `editEntitySource` changes PART of a file, by naming
+the text to change rather than resending the rest of it.
 
 ### `writeEntitySource(options)`
 
@@ -581,6 +582,52 @@ exactly the one that needs telling.
 
 `siblingDestinations(folder, relativePath)` reports files differing only by
 extension, which may render to the same destination.
+### `editEntitySource(options)`
+
+```js
+import { editEntitySource } from 'mikser-io'
+
+const result = await editEntitySource({
+    id: '/documents/pricing.md',
+    find: 'price: 1200',
+    replace: 'price: 1400',
+})
+```
+
+| Option | Meaning |
+| --- | --- |
+| `id` or `collection` + `relativePath` | Which file. Same rules as `writeEntitySource`. |
+| `find` | The exact text to replace. Must appear EXACTLY ONCE unless `all`. |
+| `replace` | What to put there. Empty or omitted deletes the matched text. |
+| `all` | Replace every occurrence instead of refusing an ambiguous anchor. Reports `replacements`. |
+| `ifChecksum`, `dryRun`, `awaitCycle`, `changeSet`, `summary`, `principal` | As `writeEntitySource`. |
+
+It is layered ON `writeEntitySource` rather than beside it, so containment, the
+change set, the cycle id, sibling destinations and the collection write
+capability are the same code path every other write goes through — a second
+implementation of any of those is a second implementation that can drift.
+
+**Why an anchor rather than a whole file.** A model rewriting a file to change
+one line must re-emit every other line, and a line it drops on the way is
+indistinguishable downstream from a line someone deleted on purpose.
+`ifChecksum` catches a stale READ; nothing catches a lossy WRITE. An anchor
+cannot lose what it does not name: the bytes outside the match are not merely
+preserved, they are never rewritten. That also makes the concurrency question
+sharper than a checksum — a checksum refuses when ANY part of the file moved,
+an anchor refuses when the part being edited moved.
+
+Its own refusals, on top of `writeEntitySource`'s: `no-anchor` (empty `find`),
+`anchor-not-found`, `anchor-ambiguous` (carrying `occurrences`), `no-such-file`
+(an edit changes something that exists; use the whole-file write to create),
+and `would-not-parse` (carrying the parser's complaint). The last one is the
+guarantee a whole-file write cannot make: the result is checked against the
+file's registered source format — see `validateSource` — and a file that would
+not parse never lands.
+
+Between reading the file and writing it back, the checksum it read is forwarded
+as the write's precondition, so a writer landing in that window is refused
+rather than overwritten.
+
 `locateEntityFile(id)` resolves a catalog id to its `{ collection, relativePath }`,
 or `{ error }` — taken from the entity rather than by splitting the id, since the
 prefix is configurable and the extension may have been stripped.

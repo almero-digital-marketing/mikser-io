@@ -18,11 +18,11 @@
 // gap this closes: the safety belongs to the write, not to one transport.
 
 import path from 'node:path'
-import { readdir } from 'node:fs/promises'
+import { readdir, readFile } from 'node:fs/promises'
 
 import runtime from './runtime.js'
 import { readEntity, findEntities } from './catalog.js'
-import { useCollection, checksum, readEntityContent, lookupKeys } from './utils/index.js'
+import { useCollection, checksum, readEntityContent, lookupKeys, validateSource } from './utils/index.js'
 import { nextCycleId, whenCycleCompletes } from './report.js'
 import { recordChangeSetWrite, currentChangeSet } from './changeset.js'
 
@@ -430,4 +430,146 @@ function referrersOf(entity) {
         }
     }
     return [...found.values()]
+}
+
+// Change a source file by naming the text to change, not by resending it.
+//
+// The alternative — and until now the only one — is a whole-file rewrite. For
+// a model that is a silent-corruption machine: to change one price in a
+// 900-line price list it must re-emit all 900 lines, and a line it quietly
+// drops is indistinguishable downstream from a line someone meant to delete.
+// `ifChecksum` catches a stale READ; nothing catches a lossy WRITE.
+//
+// An anchor cannot lose what it does not name. The only bytes that change are
+// the ones matched, so everything else is not merely preserved — it is never
+// rewritten. That also makes the concurrency check sharper than a checksum: a
+// checksum refuses when ANY part of the file moved, an anchor refuses when the
+// part you are editing moved, and those are different questions.
+//
+// Three refusals, and all of them are the good kind — stop and look, never
+// "wrote the wrong thing":
+//
+//   anchor-not-found    the text is not there; the file is not what you read
+//   anchor-ambiguous    it is there more than once; say more, or pass `all`
+//   would-not-parse     the result is not valid in this file's format
+//
+// The last is the one a whole-file write can never offer. Today a model can
+// emit invalid YAML and the build finds out; here the file never lands.
+export async function editEntitySource({
+    id,
+    collection,
+    relativePath,
+    find,
+    replace = '',
+    all = false,
+    ifChecksum,
+    dryRun = false,
+    awaitCycle = false,
+    changeSet,
+    summary,
+    principal,
+} = {}) {
+    if (typeof find !== 'string' || find === '') {
+        return { ok: false, refused: 'no-anchor', error: '`find` must be a non-empty string.' }
+    }
+    if (id) {
+        const located = await locateEntityFile(id)
+        if (located.error) return { ok: false, refused: 'unresolvable-id', error: located.error }
+        if (collection && collection !== located.collection) {
+            return {
+                ok: false,
+                refused: 'collection-mismatch',
+                error: `id ${id} is in collection ${located.collection}, not ${collection}. Pass one or the other.`,
+            }
+        }
+        collection ??= located.collection
+        relativePath ??= located.relativePath
+    }
+    if (!collection || !relativePath) {
+        return {
+            ok: false,
+            refused: 'incomplete-target',
+            error: 'Pass either `id` (for an existing entity) or both `collection` and `relativePath`.',
+        }
+    }
+
+    let handle
+    let uri
+    try {
+        handle = useCollection(runtime, collection)
+        uri = handle.resolveWithin(relativePath)
+    } catch (err) {
+        return { ok: false, refused: 'invalid-target', collection, relativePath, error: err.message }
+    }
+
+    const before = await fileChecksum(uri)
+    if (before === null) {
+        return {
+            ok: false,
+            refused: 'no-such-file',
+            collection, relativePath,
+            error: 'There is nothing here to edit. Use the whole-file write to create a file.',
+        }
+    }
+    if (ifChecksum !== undefined && ifChecksum !== before) {
+        return {
+            ok: false,
+            refused: 'checksum-mismatch',
+            collection, relativePath,
+            expectedChecksum: ifChecksum, currentChecksum: before,
+            hint: 'The file changed since you read it. Re-read it and check your anchor still says what you meant.',
+        }
+    }
+
+    const current = await readFile(uri, 'utf8')
+    const occurrences = current.split(find).length - 1
+    if (occurrences === 0) {
+        return {
+            ok: false,
+            refused: 'anchor-not-found',
+            collection, relativePath, currentChecksum: before,
+            error: 'That text is not in the file.',
+            hint: 'Re-read the entity: either it changed, or the anchor carries whitespace or a line break it does not have.',
+        }
+    }
+    if (occurrences > 1 && !all) {
+        return {
+            ok: false,
+            refused: 'anchor-ambiguous',
+            collection, relativePath, occurrences, currentChecksum: before,
+            error: `That text appears ${occurrences} times.`,
+            hint: 'Extend `find` with surrounding lines until it is unique, or pass `all: true` to change every one.',
+        }
+    }
+
+    // One expression for both, because the refusals above have already made
+    // the counts exact: `all` means "however many there are", and without it
+    // there is exactly one. (split/join replaces each match in the ORIGINAL,
+    // so a replacement containing the anchor does not compound.)
+    const content = current.split(find).join(replace)
+
+    // Refused before it lands, which is the guarantee a whole-file write has
+    // no way to make. Formats with no parser say nothing and pass.
+    const invalid = validateSource({ uri, collection }, content)
+    if (invalid) {
+        return {
+            ok: false,
+            refused: 'would-not-parse',
+            collection, relativePath, currentChecksum: before,
+            error: `The result is not valid ${path.extname(uri).replace('.', '') || 'content'}: ${invalid}`,
+            hint: 'Nothing was written. Check the replacement for indentation or quoting the format needs.',
+        }
+    }
+
+    // Through the whole-file write, so containment, the change set, the cycle
+    // id, sibling destinations and the collection capability gate are the same
+    // ones every other write goes through rather than a second set that can
+    // drift. `before` as the checksum closes the window between the read above
+    // and the write below.
+    const written = await writeEntitySource({
+        collection, relativePath, content,
+        ifChecksum: before,
+        dryRun, awaitCycle, changeSet, summary, principal,
+    })
+    return written.ok ? { ...written, replacements: all ? occurrences : 1 } : written
 }
