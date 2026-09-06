@@ -1,3 +1,4 @@
+import { CAPABILITY_WILDCARD } from './auth.js'
 // What a principal may do, in words rather than in capability strings.
 //
 // Enforcement only ever needs the flat list: does this credential carry
@@ -76,11 +77,24 @@ export function capabilityMeaning(capability) {
 // useful than the capabilities it comes from because it is already in the
 // vocabulary the person asking uses — a collection, the folder it lives in and
 // what that folder is for, not a verb.
-export function reachOf(capabilities = []) {
+// Every capability any role on this site is granted — what `*` expands to.
+function universeOf(catalogue = {}) {
+    return [...new Set(Object.values(catalogue).flat())]
+        .filter(c => c !== CAPABILITY_WILDCARD)
+}
+
+export function reachOf(capabilities = [], { universe = null } = {}) {
     const readable = new Map()
     const writable = new Set()
     const also = []
-    for (const capability of capabilities ?? []) {
+    // A wildcard means every capability this site defines, so its reach is
+    // described that way rather than as the bare `*` — a role that can do
+    // everything used to print `writable: []`, which reads as "can do
+    // nothing" and was the first sign that the grant was inert.
+    const held = (capabilities ?? []).includes(CAPABILITY_WILDCARD) && universe
+        ? [...new Set(universe)]
+        : (capabilities ?? [])
+    for (const capability of held) {
         const meaning = capabilityMeaning(capability)
         const resource = meaning?.resource
         if (!resource?.name) { also.push(capability); continue }
@@ -129,8 +143,9 @@ export function actingRole(held = [], catalogue = {}) {
 // what makes a handoff possible: it tells an agent who to ask. It reveals
 // nothing about how to become one, and there is no way to ask for one.
 export function rolesIn(catalogue = {}, { acting = null, summaries = {} } = {}) {
+    const universe = universeOf(catalogue)
     return Object.entries(catalogue).map(([name, capabilities]) => {
-        const { writable, readOnly, also } = reachOf(capabilities)
+        const { writable, readOnly, also } = reachOf(capabilities, { universe })
         return {
             name,
             ...(name === acting ? { acting: true } : {}),
@@ -159,7 +174,7 @@ export function describeAuthority({ capabilities, roles = [], catalogue = {}, su
         }
     }
     const role = actingRole(roles, catalogue)
-    const { writable, readOnly } = reachOf(capabilities)
+    const { writable, readOnly } = reachOf(capabilities, { universe: universeOf(catalogue) })
     return {
         role,
         // Only when no single role covers the others: the acting authority is
@@ -180,7 +195,8 @@ export function describeAuthority({ capabilities, roles = [], catalogue = {}, su
 // around it — the correct next step is a person, not another call.
 export function explainRefusal({ capability, role, target, catalogue = {}, summaries = {} } = {}) {
     const holders = Object.entries(catalogue)
-        .filter(([, capabilities]) => (capabilities ?? []).includes(capability))
+        .filter(([, capabilities]) => (capabilities ?? []).includes(capability)
+            || (capabilities ?? []).includes(CAPABILITY_WILDCARD))
         .map(([name]) => name)
     // Trim the summary's own full stop: it is a sentence in its own right and
     // reads as a typo when a second one lands beside it.

@@ -271,9 +271,24 @@ export function anyOf(...verifiers) {
 // credential that DOES declare capabilities is bound by them as well, so
 // a request's reach is the INTERSECTION of the endpoint's ceiling and the
 // principal's grant — never the union.
+// `*` is a real wildcard, and this is the ONLY place that decides so.
+//
+// It was already being written in grants — a role configured `['*']` meaning
+// "everything" — and matched nothing, because this was an exact `includes`.
+// The result was the worst available shape: a role whose own summary said it
+// had everything, whose reach printed as empty, which could use api and mcp
+// (those declare no capability, so the check above passes) and could not open
+// the drive (which declares one). Everything about it looked deliberate.
+//
+// Enforced through this function everywhere rather than `.includes` at each
+// gate: drive checked twice and the auth verifier once, all bypassing this,
+// so a wildcard added here alone would have worked on two surfaces out of
+// four — the same partial answer, one layer down.
+export const CAPABILITY_WILDCARD = '*'
+
 export function hasCapability(principal, capability) {
     if (!capability) return true
     const caps = principal?.capabilities
     if (caps == null) return true
-    return caps.includes(capability)
+    return caps.includes(capability) || caps.includes(CAPABILITY_WILDCARD)
 }
