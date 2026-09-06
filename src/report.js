@@ -128,7 +128,7 @@ export function resetReport() {
     // not in later ones, which is what actually happened.
     runtime.state.timings = {}
     runtime.state.pluginTimings = {}
-    runtime.state.activity = { rendered: 0, changed: 0 }
+    runtime.state.activity = { rendered: 0, changed: 0, dependencyDriven: new Set() }
 }
 
 // Published on the runtime so runtime.js can start a fresh cycle for a
@@ -281,7 +281,19 @@ export function reportGated(count = 1) {
 // `matched`, `dependency` each mean something specific, and a single
 // polymorphic key would push the type switch onto every consumer.
 export function reportRendered(entity, reason, decision = {}) {
-    activity().rendered++
+    const seen = activity()
+    seen.rendered++
+    // Recorded BEFORE the reportWanted gate, because the drift check depends
+    // on it and a check that only works under --report is not a check.
+    //
+    // These two reasons mean the entity re-rendered because something it
+    // consumes moved — a $-ref, a partial, an entity matching a recorded
+    // query. Its own inputHash did not move and cannot have: for a bundle
+    // assembled from a query, every real input is OUTSIDE inputHash by
+    // construction. See the drift check in manifest/cycle.js.
+    if (reason === 'ref-changed' || reason === 'query-matched') {
+        if (entity?.id) seen.dependencyDriven.add(entity.id)
+    }
     if (!reportWanted()) return
     store().rendered.push({
         id: entity?.id,
@@ -442,9 +454,17 @@ export function renderErrorCount() {
 // "nothing moved" on a build that had just rendered.
 //
 // Two integers cost nothing and are always true.
+// The entities that re-rendered this cycle because a DEPENDENCY moved, rather
+// than because their own inputs did. Read by the drift check, which cannot
+// tell the difference from hashes alone.
+export function renderedByDependency() {
+    return activity().dependencyDriven
+}
+
 function activity() {
     runtime.state ??= {}
-    runtime.state.activity ??= { rendered: 0, changed: 0 }
+    runtime.state.activity ??= { rendered: 0, changed: 0, dependencyDriven: new Set() }
+    runtime.state.activity.dependencyDriven ??= new Set()
     return runtime.state.activity
 }
 

@@ -42,6 +42,7 @@ import { mkdir, readFile } from 'node:fs/promises'
 import { globby } from 'globby'
 import pMap from 'p-map'
 import runtime from './runtime.js'
+import { useLogger } from './engine/index.js'
 import { ACTION } from './constants.js'
 import { checksum as fileChecksum, checksumOf, junkIgnore } from './utils/index.js'
 import { reportGated, reportChanged } from './report.js'
@@ -82,6 +83,50 @@ const SCAN_CONCURRENCY = 16
 // disagree, and the losing combination (empty content + a checksum correct
 // for the finished file) is permanent, because every later sync then
 // short-circuits on "unchanged".
+// How to recompute a collection's CATALOG checksum, for the collections that
+// do not store a plain file hash.
+//
+// `gateChecksum` accepts `bytes`, so a plugin can store a checksum composed
+// from several files — layouts folds in its .js sidecar and the shared digest,
+// as md5("<template>:<sidecar>:<shared>"). That is deliberate and correct.
+//
+// What was not correct is anything comparing that stored value against a fresh
+// md5 of the file: two different recipes, so they never match, and
+// mikser_explain reported `differs: true` for EVERY layout on every site —
+// telling the reader that someone had edited a file outside the build when
+// nobody had. A permanent false alarm is worse than no alarm, because it
+// trains the reader to skip the real one.
+//
+// A collection with nothing registered keeps the plain file hash, which is
+// right for every ordinary source.
+const sourceChecksums = new Map()
+
+export function registerSourceChecksum(collection, recompute) {
+    if (!collection || typeof recompute !== 'function') {
+        throw new Error('registerSourceChecksum(collection, recompute) requires both')
+    }
+    sourceChecksums.set(collection, recompute)
+    return () => { sourceChecksums.delete(collection) }
+}
+
+// The checksum the CATALOG would hold for this entity as it stands on disk —
+// composed the way its own collection composes it. Returns null when the
+// collection composes nothing, which tells the caller to use the file hash.
+export async function recomputeSourceChecksum(entity) {
+    const recompute = sourceChecksums.get(entity?.collection)
+    if (!recompute) return null
+    try {
+        return await recompute(entity)
+    } catch (err) {
+        // "Cannot tell" rather than a crash — explain must still answer. But
+        // it says so: a silently swallowed recompute would send the reader
+        // back to comparing raw hashes with no hint that anything went wrong.
+        useLogger?.()?.debug('Source checksum for %s could not be recomputed: %s',
+            entity?.collection, err.message)
+        return null
+    }
+}
+
 export async function gateChecksum(file, id, { reload = false, priorChecksums, bytes } = {}) {
     const compute = () => (bytes !== undefined ? checksumOf(bytes) : fileChecksum(file))
     // What overrides the checksum is not this function's to decide — see

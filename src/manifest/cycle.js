@@ -12,6 +12,7 @@ import { useJournal } from '../journal.js'
 import { onFinalize, onLoaded } from '../lifecycle.js'
 import { unlink } from 'fs/promises'
 import { buildSnapshot, hashOutputFile, snapToRow } from './snapshot.js'
+import { renderedByDependency } from '../report.js'
 
 // The manifest instance and its database, owned here because this is the only
 // place either is assigned: onLoaded builds them, onFinalize commits through
@@ -249,8 +250,26 @@ onFinalize(async () => {
         // still is knowable at the moment it happens, for the cost of one
         // lookup. That is a rendering change nobody asked for: an upgraded
         // renderer, a changed helper, a dependency that shifted under the
-        // build. Every entity input is in inputHash by construction, so if
-        // that did not move, the cause was not the content.
+        // build.
+        //
+        // "Every entity input is in inputHash by construction" is what this
+        // used to say, and it is false. inputHash covers the entity's OWN
+        // meta and checksum. An entity assembled from a query — a CSS bundle
+        // globbing styles/**/*.css, a page listing its collection — has every
+        // real input outside it, reaching the render through refClosure. Its
+        // inputHash is CONSTANT by construction, so editing any part tripped
+        // this check on every build, forever, telling the reader the cause was
+        // an upgraded renderer when it was the file they had just saved.
+        //
+        // The refClosure cannot settle it either: a query edge records the
+        // filter and how many matched, not a hash of what they contained, so
+        // it is identical before and after the edit.
+        //
+        // What does settle it is WHY the render happened. `ref-changed` and
+        // `query-matched` mean something this entity consumes moved — that is
+        // an input change the hashes cannot see, and not drift. Everything
+        // else with an unchanged inputHash still is: --force sweeps, retries,
+        // a renderer that stopped being a function of its inputs.
         //
         // Recorded here rather than checked later because later is too late —
         // the render rewrites its own snapshot, so by the time anything asks,
@@ -261,6 +280,7 @@ onFinalize(async () => {
         // build the unchanged ones are skipped and never reach here, so this
         // reports on what moved; under --force everything re-renders with
         // unchanged inputs, which makes it a full sweep.
+        const dependencyDriven = renderedByDependency()
         for (const snap of recordedSnapshots) {
             const prior = m._stmtLookup.get(snap.id, snap.destination)
             if (prior
@@ -268,7 +288,8 @@ onFinalize(async () => {
                 && prior.inputHash === snap.inputHash
                 && prior.outputHash
                 && snap.outputHash
-                && prior.outputHash !== snap.outputHash) {
+                && prior.outputHash !== snap.outputHash
+                && !dependencyDriven.has(snap.id)) {
                 drifted.push({ id: snap.id, destination: snap.destination })
             }
             m._stmtUpsert.run(snapToRow(snap))

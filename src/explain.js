@@ -10,6 +10,7 @@
 // Follows --audit-output's shape: report and exit, no build phases run.
 import { existsSync } from 'node:fs'
 import { inputHashOf, inputPartsOf, diffInputParts, lookupKeys, checksum as fileChecksum } from './utils/index.js'
+import { recomputeSourceChecksum } from './source.js'
 import { outputMissing } from './invalidation.js'
 import { filterKey } from './track.js'
 import { findEntity, findEntities, findById } from './catalog.js'
@@ -149,19 +150,32 @@ export async function explain(reference) {
     // would say "skipped", which is true of the catalog and misleading about
     // the next build. So check the file too, and say which is being reported.
     //
-    // A caveat rather than a bug: some plugins compose a checksum from more
-    // than one file (layouts folds in its .js sidecar), so a difference does
-    // not always mean the entity's own source moved. Both values are reported
-    // and the wording avoids claiming more than is known.
+    // Compared like with like.
+    //
+    // Some collections store a COMPOSED checksum rather than a file hash —
+    // layouts stores md5("<template>:<sidecar>:<shared>") so a sidecar edit
+    // invalidates the layout. Comparing that against a fresh md5 of the
+    // template is comparing two recipes: it never matches, and this reported
+    // `differs: true` for every layout on every site, permanently, for files
+    // nobody had touched.
+    //
+    // So the collection is asked how to recompute its own value. Only where
+    // nothing is registered — every ordinary source — is the file hash the
+    // right comparison, and there it still is.
     let source = null
     if (entity.uri) {
         try {
             const onDisk = await fileChecksum(entity.uri)
+            const composed = await recomputeSourceChecksum(entity)
+            const comparable = composed ?? onDisk
             source = {
                 uri: entity.uri,
                 catalogChecksum: entity.checksum ?? null,
                 fileChecksum: onDisk,
-                differs: entity.checksum != null && entity.checksum !== onDisk,
+                // Reported only when it is not simply the file hash, so its
+                // presence means "this collection composes" rather than noise.
+                ...(composed ? { comparableChecksum: composed } : {}),
+                differs: entity.checksum != null && entity.checksum !== comparable,
             }
         } catch (err) {
             source = { uri: entity.uri, error: err.code === 'ENOENT' ? 'file is gone' : err.message }
