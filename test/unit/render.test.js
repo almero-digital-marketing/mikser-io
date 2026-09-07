@@ -243,9 +243,12 @@ describe('useRenderer', () => {
         assert.equal(runtime.hooks.completed.length, 0, 'should not leak hooks across batches')
     })
 
-    // The pruning contract. Asserted through runtime.delete — the journal
-    // helper — because that is what actually reaches sqlite. Row lifetime is
-    // decided at onPersist, so anything that does not journal does not prune.
+    // The no-journalled-DELETE contract. Asserted through runtime.delete —
+    // the journal helper — because that is the path whose side effects are the
+    // problem: a journalled DELETE takes the manifest's file cleanup with it.
+    // catalog.restoreEntity puts the row back by writing sqlite directly and
+    // journalling nothing, which is what lets `catalog: false` coexist with
+    // `save: true`. Anything appearing here means that separation broke.
     function pruneHarness() {
         const updates = []
         const deletes = []
@@ -271,35 +274,38 @@ describe('useRenderer', () => {
         assert.deepEqual(deletes, [])
     })
 
-    it('catalog: false + save: false journals a DELETE for the row', async () => {
+    it('catalog: false journals no DELETE — it restores the row instead', async () => {
+        // The old implementation pruned by journalling a DELETE, and that is
+        // the one thing this must never do again: a journalled DELETE drags
+        // the manifest's file cleanup along with it, so honouring
+        // `save: true, catalog: false` literally would have written the file
+        // and then unlinked it. That coupling is why the pairing used to be
+        // refused outright.
+        //
+        // The row goes back the way it was through catalog.restoreEntity,
+        // which writes to sqlite directly and journals nothing. Both scenario
+        // tests cover the end state; what belongs here is the absence of the
+        // journal entry.
         const { runtime, deletes } = pruneHarness()
         const { render } = useRenderer(runtime)
         await render(
             { id: '/transient', type: 'document', collection: 'documents' },
             { catalog: false, save: false },
         )
-        assert.equal(deletes.length, 1)
-        assert.equal(deletes[0].id, '/transient')
+        assert.deepEqual(deletes, [])
     })
 
-    it('catalog: false alone keeps the row — pruning would unlink the output', async () => {
+    it('catalog: false with save: true journals no DELETE either — the file must survive', async () => {
         const { runtime, deletes } = pruneHarness()
         const { render } = useRenderer(runtime)
         await render(
             { id: '/written', type: 'document', collection: 'documents' },
             { catalog: false },
         )
-        assert.deepEqual(deletes, [], 'a saved render must keep its row rather than lose its file')
+        assert.deepEqual(deletes, [], 'a saved render must keep its file, whatever happens to its row')
     })
 
-    // `catalog: false` says "leave no row behind", and that is only the
-    // render's to decide for a row the render created. Handed an entity that
-    // was ALREADY catalogued — every preview of a real entity is one — it used
-    // to delete it: the entity vanished from the site with its file still on
-    // disk, no change set, no cycle, and the removal logged at debug. Cost a
-    // day to find, as a form that rendered once and then answered "Entity not
-    // found".
-    it('catalog: false does not prune a row that was already in the catalog', async () => {
+    it('never removes a row that was already in the catalog', async () => {
         const priorCatalog = engineRuntime.catalog
         engineRuntime.catalog = { byId: new Map([['/existing', { id: '/existing', collection: 'documents' }]]) }
         try {
@@ -310,23 +316,6 @@ describe('useRenderer', () => {
                 { catalog: false, save: false },
             )
             assert.deepEqual(deletes, [], 'someone else\'s row is not this render\'s to remove')
-        } finally {
-            engineRuntime.catalog = priorCatalog
-        }
-    })
-
-    it('still prunes a row the render itself created', async () => {
-        const priorCatalog = engineRuntime.catalog
-        engineRuntime.catalog = { byId: new Map() }   // nothing pre-existing
-        try {
-            const { runtime, deletes } = pruneHarness()
-            const { render } = useRenderer(runtime)
-            await render(
-                { id: '/transient', type: 'document', collection: 'documents' },
-                { catalog: false, save: false },
-            )
-            assert.equal(deletes.length, 1, 'the on-demand render still cleans up after itself')
-            assert.equal(deletes[0].id, '/transient')
         } finally {
             engineRuntime.catalog = priorCatalog
         }
@@ -392,7 +381,7 @@ describe('useRenderer', () => {
         }
     })
 
-    it('catalog: only the literal false triggers cleanup (strict)', async () => {
+    it('catalog: only the literal false is catalog-neutral (strict)', async () => {
         for (const value of [null, undefined, 0, '', 'false', 'no']) {
             const entities = [{ id: '/strict', collection: 'documents' }]
             const updates = []
@@ -412,6 +401,42 @@ describe('useRenderer', () => {
             await render({ id: '/strict', type: 'document', collection: 'documents' }, { catalog: value })
             assert.equal(entities.length, 1, `catalog: ${JSON.stringify(value)} should keep the row`)
         }
+    })
+
+    it('marks the entity neutral for either opt-out — it is what the manifest reads', async () => {
+        // src/manifest/cycle.js skips the snapshot on entity.options.neutral,
+        // so this flag is the whole interface between the two. Set for BOTH
+        // opt-outs: `save: false` wrote no file to claim, and `catalog: false`
+        // ends the call with no entity for a snapshot to belong to.
+        for (const options of [{ save: false }, { catalog: false }, { save: false, catalog: false }]) {
+            let submitted
+            const runtime = createFakeRuntime({
+                update: async (e) => { submitted = e },
+                process: async () => {
+                    for (const cb of [...runtime.hooks.completed]) {
+                        await cb({ entity: submitted, output: { result: 'r' } })
+                    }
+                },
+            })
+            const { render } = useRenderer(runtime)
+            await render({ id: '/n', type: 'document', collection: 'documents' }, options)
+            assert.equal(submitted.options.neutral, true, JSON.stringify(options))
+        }
+    })
+
+    it('leaves options clean on the default path — neutral is not set', async () => {
+        let submitted
+        const runtime = createFakeRuntime({
+            update: async (e) => { submitted = e },
+            process: async () => {
+                for (const cb of [...runtime.hooks.completed]) {
+                    await cb({ entity: submitted, output: { result: 'r' } })
+                }
+            },
+        })
+        const { render } = useRenderer(runtime)
+        await render({ id: '/plain', type: 'document', collection: 'documents' })
+        assert.equal('neutral' in submitted.options, false)
     })
 
     it('respects a per-call timeout override', async () => {

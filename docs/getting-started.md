@@ -187,8 +187,9 @@ const documents = useCollection(runtime, 'documents')
 //    that's what mikser's normal lifecycle does (anything persisted is
 //    queryable via findEntities). For on-demand renders where the
 //    bytes are the work product and you don't want the metadata row to
-//    accumulate, pass { catalog: false } to opt out. The rendered
-//    output file is kept on disk either way.
+//    accumulate, pass { catalog: false } and the catalog ends the call
+//    exactly as it began it. The rendered output file is kept on disk
+//    either way.
 const { output, entity } = await render({
   id: '/documents/en/report.md',
   type: 'document',
@@ -217,9 +218,24 @@ parallelism within the cycle is governed by `runtime.options.threads`.
 `render` options:
 
 - `timeout` — per-call timeout in ms (default 30_000).
-- `catalog` (default `true`) — keep the entity in the catalog after the
-  render. Pass `catalog: false` to prune the row, useful for on-demand
-  renders where the metadata would just accumulate.
+- `catalog` (default `true`) — let this render's changes reach the catalog.
+  Pass `catalog: false` and the catalog ends the call exactly as it began
+  it: the row that was there goes back as it was, and a row this render
+  created is removed. Useful for on-demand renders where the metadata would
+  just accumulate, and for previews, where the entity you hand in is usually
+  an altered copy (a surface forcing its own layout onto it) that has no
+  business becoming the entity's production state.
+
+  The render still travels the lifecycle, so the copy does reach the row
+  while the render needs it — the pipeline reads it back to resolve the
+  layout. It just does not outlive the call, whether the render succeeds or
+  throws. Nothing is journalled to achieve this, so the file a
+  `save: true, catalog: false` render produced stays on disk.
+
+  `save: false` implies it: a render that keeps nothing on disk has no
+  business moving a row either. Neither combination records a manifest
+  snapshot — a snapshot is a claim about a catalog entity's output, and
+  after a neutral render there is no such entity to speak for.
 - `save` (default `true`) — write the rendered output to disk at
   `<outputFolder>/<entity.destination>`. Pass `save: false` to skip the
   final disk write; the bytes still come back in `output.result` for you

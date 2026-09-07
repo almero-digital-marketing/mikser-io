@@ -1036,7 +1036,7 @@ export function api(options = {}) {
                     // straight to render(entity, options). Defaults match
                     // mikser's lifecycle (save and keep the catalog row);
                     // strict opt-outs via the literal `false`:
-                    //   options.catalog: false → prune the catalog row
+                    //   options.catalog: false → leave the catalog as found
                     //   options.save:    false → skip the final disk write
                     //                            (bytes still in the response)
                     const { options = {}, ...entityShape } = req.body

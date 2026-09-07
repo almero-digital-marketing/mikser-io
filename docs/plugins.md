@@ -702,7 +702,7 @@ Writes content to a file in a collection folder. The file change is picked up by
 ```
 
 `options` is optional. Strict opt-outs via the literal `false`:
-- `options.catalog: false` — prune the catalog row after render
+- `options.catalog: false` — leave the catalog exactly as the call found it (the row goes back as it was; a row this render created is removed). The output file is kept.
 - `options.save: false` — skip the final disk write (bytes still in the response)
 
 **`GET /<endpoint>/entities/subscribe`**

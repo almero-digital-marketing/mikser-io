@@ -506,13 +506,16 @@ export function useRenderer(runtime, { defaultTimeout = 30_000 } = {}) {
      * Two control flags mirror mikser's default-keep-everything behavior;
      * both opt-out via strict `=== false`:
      *
-     * - `catalog: true` (default) — keep the entity in the catalog after
-     *   the render. Pass `catalog: false` to prune the catalog row;
-     *   useful for on-demand renders where the metadata row would just
-     *   accumulate. Requires `save: false` — the prune goes through the
-     *   journal, and a DELETE takes the manifest's file cleanup with it,
-     *   so it is only safe for a render that wrote nothing. With
-     *   `save: true` the row is kept and a warning is logged.
+     * - `catalog: true` (default) — pass `catalog: false` and the catalog
+     *   ends the call exactly as it began it: the row that was there is put
+     *   back as it was, and a row this render created is removed. The render
+     *   still travels the lifecycle, so the caller's copy — usually altered,
+     *   since an on-demand surface forces its own layout onto it — does reach
+     *   the row while the render needs it; it just does not outlive the call.
+     *   Combines with either `save`, which is the point: gpoint-api renders
+     *   its emails with `save: true, catalog: false` — the file is wanted, the
+     *   row is not. `save: false` implies it, since a render that keeps
+     *   nothing on disk has no business moving a row either.
      * - `save: true` (default) — write the rendered output to disk at
      *   `<outputFolder>/<entity.destination>`. Pass `save: false` to
      *   skip the final disk write; the bytes still come back via
@@ -539,31 +542,40 @@ export function useRenderer(runtime, { defaultTimeout = 30_000 } = {}) {
      * @param {object} entity                - any entity-shaped object
      * @param {object} [opts]
      * @param {number}  [opts.timeout]       - override the default timeout
-     * @param {boolean} [opts.catalog=true]  - keep the catalog row after render
+     * @param {boolean} [opts.catalog=true]  - let this render's changes reach
+     *                                          the catalog; false restores it
      * @param {boolean} [opts.save=true]     - write the rendered output to disk
      * @returns {Promise<{output, entity}>}
      */
     async function render(entity, { timeout = defaultTimeout, catalog = true, save = true } = {}) {
-        // Was this row already in the catalog BEFORE the render? `catalog:
-        // false` means "do not leave a row behind", and that is only the
-        // render's to decide for a row the render created. Asked here, before
-        // the render puts one there.
+        // What the catalog held before this render touched it.
         //
-        // Without it, `catalog: false` deleted whatever it was handed: a
-        // preview of an EXISTING entity pruned the real row, so the entity
-        // vanished from the site while its file sat on disk — no change set,
-        // no cycle, and the removal logged only at debug. It cost a day to
-        // find, in a form that rendered once and then answered "Entity not
-        // found".
-        // Imported HERE, not at the top: catalog.js reaches back into this
-        // module, and a static import makes that cycle load-bearing at
+        // Read BEFORE dispatch, because the render itself overwrites it: the
+        // entity has to travel the lifecycle to render at all, and the
+        // pipeline reads the row back to resolve the layout, so suppressing
+        // that write outright fails the render with "requested layout X but
+        // produced no output". The row is written, used, and then put back.
+        //
+        // Imported here rather than at the top: catalog.js reaches back into
+        // this module, and a static import makes that cycle load-bearing at
         // module-evaluation time — it surfaced as "Cannot access 'schemas'
         // before initialization" in three unrelated test files.
-        const preexisting = catalog === false && entity?.id
-            ? Boolean(await (await import('./catalog.js')).findById(entity.id))
-            : false
+        const neutral = save === false || catalog === false
+        // Restoring is about a ROW, so it needs an id; the flag itself does
+        // not, and the manifest reads the flag to decide whether to record a
+        // snapshot. Keeping the two apart means an id-less entity — which has
+        // no row to put back — still gets the rest of neutrality.
+        let priorRow = null
+        if (neutral && entity?.id) {
+            const { findById, markNeutralRender } = await import('./catalog.js')
+            priorRow = findById(entity.id)
+            // Handed over before dispatch, so it is in place however early the
+            // cycle starts. The catalog's finalize drain is where the row goes
+            // back for good — see applyJournalMutations.
+            markNeutralRender(entity.id, priorRow)
+        }
 
-        const result = await new Promise((resolve, reject) => {
+        const dispatched = new Promise((resolve, reject) => {
             const correlationId = randomUUID()
             // Engine-set fields live under entity.options. The caller's
             // render(entity, { save: false }) becomes
@@ -580,6 +592,10 @@ export function useRenderer(runtime, { defaultTimeout = 30_000 } = {}) {
                     ...entity.options,
                     correlationId,
                     ...(save === false ? { save: false } : {}),
+                    // Marks every journal entry this render produces, however
+                    // many phases later they arrive, as belonging to a
+                    // catalog-neutral call.
+                    ...(neutral ? { neutral: true } : {}),
                 },
             }
             pending.push({
@@ -593,32 +609,28 @@ export function useRenderer(runtime, { defaultTimeout = 30_000 } = {}) {
             if (!cycleRunning) setImmediate(runBatch)
         })
 
-        if (catalog === false) {
-            // Prune the row through the journal, so the DELETE lands in
-            // sqlite at onPersist alongside the CREATE that put it there.
-            // Strict equality — null / "false" / 0 keep the row.
-            //
-            // Only when `save` is also false. A DELETE carries the
-            // manifest's file cleanup with it, which unlinks the render's
-            // output; that is correct for an entity that produced no file
-            // and wrong for one that did. `catalog: false, save: true`
-            // therefore keeps its row, and says so rather than dropping
-            // the output on the floor.
-            if (preexisting) {
-                // Someone else's row. It was here before this render and is
-                // not this render's to remove.
-                useLogger()?.debug(
-                    'render: catalog:false ignored for %s — the entity was already in the catalog',
-                    result.entity.id,
-                )
-            } else if (save === false) {
-                await runtime.delete(result.entity)
-            } else {
-                useLogger()?.warn(
-                    'render: catalog:false ignored for %s — it needs save:false, ' +
-                    'because pruning the row also unlinks the rendered output',
-                    result.entity.id,
-                )
+        let result
+        try {
+            result = await dispatched
+        } finally {
+            // In a finally, because a render that THROWS has still altered the
+            // row on its way through — an unrenderable entity leaves the
+            // catalog holding the caller's copy of it, which is the same
+            // damage as a successful render leaving its layout behind.
+            if (neutral && entity?.id) {
+                // Put the row back for whoever is awaiting us. The finalize
+                // drain does it again, and has to: it runs after the render and
+                // would otherwise re-apply the altered copy over this one. Both
+                // restore the same prior row, so their order does not matter.
+                //
+                // Deliberately not journaled. A journal entry would dispatch
+                // another render, and a journaled DELETE drags the manifest's
+                // file cleanup along with it — which would unlink the very file
+                // a `save: true, catalog: false` render was asked to produce.
+                // That coupling is why this used to refuse `save: true`.
+                const { restoreEntity, settleNeutralRender } = await import('./catalog.js')
+                restoreEntity(entity.id, priorRow)
+                settleNeutralRender(entity.id)
             }
         }
 

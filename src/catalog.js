@@ -191,6 +191,58 @@ function entityToRow(entity) {
     }
 }
 
+// Catalog-neutral renders in flight: entity id -> the row as it stood before
+// the render, or null where there was no row.
+//
+// Module-local rather than a field on runtime, deliberately. useRenderer takes
+// its runtime by injection while this module imports the singleton, so a field
+// there is written on one object and read on another the moment anyone injects
+// anything else — which every unit test does. One owner, and the writer has to
+// come through markNeutralRender.
+const neutralRenders = new Map()
+
+// Ids whose neutral render has finished — successfully or not — and whose
+// entry is therefore the next finalize drain's to clear.
+//
+// Without this the map is a leak of exactly the kind this feature exists to
+// prevent: gpoint-api renders with a fresh uuid per request, so an entry that
+// is only ever removed when a matching write shows up accumulates one row per
+// render for the life of the process. A render that THROWS journals nothing at
+// all, so that is not a hypothetical.
+const settledNeutralRenders = new Set()
+
+/**
+ * Declare that a render of `id` must leave the catalog as it found it, and
+ * hand over the row to put back — or null where there was none.
+ *
+ * Called by useRenderer BEFORE dispatch: the row is written during the cycle
+ * because the pipeline reads it back to resolve the layout, so what makes the
+ * render neutral is the restore afterwards, not a suppressed write.
+ *
+ * @param {string} id
+ * @param {object|null} prior
+ */
+export function markNeutralRender(id, prior) {
+    if (!id) return
+    neutralRenders.set(id, prior ?? null)
+    settledNeutralRenders.delete(id)
+}
+
+/**
+ * Report that the render of `id` has finished, however it finished. The next
+ * finalize drain restores anything it still owes and drops the entry.
+ *
+ * Separate from markNeutralRender because the two happen either side of the
+ * cycle: a render registered while a cycle is running is served by the NEXT
+ * one, so entries cannot simply be cleared at each cycle's end — an unsettled
+ * one is still waiting for its turn.
+ *
+ * @param {string} id
+ */
+export function settleNeutralRender(id) {
+    if (id && neutralRenders.has(id)) settledNeutralRenders.add(id)
+}
+
 // Apply per-cycle journal mutations inside one transaction (per the
 // migration plan's per-phase transaction granularity). Maintains
 // `mikser_refs` alongside `mikser_entities` so refs and entities
@@ -198,14 +250,26 @@ function entityToRow(entity) {
 //
 // better-sqlite3's transaction wrapper is sync-only, so we drain the
 // journal first and then sync-apply in one call.
-async function applyJournalMutations() {
+// `phase` is which drain this is — 'persist' (before render) or 'finalize'
+// (after it). It decides what happens to a catalog-neutral render's entry:
+// the persist drain applies it, because the pipeline reads the row back to
+// resolve the layout and the render fails outright without it; the finalize
+// drain puts the prior row back instead, because by then the render is done
+// and the altered copy has no business outliving it.
+async function applyJournalMutations(phase) {
     const logger = useLogger()
     const refsIndex = useRefsIndex()
     const mutations = []
     for await (const { operation, entity } of useJournal('Catalog')) {
         mutations.push({ operation, entity })
     }
-    if (!mutations.length) return
+    // Ids whose neutral render finished in this cycle. Collected during the
+    // pass and settled inside the same transaction, so no reader ever sees
+    // the altered row.
+    const toRestore = phase === 'finalize' ? new Map() : null
+    // A settled entry is cleared even in a cycle that journalled nothing —
+    // which is precisely the shape a failed render leaves behind.
+    if (!mutations.length && !settledNeutralRenders.size) return
     db.transaction(() => {
         // Two passes, deliberately. indexEntity resolves each $-ref
         // against mikser_entities to record what it bound to, so it has
@@ -217,6 +281,14 @@ async function applyJournalMutations() {
             switch (operation) {
                 case OPERATION.CREATE:
                 case OPERATION.UPDATE:
+                    if (toRestore && neutralRenders.has(entity.id)) {
+                        // A catalog-neutral render's own write, arriving after
+                        // the render. Restoring rather than applying is the
+                        // whole of `catalog: false`.
+                        logger.trace('Database restore after neutral render: %s', entity.id)
+                        toRestore.set(entity.id, neutralRenders.get(entity.id))
+                        break
+                    }
                     logger.trace('Database %s %s: %s', entity.collection, operation, entity.id)
                     stmtUpsert.run(entityToRow(entity))
                     toIndex.push(entity)
@@ -241,7 +313,55 @@ async function applyJournalMutations() {
         // delete-then-insert per source internally, so this stays
         // idempotent across UPDATE.
         for (const entity of toIndex) refsIndex?.indexEntity(entity)
+
+        // Last, so it wins over anything else this batch wrote for the id.
+        for (const [id, prior] of toRestore ?? []) {
+            restoreRow(id, prior, refsIndex)
+            neutralRenders.delete(id)
+            settledNeutralRenders.delete(id)
+        }
+        // Whatever is left over from a render that has finished without
+        // journalling anything for us to undo. Nothing to restore — useRenderer
+        // already put the row back the moment the render settled — so this only
+        // releases the entry.
+        if (toRestore) {
+            for (const id of settledNeutralRenders) neutralRenders.delete(id)
+            settledNeutralRenders.clear()
+        }
     })
+}
+
+// Put a row back exactly as it stood, or remove it where there was none.
+//
+// Sync, and assumes it is already inside a transaction — both callers are.
+// Writes nothing to the journal on purpose: a journal entry would dispatch
+// another render, and a journaled DELETE drags the manifest's file cleanup
+// with it, which would unlink the output a `save: true, catalog: false`
+// render was asked to produce.
+function restoreRow(id, prior, refsIndex = useRefsIndex()) {
+    if (prior) {
+        stmtUpsert.run(entityToRow(prior))
+        refsIndex?.indexEntity(prior)
+    } else {
+        stmtDelete.run(id)
+    }
+    cacheEvict(id)
+}
+
+/**
+ * Restore an entity to the row it had before a catalog-neutral render, or
+ * remove it if it had none. Called by useRenderer as soon as the render
+ * resolves, so a caller awaiting `render()` sees the catalog as it was; the
+ * finalize drain then does the same again for the write that lands after.
+ *
+ * @param {string} id
+ * @param {object|null} prior - the row as it stood, or null if there was none
+ */
+export function restoreEntity(id, prior) {
+    if (!id || !db?.isOpen) return
+    const refsIndex = useRefsIndex()
+    // mikser's db.transaction RUNS the function; it does not return one.
+    db.transaction(() => restoreRow(id, prior, refsIndex))
 }
 
 onLoaded(async () => {
@@ -329,7 +449,7 @@ onLoaded(async () => {
 })
 
 onPersist(async () => {
-    await applyJournalMutations()
+    await applyJournalMutations('persist')
 })
 
 onFinalize(async () => {
@@ -353,7 +473,7 @@ onFinalize(async () => {
     // render reads the catalog), and journal consumers are named and
     // independent, so a second pass only ever picks up what the first could
     // not have seen.
-    await applyJournalMutations()
+    await applyJournalMutations('finalize')
 
     // Checkpoint the WAL so the main file size stays representative
     // and external tools (mikser --audit-output on a separate run, debug

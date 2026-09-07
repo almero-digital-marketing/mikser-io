@@ -1,4 +1,4 @@
-// A render that writes nothing records no snapshot.
+// A render that writes nothing leaves the catalog and the manifest alone.
 //
 // `render(entity, { save: false })` hands the bytes back and deliberately
 // writes no file — it is how an on-demand surface (an MCP app, an HTTP
@@ -20,7 +20,7 @@ import { describe, it, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
-import { setupFixture, runMikser, cleanup, freshWorkdir, readManifest, stripAnsi } from './_harness.js'
+import { setupFixture, runMikser, cleanup, freshWorkdir, readManifest, readCatalog, stripAnsi } from './_harness.js'
 
 const CONFIG = `
 import { documents, frontMatter, yaml, renderHbs, useRenderer, runtime, findEntity } from 'mikser-io'
@@ -35,11 +35,20 @@ function onDemandPreview() {
     // for one from INSIDE a cycle deadlocks. A preview surface calls it from a
     // request handler — outside any cycle — and this is the closest a one-shot
     // build gets to that.
-    return ({ onLoaded }) => {
+    return ({ onLoaded, onFinalize }) => {
+        onFinalize(async () => {
+            const end = await findEntity({ id: '/documents/on-demand.md' })
+            console.log('AT_FINALIZE_META=' + JSON.stringify(end?.meta ?? null))
+        })
         onLoaded(async () => {
             const entity = await findEntity({ id: '/documents/on-demand.md' })
             if (!entity) return
             const { render } = useRenderer(runtime)
+            // Forces its own layout onto the entity, the way an app surface
+            // does. This is precisely the mutation that used to be persisted,
+            // after which the entity adopted the preview's layout as its
+            // production one and the next ordinary build published a page
+            // nobody asked for.
             const { output } = await render(
                 { ...entity, layout: { name: 'page', template: 'page.hbs' },
                   meta: { ...entity.meta, layout: 'page' },
@@ -47,6 +56,26 @@ function onDemandPreview() {
                 { save: false },
             )
             console.log('PREVIEW_BYTES=' + String(output?.result ?? '').replace(/\\s+/g, ' ').trim())
+            const after = await findEntity({ id: '/documents/on-demand.md' })
+            console.log('AFTER_RENDER_META=' + JSON.stringify(after?.meta ?? null))
+
+            // The same thing again, but asking for a layout that does not
+            // exist. The render throws — and an entity travels the lifecycle to
+            // reach the renderer either way, so the caller's copy has already
+            // reached the row by the time it does. A failed preview that leaves
+            // its layout behind is the same damage as a successful one that
+            // does; the only difference is that nobody is looking.
+            try {
+                await render(
+                    { ...entity, meta: { ...entity.meta, layout: 'does-not-exist' } },
+                    { save: false },
+                )
+                console.log('FAILED_RENDER=resolved')
+            } catch (err) {
+                console.log('FAILED_RENDER=' + err.status)
+            }
+            const afterFailure = await findEntity({ id: '/documents/on-demand.md' })
+            console.log('AFTER_FAILURE_META=' + JSON.stringify(afterFailure?.meta ?? null))
         })
     }
 }
@@ -88,6 +117,17 @@ describe('a save:false render records no snapshot', () => {
         assert.equal(build.code, 0, stripAnsi(build.stderr))
         assert.match(stripAnsi(build.stdout), /PREVIEW_BYTES=<article>On demand<\/article>/,
             'the caller still gets the rendered bytes')
+        const afterLine = stripAnsi(build.stdout).match(/AFTER_RENDER_META=(\{[^\n]*\})/)?.[1]
+        assert.equal(afterLine, '{"title":"On demand"}',
+            'in-process, right after the render, the row is already back to what it was')
+        assert.match(stripAnsi(build.stdout), /FAILED_RENDER=422/,
+            'the unrenderable preview really did fail — otherwise the next assertion proves nothing')
+        const failureLine = stripAnsi(build.stdout).match(/AFTER_FAILURE_META=(\{[^\n]*\})/)?.[1]
+        assert.equal(failureLine, '{"title":"On demand"}',
+            'a preview that throws puts the row back too')
+
+        const finalLine = stripAnsi(build.stdout).match(/AT_FINALIZE_META=(\{[^\n]*\})/)?.[1]
+        assert.equal(finalLine, '{"title":"On demand"}', 'and still is at the end of the cycle')
 
         assert.equal(existsSync(path.join(workdir, 'out', 'on-demand.html')), false,
             'save: false must not write the file')
@@ -97,6 +137,14 @@ describe('a save:false render records no snapshot', () => {
         assert.ok(claimed.includes('/published/index.html'), 'a real render still records its snapshot')
         assert.ok(!claimed.includes('/on-demand.html'),
             'a render that wrote nothing must not claim a destination')
+
+        const catalog = await readCatalog(workdir)
+        const previewed = catalog.entities.find(e => e.id === '/documents/on-demand.md')
+        assert.ok(previewed, 'the entity itself is untouched, not deleted')
+        assert.equal(previewed.meta?.layout, undefined,
+            'the layout the preview forced must not stick to the catalog row')
+        assert.equal(previewed.destination ?? null, null,
+            'nor the destination it rendered to')
 
         const audit = await runMikser(workdir, ['--audit-output'])
         assert.equal(audit.code, 0, stripAnsi(audit.stdout) + stripAnsi(audit.stderr))
