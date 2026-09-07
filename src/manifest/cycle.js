@@ -58,6 +58,19 @@ onFinalize(async () => {
     }
 
     for await (const { output, entity, deps } of useJournal('Output', [OPERATION.RENDER])) {
+        // A render that wrote NOTHING has no snapshot to record. A snapshot is
+        // the manifest's claim that a file exists at a destination — it is what
+        // --audit-output verifies and what invalidation compares against — so a
+        // `save: false` render (a preview: bytes back to the caller, nothing on
+        // disk) recording one makes the manifest assert a file nobody wrote.
+        //
+        // Observed on a live site: an MCP app rendered on demand left
+        // /internal/customer-registration.html claimed and absent, and the
+        // audit went red for a page that was never supposed to exist. The
+        // entity is simply left unrecorded, which is also the truthful state
+        // for invalidation — nothing was produced, so the next real build has
+        // nothing to reuse.
+        if (entity?.options?.save === false) continue
         if (output?.success && !output.skipped) {
             renderedEntries.push({ entity, deps, metaReads: output.metaReads,
                                    consumedReads: output.consumedReads })
