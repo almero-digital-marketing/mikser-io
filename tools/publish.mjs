@@ -216,10 +216,25 @@ function shippedFiles(dir) {
     try {
         const out = execFileSync('npm', ['pack', '--dry-run', '--json'],
             { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
-        return JSON.parse(out)[0].files.map(f => f.path)
+        return JSON.parse(jsonTail(out))[0].files.map(f => f.path)
     } catch {
         return null              // cannot tell — the caller must not guess
     }
+}
+
+// npm pack --json puts JSON on stdout, and a `prepack` script's own output
+// lands there too — ahead of it. A package that builds an artefact before it
+// packs (mikser-io-mcp-app bundles its app shell) therefore returned a body
+// starting `vite v7.3.6 building…`, JSON.parse threw, and the release was
+// reported as UNDETERMINED and skipped. The package was correct to be
+// skipped rather than guessed at, but the cause was noise, not ambiguity.
+//
+// So: take the last thing in the output that parses as JSON. Scanning from
+// the end rather than the first `[` because build output can contain brackets
+// of its own.
+function jsonTail(out) {
+    const start = out.lastIndexOf('\n[')
+    return start === -1 ? out : out.slice(start + 1)
 }
 
 // Did anything a consumer receives change since the published version?
