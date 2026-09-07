@@ -544,6 +544,25 @@ export function useRenderer(runtime, { defaultTimeout = 30_000 } = {}) {
      * @returns {Promise<{output, entity}>}
      */
     async function render(entity, { timeout = defaultTimeout, catalog = true, save = true } = {}) {
+        // Was this row already in the catalog BEFORE the render? `catalog:
+        // false` means "do not leave a row behind", and that is only the
+        // render's to decide for a row the render created. Asked here, before
+        // the render puts one there.
+        //
+        // Without it, `catalog: false` deleted whatever it was handed: a
+        // preview of an EXISTING entity pruned the real row, so the entity
+        // vanished from the site while its file sat on disk — no change set,
+        // no cycle, and the removal logged only at debug. It cost a day to
+        // find, in a form that rendered once and then answered "Entity not
+        // found".
+        // Imported HERE, not at the top: catalog.js reaches back into this
+        // module, and a static import makes that cycle load-bearing at
+        // module-evaluation time — it surfaced as "Cannot access 'schemas'
+        // before initialization" in three unrelated test files.
+        const preexisting = catalog === false && entity?.id
+            ? Boolean(await (await import('./catalog.js')).findById(entity.id))
+            : false
+
         const result = await new Promise((resolve, reject) => {
             const correlationId = randomUUID()
             // Engine-set fields live under entity.options. The caller's
@@ -585,7 +604,14 @@ export function useRenderer(runtime, { defaultTimeout = 30_000 } = {}) {
             // and wrong for one that did. `catalog: false, save: true`
             // therefore keeps its row, and says so rather than dropping
             // the output on the floor.
-            if (save === false) {
+            if (preexisting) {
+                // Someone else's row. It was here before this render and is
+                // not this render's to remove.
+                useLogger()?.debug(
+                    'render: catalog:false ignored for %s — the entity was already in the catalog',
+                    result.entity.id,
+                )
+            } else if (save === false) {
                 await runtime.delete(result.entity)
             } else {
                 useLogger()?.warn(

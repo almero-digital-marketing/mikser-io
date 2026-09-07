@@ -8,6 +8,7 @@ import path from 'node:path'
 import { parseReferences as parseHbs } from '../../src/plugins/render/hbs.js'
 
 import { useRenderer } from '../../src/render.js'
+import engineRuntime from '../../src/runtime.js'
 
 // Build a minimal runtime-like object exposing the surface useRenderer
 // uses: hooks.completed (array), and process() + update() the test
@@ -289,6 +290,46 @@ describe('useRenderer', () => {
             { catalog: false },
         )
         assert.deepEqual(deletes, [], 'a saved render must keep its row rather than lose its file')
+    })
+
+    // `catalog: false` says "leave no row behind", and that is only the
+    // render's to decide for a row the render created. Handed an entity that
+    // was ALREADY catalogued — every preview of a real entity is one — it used
+    // to delete it: the entity vanished from the site with its file still on
+    // disk, no change set, no cycle, and the removal logged at debug. Cost a
+    // day to find, as a form that rendered once and then answered "Entity not
+    // found".
+    it('catalog: false does not prune a row that was already in the catalog', async () => {
+        const priorCatalog = engineRuntime.catalog
+        engineRuntime.catalog = { byId: new Map([['/existing', { id: '/existing', collection: 'documents' }]]) }
+        try {
+            const { runtime, deletes } = pruneHarness()
+            const { render } = useRenderer(runtime)
+            await render(
+                { id: '/existing', type: 'document', collection: 'documents' },
+                { catalog: false, save: false },
+            )
+            assert.deepEqual(deletes, [], 'someone else\'s row is not this render\'s to remove')
+        } finally {
+            engineRuntime.catalog = priorCatalog
+        }
+    })
+
+    it('still prunes a row the render itself created', async () => {
+        const priorCatalog = engineRuntime.catalog
+        engineRuntime.catalog = { byId: new Map() }   // nothing pre-existing
+        try {
+            const { runtime, deletes } = pruneHarness()
+            const { render } = useRenderer(runtime)
+            await render(
+                { id: '/transient', type: 'document', collection: 'documents' },
+                { catalog: false, save: false },
+            )
+            assert.equal(deletes.length, 1, 'the on-demand render still cleans up after itself')
+            assert.equal(deletes[0].id, '/transient')
+        } finally {
+            engineRuntime.catalog = priorCatalog
+        }
     })
 
     it('ambiguous falsey values are not an opt-out', async () => {
