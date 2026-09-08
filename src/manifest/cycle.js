@@ -57,7 +57,28 @@ onFinalize(async () => {
         deletedIds.push(entity.id)
     }
 
+    // Every destination claimed by a render task this cycle — whether it
+    // succeeded, was skipped as current, or failed.
+    //
+    // This is deliberately WIDER than renderedEntries, and the width is the
+    // safety. The staleness test below asks "is this row's destination one its
+    // entity still claims", and all three outcomes answer yes:
+    //
+    //   skipped   the manifest said the output was already current, which is
+    //             an assertion that it BELONGS. One entity can match several
+    //             layouts, and a dependency change invalidates them
+    //             independently — so a cycle where layout A re-renders and
+    //             layout B is skipped is ordinary, and reading B's silence as
+    //             "no longer produced" would unlink a live page.
+    //   failed    a failed render writes no snapshot on purpose, so the last
+    //             good bytes survive. Treating the gap as abandonment
+    //             destroys exactly what that rule protects.
+    const claimedByRenderTasks = new Map()
     for await (const { output, entity, deps } of useJournal('Output', [OPERATION.RENDER])) {
+        if (entity?.id && entity.destination) {
+            if (!claimedByRenderTasks.has(entity.id)) claimedByRenderTasks.set(entity.id, new Set())
+            claimedByRenderTasks.get(entity.id).add(entity.destination)
+        }
         // A catalog-neutral render leaves no snapshot. A snapshot is the
         // manifest's claim about a CATALOG ENTITY's output — it is what
         // --audit-output verifies and what invalidation compares against — and
@@ -129,13 +150,25 @@ onFinalize(async () => {
 
     // 2b. Pagination shrunk — drop children whose destination wasn't
     // re-emitted this cycle.
-    const childrenToDelete = []   // [{id, destination, reason}]
+    const snapshotsToDelete = []   // [{id, destination}] — rows to drop by PK
+    // Ids that DEPART with their snapshot: a pagination child that no longer
+    // exists. Feeds `goingAway`, which asks "is this destination still claimed
+    // by something that survives" — an id-level question, and the right one
+    // for an entity that is gone.
+    const departingIds = new Set()
+    // Rows dropped for a destination their own entity no longer produces, as
+    // `id \t destination`. Deliberately NOT an id: an entity whose
+    // destination merely MOVED is still very much here, and calling it
+    // departed would let another entity's cleanup unlink a destination this
+    // one still claims.
+    const droppedClaims = new Set()
     for (const [parentId, keep] of newDestinationsByParent) {
         const rows = m._stmtSelectByParent.all(parentId)
         for (const row of rows) {
             if (keep.has(row.destination)) continue
             filesToUnlink.push({ destination: row.destination, reason: 'Pagination shrunk' })
-            childrenToDelete.push({ id: row.id, destination: row.destination })
+            snapshotsToDelete.push({ id: row.id, destination: row.destination })
+            departingIds.add(row.id)
         }
     }
 
@@ -144,14 +177,65 @@ onFinalize(async () => {
         const rows = m._stmtSelectByParent.all(parentId)
         for (const row of rows) {
             filesToUnlink.push({ destination: row.destination, reason: 'Pagination dropped' })
-            childrenToDelete.push({ id: row.id, destination: row.destination })
+            snapshotsToDelete.push({ id: row.id, destination: row.destination })
+            departingIds.add(row.id)
         }
     }
 
-    // Everything whose snapshot this pass removes: deleted entities, their
-    // paginated children, and children dropped by a pagination shrink.
+    // 2c'. Destination moved — a SURVIVING entity no longer produces a
+    // destination it used to.
+    //
+    // Change a layout's `destination:` template, or flip `cleanUrls`, and the
+    // entity keeps its id and renders to a new path. Nothing before this
+    // noticed: the snapshot table is keyed by (id, destination), so recording
+    // the new render INSERTS a second row rather than replacing the first, and
+    // the old row goes on claiming the old file forever.
+    //
+    // Worse than it sounds, because the state is self-consistent and therefore
+    // silent: the stale file is still on disk, still matches the hash its own
+    // render recorded, so --audit-output reports OK — 0 missing, 0 orphaned —
+    // while the site serves a page the project no longer produces. Verified on
+    // a two-build fixture: one entity, two snapshots, two files, green audit.
+    //
+    // The comparison is against the SET of destinations the id claimed this
+    // cycle, never a single value. One entity can legitimately claim several —
+    // one per matched layout — and taking the last one to render as "the"
+    // destination would delete the others' output on every build. See
+    // claimedByRenderTasks above for why a skipped or failed task counts as a
+    // claim.
+    //
+    // Only ids that had a render TASK this cycle are eligible. An entity that
+    // stopped producing output altogether — its `layout:` removed, say — never
+    // reaches this drain at all, so its stale claim survives here. That is
+    // left alone on purpose: the two states are indistinguishable from this
+    // side. An asset whose preset threw and an entity that no longer renders
+    // both arrive with no task and no destination on their catalog row, and
+    // pruning on that signal deleted the good derivative a failed preset is
+    // explicitly meant to preserve. Fixing it needs the dispatcher to say
+    // "matched nothing", which is knowledge this module does not have.
+    for (const [id, claimed] of claimedByRenderTasks) {
+        if (deleted.has(id)) continue
+        for (const row of m._stmtDestinationsById.all(id)) {
+            if (claimed.has(row.destination)) continue
+            // Paginated children belong to 2b and 2c, which reach them by
+            // parent. Reaching the same rows from here would agree with them
+            // rather than fight them — a moved child destination is stale by
+            // either route — so this is ownership, not a guard against a
+            // known failure. Kept because one owner per row is easier to
+            // reason about than two that happen to concur.
+            if (row.parent) continue
+            filesToUnlink.push({ destination: row.destination, reason: 'Destination moved' })
+            snapshotsToDelete.push({ id: row.id, destination: row.destination })
+            droppedClaims.add(`${row.id}\t${row.destination}`)
+        }
+    }
+
+    // Ids whose snapshots this pass removes ENTIRELY: deleted entities and
+    // their paginated children. Not the moved claims — those belong to
+    // entities that are still here, and `droppedClaims` carries them at
+    // (id, destination) granularity instead.
     const goingAway = new Set(deleted)
-    for (const { id } of childrenToDelete) goingAway.add(id)
+    for (const id of departingIds) goingAway.add(id)
     for (const parentId of deleted) {
         for (const row of m._stmtSelectByParent.all(parentId)) goingAway.add(row.id)
     }
@@ -204,7 +288,9 @@ onFinalize(async () => {
         // snapshot as a claimant would keep every shrunk page on disk
         // forever.
         const stillClaimed = m._stmtSelectByDestination.all(destination)
-            .filter(row => row.id !== undefined && !goingAway.has(row.id))
+            .filter(row => row.id !== undefined
+                && !goingAway.has(row.id)
+                && !droppedClaims.has(`${row.id}\t${destination}`))
         if (stillClaimed.length) {
             // Keep the file — deleting a live page's output is worse than any
             // staleness — but do NOT let the state go quiet. The bytes on
@@ -261,7 +347,7 @@ onFinalize(async () => {
             m._stmtDeleteByIdOrParent.run(id, id)
         }
         // 3b. Pagination children cleanup.
-        for (const { id, destination } of childrenToDelete) {
+        for (const { id, destination } of snapshotsToDelete) {
             m._stmtDeleteByPK.run(id, destination)
         }
         // 3c. Record successful renders.

@@ -82,6 +82,13 @@ export function prepareStatements(db) {
     const stmtSelectByParent = db.prepare(`
         SELECT id, destination FROM mikser_snapshots WHERE parent = ?
     `)
+    // Every destination one entity claims. An entity legitimately claims
+    // several — one per matched layout, and one per page when paginated — so
+    // "the destinations this id produced" is a SET, never a single value, and
+    // that is the whole reason this query exists separately from stmtLookup.
+    const stmtDestinationsById = db.prepare(`
+        SELECT id, destination, parent FROM mikser_snapshots WHERE id = ?
+    `)
     const stmtSelectAll = db.prepare(`
         SELECT id, destination, inputHash, inputParts, outputHash, refClosure, metaReads, consumedReads, renderedAt, parent
         FROM mikser_snapshots
@@ -179,6 +186,7 @@ export function prepareStatements(db) {
         stmtSelectByIdOrParent,
         stmtDeleteByIdOrParent,
         stmtSelectByParent,
+        stmtDestinationsById,
         stmtSelectAll,
         stmtCount,
         stmtEntityInputHashes,
