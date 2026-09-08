@@ -9,6 +9,7 @@ import _ from 'lodash'
 import realRuntime from '../src/runtime.js'
 import { resetServices } from '../src/services.js'
 import { matchEntity, normalize, changeExtension, getFormatInfo, checksum, AbortError } from '../src/utils/index.js'
+import sift from 'sift'
 
 const OPERATION = {
     CREATE: 'create',
@@ -130,6 +131,23 @@ export function createHarness({
         }
     }
 
+    // One matcher for findEntity / findEntities / iterateEntities, and it is
+    // sift — the same library catalog.js runs queries through, so a filter
+    // that works in a unit test works in a build.
+    //
+    // These used to compare `e[key] === value` per key, which silently matched
+    // NOTHING for any mongo-style operator: `{ collection: { $ne: 'assets' } }`
+    // tested a string against an object and every entity failed. A plugin
+    // walking the catalog that way got an empty result and no error, so its
+    // test either passed vacuously or failed somewhere far from the cause —
+    // which is what happened to the assets orphan sweep, whose whole job is
+    // deciding what has no source.
+    const matching = (query) => {
+        if (!query) return [...entities]
+        if (typeof query === 'function') return entities.filter(query)
+        return entities.filter(sift(query))
+    }
+
     const core = {
         runtime,
         useLogger: () => logger,
@@ -169,28 +187,19 @@ export function createHarness({
         findEntity: async (query) => {
             if (!query) return entities[0]
             if (typeof query === 'function') return entities.find(query)
-            return entities.find(e => Object.entries(query).every(([k, v]) => e[k] === v))
+            return matching(query)[0]
         },
         // Synchronous PK lookup mirroring catalog.js's findById. Layouts'
         // onBeforeRender hydrates dispatch ids through this — the harness
         // serves from the same in-memory entities array.
         findById: (id) => entities.find(e => e?.id === id) ?? catalogStub.byId.get(id),
-        findEntities: async (query) => {
-            if (!query) return [...entities]
-            if (typeof query === 'function') return entities.filter(query)
-            return entities.filter(e => Object.entries(query).every(([k, v]) => e[k] === v))
-        },
+        findEntities: async (query) => matching(query),
         iterateEntities: async function* (query) {
             // Stub — yields the same set findEntities would return,
             // one entity at a time. Real impl in catalog.js chunks via
             // sqlite; the harness doesn't need that fidelity because
             // unit-test corpora are tiny.
-            const filtered = !query
-                ? [...entities]
-                : (typeof query === 'function'
-                    ? entities.filter(query)
-                    : entities.filter(e => Object.entries(query).every(([k, v]) => e[k] === v)))
-            for (const e of filtered) yield e
+            for (const e of matching(query)) yield e
         },
 
         // Rendering & postprocessing — capture for assertions
