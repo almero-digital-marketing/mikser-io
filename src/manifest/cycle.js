@@ -122,6 +122,16 @@ onFinalize(async () => {
     // transaction because better-sqlite3's transaction() callback is
     // sync-only.
     const m = sharedManifest
+    // Nothing to reconcile against, so nothing below means anything.
+    //
+    // Every other statement that touches the manifest sits inside a loop over
+    // journal entries, so this hook used to survive a null one by never
+    // reaching it. The no-output pass reads `_noOutputIds` unconditionally,
+    // which turned that latent case into a TypeError — and it is reachable:
+    // a plugin can schedule a cycle (createdHook does) in a process where the
+    // manifest's own onLoaded never ran, which is exactly how mikser-io-forms'
+    // tests found it.
+    if (!m) return
 
     // 2a. Stage file unlinks for deleted entities + their children.
     const deleted = new Set(deletedIds)
