@@ -117,4 +117,107 @@ describe('an entity whose destination moves', () => {
             await cleanup(wd)
         }
     })
+    it('drops the claim when the entity stops rendering altogether', async () => {
+        // The other half of the same staleness, and the one the manifest
+        // cannot see on its own: with no render task there is nothing to
+        // compare a claim against. mikser-io-layouts reports it instead —
+        // "I dispatched this and matched no layout" — through
+        // manifest.recordNoOutput.
+        const wd = freshWorkdir('renders-nothing')
+        try {
+            await setupFixture(wd, {
+                'mikser.config.js': CONFIG,
+                'layouts/page.hbs': '<i>{{entity.meta.title}}</i>',
+                'documents/thing.md': '---\nlayout: page\ntitle: Thing\n---\nbody\n',
+            })
+            let build = await runMikser(wd)
+            assert.equal(build.code, 0, build.combined)
+            assert.deepEqual(await claims(wd), ['/documents/thing.md -> /thing/index.html'])
+            assert.ok(existsSync(path.join(wd, 'out', 'thing', 'index.html')))
+
+            // The layout declaration goes away. The entity survives and is
+            // re-imported; nothing renders it any more.
+            await writeFile(path.join(wd, 'documents', 'thing.md'), '---\ntitle: Thing\n---\nbody\n')
+            build = await runMikser(wd)
+            assert.equal(build.code, 0, build.combined)
+
+            assert.deepEqual(await claims(wd), [],
+                'nothing produces that page now, so nothing may claim it')
+            assert.equal(existsSync(path.join(wd, 'out', 'thing', 'index.html')), false,
+                'and the page itself is gone')
+
+            const audit = await runMikser(wd, ['--audit-output'])
+            assert.equal(audit.code, 0, stripAnsi(audit.stdout))
+            assert.match(stripAnsi(audit.stdout), /Audit OK: 0 snapshots/, stripAnsi(audit.stdout))
+        } finally {
+            await cleanup(wd)
+        }
+    })
+
+    it('keeps the page when the declared layout merely cannot be found', async () => {
+        // A typo, or a layout file renamed. The entity still says which
+        // layout it wants, so this is an error to fix rather than a page to
+        // withdraw — and mikser's rule through an error is that the last good
+        // output survives. Without the distinction, renaming one layout file
+        // would delete every page that names it.
+        const wd = freshWorkdir('renders-nothing-typo')
+        try {
+            await setupFixture(wd, {
+                'mikser.config.js': CONFIG,
+                'layouts/page.hbs': '<i>{{entity.meta.title}}</i>',
+                'documents/thing.md': '---\nlayout: page\ntitle: Thing\n---\nbody\n',
+            })
+            let build = await runMikser(wd)
+            assert.equal(build.code, 0, build.combined)
+            const page = path.join(wd, 'out', 'thing', 'index.html')
+            assert.ok(existsSync(page))
+
+            await writeFile(path.join(wd, 'documents', 'thing.md'),
+                '---\nlayout: pge\ntitle: Thing\n---\nbody\n')
+            build = await runMikser(wd)
+            assert.equal(build.code, 0, build.combined)
+            assert.match(stripAnsi(build.combined), /Layout not found/,
+                'precondition: it really did fail to resolve')
+
+            assert.ok(existsSync(page),
+                'a page must not be taken down on the strength of a typo')
+            assert.deepEqual(await claims(wd), ['/documents/thing.md -> /thing/index.html'],
+                'and the snapshot that describes it stays with it')
+        } finally {
+            await cleanup(wd)
+        }
+    })
+    it('takes the paginated children with it', async () => {
+        // A paginated entity that stops rendering leaves children behind
+        // unless they are collected here. The pagination passes reach children
+        // by parent, but only when a render told them this cycle's page count
+        // — and an entity that renders nothing tells them nothing, so for it
+        // they never fire.
+        const wd = freshWorkdir('renders-nothing-paginated')
+        try {
+            await setupFixture(wd, {
+                'mikser.config.js': CONFIG,
+                'layouts/list.hbs': '<i>page {{document.page}} of {{document.pages}}</i>',
+                'layouts/list.js': 'export async function load() { return { pages: 3 } }',
+                'documents/archive.md': '---\nlayout: list\ntitle: Archive\n---\nbody\n',
+            })
+            let build = await runMikser(wd)
+            assert.equal(build.code, 0, build.combined)
+            const before = await claims(wd)
+            assert.equal(before.length, 3, `precondition: three pages\n${before.join('\n')}`)
+            const files = before.map(c => path.join(wd, 'out', c.split(' -> ')[1]))
+            for (const f of files) assert.ok(existsSync(f), `precondition: ${f} written`)
+
+            await writeFile(path.join(wd, 'documents', 'archive.md'), '---\ntitle: Archive\n---\nbody\n')
+            build = await runMikser(wd)
+            assert.equal(build.code, 0, build.combined)
+
+            assert.deepEqual(await claims(wd), [], 'every page claim goes, not just page one')
+            for (const f of files) {
+                assert.equal(existsSync(f), false, `${f} must be gone`)
+            }
+        } finally {
+            await cleanup(wd)
+        }
+    })
 })

@@ -204,29 +204,52 @@ onFinalize(async () => {
     // claimedByRenderTasks above for why a skipped or failed task counts as a
     // claim.
     //
-    // Only ids that had a render TASK this cycle are eligible. An entity that
-    // stopped producing output altogether — its `layout:` removed, say — never
-    // reaches this drain at all, so its stale claim survives here. That is
-    // left alone on purpose: the two states are indistinguishable from this
-    // side. An asset whose preset threw and an entity that no longer renders
-    // both arrive with no task and no destination on their catalog row, and
-    // pruning on that signal deleted the good derivative a failed preset is
-    // explicitly meant to preserve. Fixing it needs the dispatcher to say
-    // "matched nothing", which is knowledge this module does not have.
-    for (const [id, claimed] of claimedByRenderTasks) {
+    // Two ways in, and the difference is who observed what.
+    //
+    // An entity with render tasks is compared against what they claimed —
+    // that is the moved-destination case above.
+    //
+    // An entity that produces nothing at all has no tasks to compare against,
+    // so it cannot be recognised from here: an asset whose preset threw looks
+    // exactly the same, and pruning on that resemblance deletes the good
+    // derivative a failed preset exists to keep. So the dispatcher says it
+    // outright, through manifest.recordNoOutput, and an empty claim set means
+    // every destination the entity used to hold is stale. Reported by
+    // mikser-io-layouts when an entity it dispatched matched no layout; the
+    // call is general, and any other dispatcher can make it.
+    const claims = new Map(claimedByRenderTasks)
+    for (const id of m._noOutputIds) {
+        // A task contradicts the report — something did render, so believe
+        // what happened over what was predicted.
+        if (!claims.has(id)) claims.set(id, new Set())
+    }
+    m._noOutputIds.clear()
+
+    for (const [id, claimed] of claims) {
         if (deleted.has(id)) continue
-        for (const row of m._stmtDestinationsById.all(id)) {
+        // An entity that renders nothing takes its paginated children with
+        // it. There are no tasks left to own them, and 2b/2c reach children
+        // only when a render told them this cycle's page count — so for this
+        // entity they never fire, and the children would be left claiming
+        // files nothing produces. Where tasks DID run, children stay with
+        // 2b/2c, which know about shrinking in a way this pass does not.
+        const rows = claimed.size
+            ? m._stmtDestinationsById.all(id)
+            : m._stmtSelectByIdOrParent.all(id, id)
+        for (const row of rows) {
             if (claimed.has(row.destination)) continue
-            // Paginated children belong to 2b and 2c, which reach them by
-            // parent. Reaching the same rows from here would agree with them
-            // rather than fight them — a moved child destination is stale by
-            // either route — so this is ownership, not a guard against a
-            // known failure. Kept because one owner per row is easier to
-            // reason about than two that happen to concur.
-            if (row.parent) continue
-            filesToUnlink.push({ destination: row.destination, reason: 'Destination moved' })
+            if (claimed.size && row.parent) continue
+            filesToUnlink.push({
+                destination: row.destination,
+                reason: claimed.size ? 'Destination moved' : 'Entity renders nothing',
+            })
             snapshotsToDelete.push({ id: row.id, destination: row.destination })
-            droppedClaims.add(`${row.id}\t${row.destination}`)
+            if (row.parent) {
+                // A child is genuinely gone, not moved — its id departs.
+                departingIds.add(row.id)
+            } else {
+                droppedClaims.add(`${row.id}\t${row.destination}`)
+            }
         }
     }
 

@@ -771,6 +771,29 @@ layout it went through. Entities with no layout — a copied asset, a
 `files()` passthrough — stay out, or the answer would be "everything,
 always", which is the same non-answer as "nothing" with the sign flipped.
 
+**`recordNoOutput(id)` — the one write on this facade a plugin should
+make.** Everything above answers questions; this one tells the manifest
+something only a dispatcher can know: that it looked at an entity and found
+nothing to render it with. The manifest then drops the snapshots that entity
+still holds, and unlinks the files they claim, in its own finalize
+transaction — so the cleanup gets the same guard as every other: a
+destination another entity still claims is never taken away.
+
+It exists because the two states that matter are indistinguishable from
+inside the manifest. An entity whose `layout:` was removed and an asset whose
+preset threw both arrive with no successful render and no destination on their
+catalog row, and pruning on that resemblance deletes the good derivative a
+failed preset exists to keep. So the call is only correct for "I dispatched
+this and matched nothing" — never for a failure, and never for a declaration
+that could not be resolved, since mikser keeps the last good output through an
+error rather than taking the page down. `mikser-io-layouts` makes it; any
+other dispatcher can.
+
+Without it, an entity that stops producing output leaves its page on disk with
+a snapshot still vouching for it — and because the file still matches the hash
+its own render recorded, `--audit-output` reads OK while the site serves
+something the source no longer asks for.
+
 ### `runtime.provenance`
 
 Where a value was **written** — source file, field path, line and column.

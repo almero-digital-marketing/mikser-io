@@ -93,6 +93,10 @@ export function createManifest(db) {
         stmtSnapshotsWithLayout,
         edgeCandidates,
     } = prepareStatements(db)
+    // Ids a dispatcher reported as producing nothing this cycle. Owned by
+    // this instance rather than the module, so a test that builds its own
+    // manifest gets its own set. Drained and cleared by onFinalize.
+    const noOutputIds = new Set()
     const manifest = {
         // Look up a previously-recorded entry by entity (or by an
         // object with `{id, destination}`). Returns the snapshot, or
@@ -549,6 +553,29 @@ export function createManifest(db) {
         },
 
         // Drop all snapshots owned by entity id (direct outputs and any
+        // Report that a dispatcher looked at this entity and found nothing
+        // to render it with — no layout matched, no preset claimed it.
+        //
+        // The distinction this exists to draw is between "produced no output
+        // this cycle" and "no longer produces output at all". They are
+        // indistinguishable from inside the manifest: an asset whose preset
+        // threw and an entity whose `layout:` was removed both arrive with no
+        // successful render and no destination on their catalog row, and
+        // guessing from that signal deletes the good derivative a failed
+        // preset is explicitly meant to keep. Only the dispatcher knows which
+        // it is, so only the dispatcher can say.
+        //
+        // Recorded, not applied. The removal joins onFinalize's single
+        // transaction and its unlink path, so it gets the same
+        // still-claimed-by-a-survivor guard as every other cleanup — a
+        // destination two entities write is not this one's to take away.
+        //
+        // Per cycle: onFinalize clears the set after draining it. Saying it
+        // twice for one entity is harmless.
+        recordNoOutput(id) {
+            if (id) noOutputIds.add(id)
+        },
+
         // paginated children whose `parent` is set to this id). Returns
         // the destinations that were removed so callers can unlink the
         // corresponding files when desired. Two queries (SELECT for
@@ -795,6 +822,7 @@ export function createManifest(db) {
         _stmtSelectByIdOrParent: stmtSelectByIdOrParent,
         _stmtDeleteByIdOrParent: stmtDeleteByIdOrParent,
         _stmtSelectByParent:     stmtSelectByParent,
+        _noOutputIds:            noOutputIds,
         _stmtDestinationsById:   stmtDestinationsById,
         _stmtSelectByDestination: stmtSelectByDestination,
         _stmtDeleteByDestination: stmtDeleteByDestination,
