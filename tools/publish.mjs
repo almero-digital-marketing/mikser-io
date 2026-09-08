@@ -84,6 +84,7 @@ import { readdirSync, readFileSync, existsSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import path from 'node:path'
 import process from 'node:process'
+import { releaseDecision } from './release-decision.mjs'
 
 const argv = process.argv.slice(2)
 const flag = (name) => argv.includes(`--${name}`)
@@ -330,39 +331,22 @@ async function main() {
         const doc = docs.get(name)
         const published = Boolean(doc.versions[pkg.version])
         const wanted = !ONLY || ONLY.has(name)
-        // Only asked when it can change the answer: an unpublished version is
-        // being released regardless of what the diff says.
-        // The change check only governs a PATCH. A major or minor bump is a
-        // deliberate release decision — it is how the family aligned on 11 —
-        // and second-guessing it by diffing would refuse the very release
-        // someone just chose to make. Only same-major.minor successors have to
-        // prove they changed something, which is exactly the churn this
-        // prevents: 36 republishes because one number moved.
-        const line = (v) => String(v ?? '').split('.').slice(0, 2).join('.')
-        const samePatchLine = doc.latest && line(pkg.version) === line(doc.latest)
-        const touched = published || ALL || !samePatchLine
-            ? null
-            : changedSincePublished(pkg, doc.latest)
-        if (touched === null && !published && !ALL && samePatchLine) undetermined.push(name)
-
-        let skip = null
-        if (published) {
-            // Published at this number, but has the code moved since? That is
-            // a package waiting for someone to decide what kind of release it
-            // is — which is the judgement this tool deliberately does not make.
-            const sinceOwn = changedSincePublished(pkg, pkg.version)
-            skip = sinceOwn === true
-                ? `changed since ${pkg.version} — needs a bump (npm version patch) before it can release`
-                : `already published at ${pkg.version}`
-        }
-        else if (!wanted) skip = 'not in --only'
-        else if (!pkg.hasGit && !DIRECT) skip = 'no git repository — cannot tag'
-        else if (touched === false) skip = `unchanged since ${doc.latest} — nothing a consumer receives moved`
-        else if (touched === null && samePatchLine) {
-            skip = pkg.hasGit && git(pkg.dir, 'status', '--porcelain')
-                ? 'uncommitted changes — commit them, then this can tell what moved'
-                : `cannot tell what changed since ${doc.latest} — left alone`
-        }
+        // Thunks, not values: each of these costs a git diff plus an
+        // `npm pack`, and the decision only asks when the answer can change
+        // the outcome.
+        const { skip, undetermined: cannotTell } = releaseDecision({
+            version: pkg.version,
+            latest: doc.latest,
+            isPublished: published,
+            wanted,
+            hasGit: pkg.hasGit,
+            all: ALL,
+            direct: DIRECT,
+            changedSinceLatest: () => changedSincePublished(pkg, doc.latest),
+            changedSinceOwn: () => changedSincePublished(pkg, pkg.version),
+            isDirty: () => Boolean(pkg.hasGit && git(pkg.dir, 'status', '--porcelain')),
+        })
+        if (cannotTell) undetermined.push(name)
         plan.push({ ...pkg, published, skip })
     }
 
