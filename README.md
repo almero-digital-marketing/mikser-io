@@ -245,7 +245,7 @@ npm install mikser-io
 ```bash
 npx mikser              # one-shot build
 npx mikser --watch      # incremental dev loop
-npx mikser --server     # build + serve at :3001
+npx mikser --server     # build + serve on a free port (or --server 3001 to name one)
 ```
 
 For a working starter — config with a real plugin set, sample `documents/`, expected output — see [Getting Started](./docs/getting-started.md). Or skip straight to "add mikser to this app" via the [Claude Code plugin](#built-for-ai-assisted-development) above.

@@ -23,6 +23,7 @@
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { networkInterfaces } from 'node:os'
+import { createServer } from 'node:net'
 
 import runtime from './runtime.js'
 import { useLogger } from './engine/index.js'
@@ -52,10 +53,53 @@ const STREAMING_REQUEST_TIMEOUT = 2 * 60 * 60 * 1000
 
 export function attachServerCliOptions(commander) {
     commander
-        ?.option('-s --server [port]', 'start an Express server on the given port (defaults to 3001)')
+        ?.option('-s --server [port]',
+            'start an Express server on the given port; omit it, or pass 0, for a free one')
         .option('--cors [origin]', 'restrict server CORS to a specific origin (default *)')
         .option('--no-cors', 'disable server CORS headers')
         .option('-u --url <url>', 'public URL where this mikser is reachable (e.g. https://blog.me.com). Webhook-capable plugins use https URLs for push notifications; other plugins use this when generating absolute URLs (email tracking links, forms share links, MCP previews, etc.).')
+}
+
+// What a bare `--server` asks for: a port nothing is using.
+//
+// It used to be 3001, and 3001 is a number two people on one machine both
+// get. The second one dies on a collision that has nothing to do with either
+// project, and neither of them can pick a different number without asking
+// the other — while the one thing they both actually want is "a port".
+//
+// A named port stays exactly as it was: `--server 3002` binds 3002 or fails
+// saying why. This only changes what happens when nobody named one.
+const DEFAULT_PORT = 0
+
+// The port a given `--server` value asks for, with 0 meaning "a free one".
+//
+// Exported for its own test: the trap here is that 0 is falsy, and the
+// previous `Number(x) || 3001` turned an explicit `--server 0` into 3001 —
+// exactly the collision it was asking to avoid. Testing it through the
+// lifecycle hook would mean importing express, which is not a dependency of
+// this package.
+export function requestedPort(server) {
+    const asked = server === true ? DEFAULT_PORT : Number(server)
+    return Number.isInteger(asked) && asked >= 0 ? asked : DEFAULT_PORT
+}
+
+// A port nothing is listening on, according to the OS.
+//
+// Binds to 0, reads what it was given, and lets it go. There is a gap between
+// releasing it and the real listen below, so this is a strong preference
+// rather than a reservation — if something takes the port in between, the
+// EADDRINUSE handler further down says so plainly instead of pretending.
+// Narrow enough not to matter on the machine this exists for; not narrow
+// enough to claim it cannot happen.
+export async function freePort() {
+    return new Promise((resolve, reject) => {
+        const probe = createServer()
+        probe.once('error', reject)
+        probe.listen(0, () => {
+            const { port } = probe.address()
+            probe.close(() => resolve(port))
+        })
+    })
 }
 
 // Wire the server lifecycle hooks. Called by engine.js's setup() AFTER
@@ -80,9 +124,29 @@ export function setupServer() {
         })
         runtime.options.app = express()
         ownsApp = true
-        runtime.options.port = runtime.options.server === true
-            ? 3001
-            : Number(runtime.options.server) || 3001
+        runtime.options.port = requestedPort(runtime.options.server)
+
+        if (runtime.options.port === 0) {
+            // Resolved HERE rather than by handing 0 to listen(), even though
+            // the OS would assign one either way, because the port is read
+            // long before the bind: routes.js builds every operator-facing
+            // route URL from it, mikser-io-ngrok reads it to know what to
+            // tunnel. Worse, `options.server` itself is tested for
+            // truthiness in four places across three packages — the engine's
+            // own instance registration, the server bring-up below,
+            // mikser-io-ngrok, and mikser-io-post-email, whose delivery drain
+            // only runs when `watch || server`. A literal 0 left in place is
+            // falsy in all of them, so it would have turned the server off,
+            // and stopped form emails, on its way to choosing a port.
+            //
+            // So it becomes a real number as early as it can, and everything
+            // downstream sees exactly what it would have seen from
+            // `--server <that number>`.
+            const found = await freePort()
+            runtime.options.server = found
+            runtime.options.port = found
+            logger.info('Server port: %d (nothing named one, so this is a free port)', found)
+        }
         logger.debug('Server starting on port %d', runtime.options.port)
 
         // Trust-proxy: when mikser is behind a reverse proxy (nginx,
