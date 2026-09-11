@@ -27,6 +27,15 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # A hung test must not cost six hours.
+    #
+    # Without this the job runs to GitHub's own limit, reporting nothing:
+    # a flaky teardown in one suite sat on `npm test` for seventeen
+    # minutes before anyone looked, and would have sat there all day.
+    # The longest suite in the family is a couple of minutes including
+    # install, so fifteen is generous and still fails while someone is
+    # still watching.
+    timeout-minutes: 15
     permissions:
       contents: read
       # The whole mechanism. Without it npm has nothing to verify and the
