@@ -56,6 +56,23 @@ export function routeLocation(displayPath) {
     return origin ? `${origin}${displayPath}` : displayPath
 }
 
+// The registered route a request path falls inside, or null.
+//
+// Longest prefix wins, so a mount nested under another ('/drive/notes' under
+// '/drive') answers for its own requests rather than its parent's. Exported
+// because the CORS middleware needs the same answer Express will reach, and a
+// second implementation of "which mount is this" would drift from this one.
+export function routeFor(requestPath) {
+    if (!requestPath) return null
+    let best = null
+    for (const route of runtime.routes ?? []) {
+        const base = route.path
+        if (requestPath !== base && !requestPath.startsWith(`${base}/`)) continue
+        if (!best || base.length > best.path.length) best = route
+    }
+    return best
+}
+
 // Declare a mounted route. Records the proxy-relevant descriptor on
 // runtime.routes AND emits the standard mount log.
 //
@@ -70,6 +87,14 @@ export function routeLocation(displayPath) {
 //                 facade must disable buffering for it (Caddy
 //                 flush_interval -1, nginx proxy_buffering off).
 //                 Default false.
+//   methods       the HTTP verbs this mount actually serves. Two
+//                 consequences, and the second one is load-bearing:
+//                 CORS advertises these for the route instead of a
+//                 fixed five, and listing OPTIONS declares that the
+//                 mount answers OPTIONS ITSELF — so the global
+//                 preflight steps aside rather than terminating it.
+//                 Default null, meaning "ordinary REST verbs, and the
+//                 preflight is CORS's to answer".
 //   label         log prefix. Defaults to `plugin`.
 //   detail        optional already-formatted log suffix, e.g.
 //                 '(ops=[list,subscribe])'.
@@ -99,6 +124,7 @@ export function registerRoute({
     plugin,
     reachability = 'public',
     streaming = false,
+    methods = null,
     label,
     detail,
     displayPath,
@@ -112,7 +138,12 @@ export function registerRoute({
         )
     }
 
+    if (methods != null && (!Array.isArray(methods) || methods.some(m => typeof m !== 'string'))) {
+        throw new Error('registerRoute: `methods` must be an array of verb strings')
+    }
+
     const descriptor = { path, plugin, reachability, streaming }
+    if (methods) descriptor.methods = methods.map(m => m.toUpperCase())
 
     // Dedup by path — a re-register (same path) replaces rather than
     // duplicates. Mounts happen once per process, but this keeps the

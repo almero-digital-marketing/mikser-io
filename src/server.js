@@ -28,6 +28,7 @@ import { createServer } from 'node:net'
 import runtime from './runtime.js'
 import { useLogger } from './engine/index.js'
 import { onInitialized, onLoad, onLoaded } from './lifecycle.js'
+import { routeFor } from './routes.js'
 
 // Every non-loopback IPv4 address this machine answers on.
 //
@@ -217,11 +218,48 @@ export function setupServer() {
             // `origin: false` is how the cors package emits no CORS headers at all, which is
             // what --no-cors / config.server.cors:false asks for.
             if (!configured) return callback(null, { origin: false })
+
+            // The mount this request falls inside, if any. Asked per request
+            // because routes are registered at onLoaded and this middleware
+            // at onLoad — it is mounted before any of them exist, and every
+            // request arrives long after they all do.
+            const route = routeFor(req.path ?? req.url)
+
+            // Does that mount answer OPTIONS itself?
+            //
+            // The cors package defaults to preflightContinue: false, so it
+            // ENDS every OPTIONS in the process — 204, CORS headers, no
+            // next(). For a browser preflight that is exactly right, and it is
+            // what /mcp and /app want: their clients are browsers completing a
+            // Streamable HTTP handshake, which is why the mcp plugin pushes
+            // mcp-session-id into corsAllowHeaders.
+            //
+            // WebDAV is not that. The Microsoft WebDAV redirector decides
+            // whether a URL is a share at all from the `DAV:` header on
+            // OPTIONS — it is DISCOVERY, not a preflight. Answering it here
+            // returned 204 with no DAV header and five REST verbs, so Explorer
+            // reported ERROR_BAD_NET_NAME (0x80070043) and never even asked
+            // for credentials. Every other DAV client works, because Finder,
+            // curl, Cyberduck and gvfs do not gate on that header — so this
+            // read as "WebDAV is broken on Windows" with the mount logged
+            // happily and a 204 that looks like a normal preflight.
+            //
+            // nephele already computes the right answer and had it thrown
+            // away: its OPTIONS builds `DAV: 1, 3, 2` and an Allow list with
+            // PROPFIND, LOCK and the rest.
+            const ownsPreflight = Boolean(route?.methods?.includes('OPTIONS'))
+
             callback(null, {
                 origin:         configured === true ? '*' : String(configured),
-                methods:        ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+                // The verbs the mount actually serves, when it said. A fixed
+                // five advertised DELETE on a read-only mount and hid
+                // PROPFIND on a DAV one.
+                methods:        route?.methods ?? ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
                 allowedHeaders: runtime.options.corsAllowHeaders,
                 exposedHeaders: runtime.options.corsExposeHeaders,
+                // Set the CORS headers, then hand the request on to the mount
+                // instead of ending it here.
+                preflightContinue: ownsPreflight,
             })
         }))
     })
