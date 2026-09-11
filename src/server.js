@@ -249,6 +249,22 @@ export function setupServer() {
             // PROPFIND, LOCK and the rest.
             const ownsPreflight = Boolean(route?.methods?.includes('OPTIONS'))
 
+            // A route that wants no CORS headers at all.
+            //
+            // `origin: false` is the cors package's way of emitting none — the
+            // same thing --no-cors asks for globally, scoped to one mount.
+            //
+            // It needs no preflightContinue, and passing one here was dead
+            // code: with a falsy origin the package never builds an
+            // originCallback, so it calls next() and does not touch the
+            // response at all (cors/lib/index.js:210-228). The mount's own
+            // OPTIONS is therefore reached whatever preflightContinue says —
+            // which is why removing it changed no test, and why the comment
+            // that used to claim otherwise was wrong.
+            if (route?.cors === false) {
+                return callback(null, { origin: false })
+            }
+
             callback(null, {
                 origin:         configured === true ? '*' : String(configured),
                 // The verbs the mount actually serves, when it said. A fixed

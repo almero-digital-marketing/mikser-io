@@ -87,6 +87,18 @@ export function routeFor(requestPath) {
 //                 facade must disable buffering for it (Caddy
 //                 flush_interval -1, nginx proxy_buffering off).
 //                 Default false.
+//   cors          `false` to emit no CORS headers for this mount. The
+//                 same word as the global `--no-cors` /
+//                 `config.server.cors: false`, meaning the same thing,
+//                 scoped to one route. Default undefined — inherit the
+//                 global setting.
+//
+//                 For a mount whose clients are not browsers: an OS
+//                 WebDAV redirector, a CLI tool and curl never consult
+//                 CORS, so a header naming who may read the endpoint
+//                 from a web page is a claim with no beneficiary — and
+//                 on an authenticated endpoint it is better made
+//                 deliberately than inherited.
 //   methods       the HTTP verbs this mount actually serves. Two
 //                 consequences, and the second one is load-bearing:
 //                 CORS advertises these for the route instead of a
@@ -125,6 +137,7 @@ export function registerRoute({
     reachability = 'public',
     streaming = false,
     methods = null,
+    cors,
     label,
     detail,
     displayPath,
@@ -142,8 +155,13 @@ export function registerRoute({
         throw new Error('registerRoute: `methods` must be an array of verb strings')
     }
 
+    if (cors !== undefined && cors !== false) {
+        throw new Error('registerRoute: `cors` accepts only false — omit it to inherit the global setting')
+    }
+
     const descriptor = { path, plugin, reachability, streaming }
     if (methods) descriptor.methods = methods.map(m => m.toUpperCase())
+    if (cors === false) descriptor.cors = false
 
     // Dedup by path — a re-register (same path) replaces rather than
     // duplicates. Mounts happen once per process, but this keeps the

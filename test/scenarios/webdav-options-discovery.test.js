@@ -90,6 +90,29 @@ describe('OPTIONS on a WebDAV mount', () => {
         }
     })
 
+    it('emits no CORS headers at all on the DAV mount', async () => {
+        // `access-control-allow-origin: *` used to be inherited from the
+        // global default — a claim about who may read an AUTHENTICATED
+        // endpoint from a web page, made by nobody in particular. Not an
+        // exposure, since the engine never sets `credentials: true`, so no
+        // browser attaches the Basic credentials cross-origin; but a claim
+        // with no beneficiary either, because this mount's clients are OS
+        // WebDAV redirectors, CLI tools and curl, none of which consult CORS.
+        //
+        // Now stated rather than inherited, via `cors: false` on the route.
+        const res = await fetch(`http://127.0.0.1:${server.port}/drive/content/`, {
+            method: 'OPTIONS',
+            headers: { origin: 'http://example.com', 'access-control-request-method': 'PROPFIND' },
+        })
+        assert.equal(res.headers.get('access-control-allow-origin'), null,
+            `a DAV mount must not name an allowed origin — headers: ${JSON.stringify([...res.headers])}`)
+        assert.equal(res.headers.get('access-control-allow-methods'), null)
+        // And silencing CORS must not silence DISCOVERY: the two travel on the
+        // same response, and it is nephele's half that Windows reads.
+        assert.match(res.headers.get('dav') ?? '', /\b1\b/,
+            'the DAV header still has to be there')
+    })
+
     it('still answers an ordinary CORS preflight for a route that does not own OPTIONS', async () => {
         // The other half. /mcp and /app WANT the 204: their clients are
         // browsers completing a real preflight, which is why the mcp plugin
@@ -103,14 +126,26 @@ describe('OPTIONS on a WebDAV mount', () => {
         assert.equal(res.headers.get('access-control-allow-origin'), '*')
     })
 
-    it('advertises a read-only mount without the write verbs', async () => {
-        const res = await fetch(`http://127.0.0.1:${server.port}/drive/readonly/`, {
-            method: 'OPTIONS',
-            headers: { origin: 'http://example.com', 'access-control-request-method': 'PROPFIND' },
-        })
-        const advertised = res.headers.get('access-control-allow-methods') ?? ''
-        assert.match(advertised, /PROPFIND/, `allow-methods: ${advertised}`)
-        assert.doesNotMatch(advertised, /\bPUT\b/,
-            `a read-only mount must not advertise PUT — allow-methods: ${advertised}`)
+    it('advertises the same verbs for a read-only mount, which it will then refuse', async () => {
+        // Measured, and not what I assumed: `readOnly` changes NOTHING in the
+        // discovery answer. A read-only mount reports the same `DAV: 1, 3, 2`
+        // and the same Allow list — PUT, DELETE, MKCOL and all — then refuses
+        // the write when it arrives. nephele's ReadOnlyPlugin gates requests,
+        // not the OPTIONS response.
+        //
+        // Pinned because it reads like a bug and is easy to "fix" into one, and
+        // because it corrects the reason first given for no-cache here: the
+        // configuration that DOES move the discovery answer is
+        // `locks: 'disallow'`, which drops class 2 and LOCK — see drive's own
+        // protocol tests. Caching that for a week is the real second edge.
+        const [writable, readonly] = await Promise.all(['content', 'readonly'].map(ep =>
+            fetch(`http://127.0.0.1:${server.port}/drive/${ep}/`, { method: 'OPTIONS' })))
+
+        assert.equal(readonly.headers.get('dav'), writable.headers.get('dav'),
+            'readOnly does not change the compliance classes')
+        assert.equal(readonly.headers.get('allow'), writable.headers.get('allow'),
+            'nor the Allow list — the refusal happens per request')
+        assert.match(readonly.headers.get('allow') ?? '', /\bPUT\b/,
+            'so PUT is advertised on a mount that will refuse it')
     })
 })
