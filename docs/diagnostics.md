@@ -1044,6 +1044,7 @@ distinction is the whole of [Faults](#faults) above.
 | Code | Severity | Means |
 | --- | --- | --- |
 | `config-coverage-partial` | warn | This Node build has no module loader hooks, so the config stamp covers the entry file alone. Editing an imported module will not invalidate the cache. |
+| `config-stale-in-process` | warn | A config file changed on disk while `--watch` is running. Node has the module cached and config is only read at startup, so this rebuild and every one after it uses the logic the process booted with. Restart to pick it up. |
 | `durable-open` | error | The durable store could not be opened. Auth grants and the change-set log are unavailable. |
 | `durable-migration` | error | A registered migration failed. |
 | `durable-gitignore` | error | The durable store could not be added to `.gitignore` — it holds credentials and the working folder is usually a repo. |
@@ -1063,6 +1064,7 @@ distinction is the whole of [Faults](#faults) above.
 
 | Code | Severity | Means |
 | --- | --- | --- |
+| `source-content-not-text` | warn | A `sources()` collection with `content: true` loaded a file whose bytes are not text. They are decoded as UTF-8 and stored mangled, and every consumer inherits that. Set `content: false` to catalogue the files by path instead — `entity.uri` still points at them. Once per collection. |
 | `observer-bad-uri` | warn | An observer's `uri` is not an absolute URL, so no webhook can be routed to it. |
 | `untracked-file-read` | warn | A template read a file outside every folder mikser takes entities from, so it has no entity and changing it invalidates nothing. |
 | `progress` | info | A long phase reporting where it has got to. See [Progress](#progress). |

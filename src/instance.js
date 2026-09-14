@@ -288,7 +288,7 @@ function configMismatch(theirs) {
 // configCoverage lists every local module the config graph pulled in, so a
 // stat over that list catches an edit to an imported module — which a
 // client-side checksum of the entry file would miss entirely.
-async function configStale() {
+export async function configStale() {
     const covered = runtime.options.configCoverage?.files ?? []
     if (!covered.length) return null
     const { stat } = await import('node:fs/promises')

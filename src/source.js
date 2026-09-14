@@ -44,7 +44,7 @@ import pMap from 'p-map'
 import runtime from './runtime.js'
 import { useLogger } from './engine/index.js'
 import { ACTION } from './constants.js'
-import { checksum as fileChecksum, checksumOf, junkIgnore } from './utils/index.js'
+import { checksum as fileChecksum, checksumOf, junkIgnore, looksTextual } from './utils/index.js'
 import { reportGated, reportChanged } from './report.js'
 import { findById, findEntities, checksumsByCollection } from './catalog.js'
 import { bypassReason } from './invalidation.js'
@@ -293,6 +293,39 @@ export function scanSummary({ cap, loaded, emitted = 0, skipped = 0, deleted = 0
  *     called per file; returned object is merged onto the base entity.
  *     Return null to skip a file.
  */
+// Collections already warned about a `content: true` binary. Module-level so
+// the warning survives across cycles — a watch rebuild re-reads the same
+// files, and repeating it every cycle is how a warning gets filtered out.
+const binaryWarned = new Set()
+
+// `content: true` is right for the CSS and template parts useSource was built
+// for, and wrong in silence for a binary. `toString('utf8')` never fails: it
+// substitutes U+FFFD and returns a string, so a 4 MB PDF becomes 4 MB of
+// mangled text and every consumer downstream inherits it.
+//
+// Reported by mikser-io-ocr, which sent one as a prompt and got back "Your
+// input exceeds the context window of this model" — an error that names the
+// document, so the reader goes and looks at the PDF rather than at the
+// collection's config.
+//
+// Returns whether it warned, so the decision is testable without reading logs.
+export function warnIfNotText(collection, name, bytes, logger) {
+    if (binaryWarned.has(collection)) return false
+    if (looksTextual(bytes.subarray(0, SNIFF_BYTES))) return false
+    binaryWarned.add(collection)
+    logger?.warn(
+        { code: 'source-content-not-text', collection, sample: name },
+        'Source %j has `content: true` but %j is not text — its bytes are being decoded as UTF-8 and stored ' +
+        'mangled. Set `content: false` on the collection to catalogue these files by path instead ' +
+        '(entity.uri still points at them).',
+        collection, name)
+    return true
+}
+
+// Same prefix the filesystem provider sniffs (src/utils/entity.js). Enough
+// to see a file header without decoding a whole document twice.
+const SNIFF_BYTES = 8 * 1024
+
 export function useSource(core, options) {
     const {
         runtime,
@@ -559,6 +592,20 @@ export function useSource(core, options) {
             // Decoded from the bytes the checksum was taken over — not
             // re-read. See the gate above.
             base.content = bytes.toString('utf8')
+
+            // `content: true` is right for the CSS and template parts this
+            // was built for, and wrong in silence for a binary. toString
+            // never fails: it substitutes U+FFFD and hands back a string, so
+            // a 4 MB PDF becomes 4 MB of mangled text and every consumer
+            // downstream inherits it. Reported by mikser-io-ocr, which sent
+            // one as a prompt and got back "Your input exceeds the context
+            // window of this model" — an error that names the document and
+            // sends the reader to the PDF rather than to this line.
+            //
+            // Once per collection, not per file: a media folder catalogued
+            // this way is all binaries, and the fix is one setting either
+            // way.
+            warnIfNotText(collection, name, bytes, logger)
         }
         try {
             const extra = await load({ file, name, relativePath, entity: base })
