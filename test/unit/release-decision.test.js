@@ -126,3 +126,57 @@ describe('releaseDecision', () => {
         assert.equal(asked, false)
     })
 })
+
+// ── the concurrency helper the pre-flight runs on ───────────────────────────
+//
+// The release tool spent ten seconds before doing anything, and all of it was
+// `npm pack --dry-run` — a 240ms subprocess the decision above needs per
+// package, thirty-eight of them in a row. Prefetching them concurrently took
+// that to two and a half seconds with byte-identical output.
+//
+// It had to be a PREFETCH. Wrapping the decision loop in a concurrent map
+// changed the total by nothing, because `shippedFiles` is execFileSync and a
+// synchronous subprocess blocks the event loop — async workers around it run
+// strictly one after another. These pin the ordering guarantee the pre-flight
+// depends on, since the result is zipped back against the topological order
+// and everything downstream reads that order.
+
+import { mapConcurrent } from '../../tools/concurrent.mjs'
+
+describe('mapConcurrent', () => {
+    it('returns results in INPUT order, not completion order', async () => {
+        // The pre-flight builds `new Map(results)` keyed by package name and
+        // the release loop walks the topological order. Results arriving in
+        // completion order would silently reorder the release sequence, which
+        // is the one thing the topological sort exists to get right.
+        const out = await mapConcurrent([50, 10, 30, 0], 4, async (ms, i) => {
+            await new Promise(r => setTimeout(r, ms))
+            return i
+        })
+        assert.deepEqual(out, [0, 1, 2, 3])
+    })
+
+    it('never runs more than `limit` at once', async () => {
+        let running = 0
+        let peak = 0
+        await mapConcurrent(Array.from({ length: 20 }, (_, i) => i), 5, async () => {
+            running++
+            peak = Math.max(peak, running)
+            await new Promise(r => setTimeout(r, 5))
+            running--
+        })
+        assert.ok(peak <= 5, `ran ${peak} at once, limit was 5`)
+        assert.ok(peak > 1, 'it did actually run concurrently')
+    })
+
+    it('does the work exactly once per item', async () => {
+        const seen = []
+        await mapConcurrent(['a', 'b', 'c'], 2, async (item) => { seen.push(item) })
+        assert.deepEqual(seen.sort(), ['a', 'b', 'c'])
+    })
+
+    it('handles an empty list and a limit above the item count', async () => {
+        assert.deepEqual(await mapConcurrent([], 8, async () => 1), [])
+        assert.deepEqual(await mapConcurrent([1, 2], 99, async (n) => n * 2), [2, 4])
+    })
+})

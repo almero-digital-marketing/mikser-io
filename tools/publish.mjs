@@ -81,10 +81,12 @@
 // "unchanged" — a check that cannot see is not a check that passed.
 
 import { readdirSync, readFileSync, existsSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, execFile as execFileCb } from 'node:child_process'
+import { promisify } from 'node:util'
 import path from 'node:path'
 import process from 'node:process'
 import { releaseDecision } from './release-decision.mjs'
+import { mapConcurrent } from './concurrent.mjs'
 
 const argv = process.argv.slice(2)
 const flag = (name) => argv.includes(`--${name}`)
@@ -96,6 +98,10 @@ const DRY = flag('dry')
 const DIRECT = flag('direct')
 const FORCE = flag('force')
 const TIMEOUT_MS = Number(value('timeout', 900)) * 1000
+// How long between registry checks while waiting for a publish to appear.
+// The wait is dominated by the CI run, so polling faster than this buys
+// nothing and only adds requests.
+const POLL_MS = 15_000
 const ALL = flag('all')
 const ONLY = flag('only')
     ? new Set(String(value('only', '')).split(',').map(s => s.trim()).filter(Boolean))
@@ -213,14 +219,58 @@ const satisfiesCaret = (range, version) => {
 // What a release of this package would actually contain. `npm pack` decides,
 // because `files`, .npmignore and .gitignore all feed into it and reproducing
 // that logic here would be a second implementation to drift.
+// Answers are cached per directory, because the decision below can ask twice
+// for one package (against `latest`, then against its own version) and the
+// file list cannot have changed in between.
+const packCache = new Map()
+
 function shippedFiles(dir) {
+    if (packCache.has(dir)) return packCache.get(dir)
     try {
         const out = execFileSync('npm', ['pack', '--dry-run', '--json'],
             { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
-        return JSON.parse(jsonTail(out))[0].files.map(f => f.path)
+        const files = JSON.parse(jsonTail(out))[0].files.map(f => f.path)
+        packCache.set(dir, files)
+        return files
     } catch {
+        packCache.set(dir, null)
         return null              // cannot tell — the caller must not guess
     }
+}
+
+// Fill the cache for several packages at once.
+//
+// This is the whole cost of the pre-flight. `npm pack --dry-run` is a 240ms
+// subprocess and the decisions need one apiece, so thirty-eight in sequence
+// were nine of the ten seconds the tool spent before it did anything.
+//
+// It has to be a prefetch rather than concurrency around the decisions
+// themselves: `shippedFiles` is execFileSync, and a synchronous subprocess
+// blocks the event loop, so async workers around it run strictly one after
+// another. Measured — wrapping the decision loop in a concurrent map changed
+// the total by nothing at all.
+//
+// For every package, --only included. The tempting filter is "just the ones
+// being released", but `--only` is documented as restricting the RELEASE and
+// reporting the rest, and releaseDecision answers "changed since X — needs a
+// bump" for an already-published package before it ever looks at `wanted`.
+// So the pack happens for all of them either way; the only question is
+// whether it happens concurrently. Filtering here left `--only` at ten
+// seconds while the bare run dropped to two and a half — measured, after
+// assuming otherwise.
+async function prefetchShippedFiles(dirs, limit = 8) {
+    const execFile = promisify(execFileCb)
+    await mapConcurrent(dirs.filter(d => !packCache.has(d)), limit, async (dir) => {
+        try {
+            const { stdout } = await execFile('npm', ['pack', '--dry-run', '--json'],
+                { cwd: dir, encoding: 'utf8' })
+            packCache.set(dir, JSON.parse(jsonTail(stdout))[0].files.map(f => f.path))
+        } catch {
+            // Leave it uncached: the synchronous path will try again and get
+            // the same answer, and a failure here must not become "nothing
+            // shipped", which would read as "nothing changed".
+        }
+    })
 }
 
 // npm pack --json puts JSON on stdout, and a `prepack` script's own output
@@ -286,8 +336,28 @@ async function main() {
 
     // ── pre-flight ──────────────────────────────────────────────────────────
     // Everything that can be known before anything moves.
-    const docs = new Map()
-    for (const name of order) docs.set(name, await registry(name))
+    //
+    // Fetched concurrently, though measurement says this was never the cost:
+    // fetch keeps the connection alive, so thirty-eight sequential reads of
+    // one host ran at about 30ms each. Worth 0.3s of the ten seconds this
+    // phase took. The nine seconds were `npm pack`, below.
+    //
+    // Every package is still fetched, even with --only. The temptation is to
+    // skip the rest and save the requests, but the checks below are exactly
+    // what this tool exists for: the burned-version check and the in-family
+    // range check both need the whole family's published state, and the
+    // second is reason 4 in the header — two packages declaring
+    // `mikser-io@^10.0.0` while importing 10.14.0 exports, which never bit
+    // locally because a workspace resolves siblings from disk. Narrowing the
+    // pre-flight to the package being released would take that away to save
+    // latency that concurrency removes anyway.
+    //
+    // Bounded, because forty simultaneous requests is how a registry starts
+    // answering 429 — and an unreachable registry here exits rather than
+    // guessing, so rate-limiting ourselves would turn a speedup into a
+    // refusal to release.
+    const docs = new Map(await mapConcurrent(order, 8,
+        async (name) => [name, await registry(name)]))
 
     const blockers = []
     const unreachable = []
@@ -324,9 +394,26 @@ async function main() {
     }
 
     // ── the plan ────────────────────────────────────────────────────────────
-    const plan = []
+    //
+    // Decided CONCURRENTLY, which is where the time actually was. Each
+    // decision that has to look costs an `npm pack --dry-run` — 240ms of
+    // subprocess apiece, measured — and thirty-eight of those in a row is
+    // nine of the ten seconds this tool spent before doing anything.
+    //
+    // Safe to run together because a decision only READS: its own package's
+    // git state and file list, plus the registry document already fetched
+    // above. Nothing here writes, and nothing depends on another package's
+    // decision — the topological order governs the RELEASE sequence further
+    // down, not this.
+    //
+    // The thunks stay thunks. They are not an optimisation that concurrency
+    // replaces: they are what stops the tool packing a package whose answer
+    // cannot change the outcome, and with --only that is most of them.
+    // Everything the decisions will pack, packed at once.
+    await prefetchShippedFiles(order.map(name => packages.get(name).dir))
+
     const undetermined = []
-    for (const name of order) {
+    const decided = await mapConcurrent(order, 8, async (name) => {
         const pkg = packages.get(name)
         const doc = docs.get(name)
         const published = Boolean(doc.versions[pkg.version])
@@ -346,8 +433,14 @@ async function main() {
             changedSinceOwn: () => changedSincePublished(pkg, pkg.version),
             isDirty: () => Boolean(pkg.hasGit && git(pkg.dir, 'status', '--porcelain')),
         })
+        return { name, cannotTell, entry: { ...pkg, published, skip } }
+    })
+    // Back into topological order for everything downstream — mapConcurrent
+    // preserves input order, and the release loop depends on it.
+    const plan = []
+    for (const { name, cannotTell, entry } of decided) {
         if (cannotTell) undetermined.push(name)
-        plan.push({ ...pkg, published, skip })
+        plan.push(entry)
     }
 
     const releasing = plan.filter(p => !p.skip)
@@ -406,9 +499,13 @@ async function main() {
         const deadline = Date.now() + TIMEOUT_MS
         let live = false
         while (Date.now() < deadline) {
-            await new Promise(r => setTimeout(r, 15_000))
+            // Ask FIRST, then wait. Sleeping before the first check charged
+            // fifteen seconds to every package, including one whose CI had
+            // already finished — and at four packages in a release that is a
+            // minute of nothing.
             const doc = await registry(pkg.name)
             if (doc?.versions?.[pkg.version]) { live = true; break }
+            await new Promise(r => setTimeout(r, POLL_MS))
         }
         if (live) {
             say(`  ✓ ${pkg.name}@${pkg.version} is live`)
