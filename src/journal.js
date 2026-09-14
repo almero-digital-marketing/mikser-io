@@ -235,6 +235,25 @@ export async function* useJournal(name, operations, signal) {
 
             // Yield returned — caller's for-body completed for this
             // iteration. Diff and write back if mutated.
+            //
+            // WHICH MEANS: a consumer that mutates `entry.entity` MUST finish
+            // that mutation before its loop body completes. `for await` does
+            // this by construction. Mapping over this generator concurrently
+            // does NOT — p-map and friends pull the next item as soon as a
+            // worker slot frees, which resumes the generator here, before any
+            // body has finished. The diff then sees an untouched entity and
+            // writes nothing.
+            //
+            // Not a race that usually works: measured at concurrency 2 and 4,
+            // zero of six mutations survived. Every one, silently, with
+            // whatever the work cost already spent.
+            //
+            // Concurrent mapping over the journal is still fine for a plugin
+            // that writes somewhere else — mikser-io-vector embeds into an
+            // external store and never touches `entity`. A plugin that
+            // mutates entities and wants concurrency has to gather first, do
+            // the work off the journal, then apply inside a second walk;
+            // mikser-io-ocr does exactly that and says why.
             if (entry.entity != null) {
                 const currentEntity = JSON.stringify(entry.entity)
                 if (currentEntity !== originalEntity) {
