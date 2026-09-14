@@ -1065,6 +1065,7 @@ distinction is the whole of [Faults](#faults) above.
 | Code | Severity | Means |
 | --- | --- | --- |
 | `source-content-not-text` | warn | A `sources()` collection with `content: true` loaded a file whose bytes are not text. They are decoded as UTF-8 and stored mangled, and every consumer inherits that. Set `content: false` to catalogue the files by path instead — `entity.uri` still points at them. Once per collection. |
+| `front-matter-unreadable` | warn | A file's front-matter block is present but not valid YAML. Its attributes are not available and the text is left as written. Previously this threw and ended the whole run with a parser stack that never named the file. |
 | `observer-bad-uri` | warn | An observer's `uri` is not an absolute URL, so no webhook can be routed to it. |
 | `untracked-file-read` | warn | A template read a file outside every folder mikser takes entities from, so it has no entity and changing it invalidates nothing. |
 | `progress` | info | A long phase reporting where it has got to. See [Progress](#progress). |
