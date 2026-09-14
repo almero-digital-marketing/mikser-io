@@ -50,7 +50,12 @@ const DEFAULT_AUTH_LABEL = {
 // an origin is known — public --url / config.url wins (clickable,
 // shareable), localhost:port is the dev fallback — bare path when the
 // engine doesn't own a listener (external-app embedding, no url set).
-export function routeLocation(displayPath) {
+export function routeLocation(displayPath, host) {
+    // A host-scoped route HAS an origin, and it is not this server's. Printing
+    // `http://localhost:3001//drive.example.com/` names a place nothing
+    // answers. Protocol-relative because the scheme belongs to whatever
+    // terminates TLS in front, which this process does not know.
+    if (host) return `//${host}${displayPath === '/' ? '/' : displayPath}`
     const origin = runtime.options.url
         ?? (runtime.options.port ? `http://localhost:${runtime.options.port}` : null)
     return origin ? `${origin}${displayPath}` : displayPath
@@ -62,12 +67,21 @@ export function routeLocation(displayPath) {
 // '/drive') answers for its own requests rather than its parent's. Exported
 // because the CORS middleware needs the same answer Express will reach, and a
 // second implementation of "which mount is this" would drift from this one.
-export function routeFor(requestPath) {
+export function routeFor(requestPath, host) {
     if (!requestPath) return null
     let best = null
     for (const route of runtime.routes ?? []) {
+        // A host-scoped route answers for its own domain and no other.
+        if (route.host && route.host !== host) continue
         const base = route.path
-        if (requestPath !== base && !requestPath.startsWith(`${base}/`)) continue
+        // A host-scoped route mounted at `/` owns every path on that host —
+        // it IS the server there. Prefix matching cannot express that, since
+        // nothing starts with `//`. An unscoped route at `/` is left alone:
+        // it would otherwise swallow the whole site.
+        const owns = base === '/' && route.host
+            ? true
+            : requestPath === base || requestPath.startsWith(`${base}/`)
+        if (!owns) continue
         if (!best || base.length > best.path.length) best = route
     }
     return best
@@ -87,6 +101,10 @@ export function routeFor(requestPath) {
 //                 facade must disable buffering for it (Caddy
 //                 flush_interval -1, nginx proxy_buffering off).
 //                 Default false.
+//   host          when set, the mount answers only for this Host. Used
+//                 by a route that takes a domain of its own — a WebDAV
+//                 share at `/` on `drive.example.com`, say, which would
+//                 otherwise shadow every page on the site.
 //   cors          `false` to emit no CORS headers for this mount. The
 //                 same word as the global `--no-cors` /
 //                 `config.server.cors: false`, meaning the same thing,
@@ -138,6 +156,7 @@ export function registerRoute({
     streaming = false,
     methods = null,
     cors,
+    host,
     label,
     detail,
     displayPath,
@@ -162,6 +181,7 @@ export function registerRoute({
     const descriptor = { path, plugin, reachability, streaming }
     if (methods) descriptor.methods = methods.map(m => m.toUpperCase())
     if (cors === false) descriptor.cors = false
+    if (host) descriptor.host = host
 
     // Dedup by path — a re-register (same path) replaces rather than
     // duplicates. Mounts happen once per process, but this keeps the
@@ -172,7 +192,7 @@ export function registerRoute({
 
     const logger = useLogger()
     if (logger) {
-        const location = routeLocation(displayPath ?? path)
+        const location = routeLocation(displayPath ?? path, host)
         const bracket  = authLabel ?? DEFAULT_AUTH_LABEL[reachability]
         logger.info('%s mounted: %s [%s]%s',
             label ?? plugin, location, bracket, detail ? ` ${detail}` : '')

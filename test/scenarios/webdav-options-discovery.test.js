@@ -113,6 +113,27 @@ describe('OPTIONS on a WebDAV mount', () => {
             'the DAV header still has to be there')
     })
 
+    it('does not answer a BARE OPTIONS on a path that is not a route', async () => {
+        // A CORS preflight is defined by its headers. Without
+        // `Access-Control-Request-Method` the request is something else, and
+        // answering it 204 with five REST verbs and no `DAV:` header is a
+        // manufactured "I exist and I am not WebDAV" — a stronger negative
+        // than the 404 a static path would otherwise give.
+        //
+        // It matters because the Microsoft WebDAV redirector establishes a
+        // session by walking up from the path it was given. On a mikser site
+        // every level of that walk used to answer no, including `/` and
+        // `/drive`, neither of which is anything. Deployments that DO map on
+        // Windows -- Nextcloud at /remote.php/dav, SharePoint -- sit behind
+        // hosts that simply have nothing to say at those paths.
+        for (const path of ['/', '/drive', '/nothing-mounted-here']) {
+            const res = await fetch(`http://127.0.0.1:${server.port}${path}`, { method: 'OPTIONS' })
+            assert.equal(res.status, 404,
+                `${path}: a bare OPTIONS must fall through, not be answered -- got ${res.status}`)
+            assert.equal(res.headers.get('access-control-allow-origin'), null, path)
+        }
+    })
+
     it('still answers an ordinary CORS preflight for a route that does not own OPTIONS', async () => {
         // The other half. /mcp and /app WANT the 204: their clients are
         // browsers completing a real preflight, which is why the mcp plugin

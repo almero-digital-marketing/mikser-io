@@ -223,7 +223,7 @@ export function setupServer() {
             // because routes are registered at onLoaded and this middleware
             // at onLoad — it is mounted before any of them exist, and every
             // request arrives long after they all do.
-            const route = routeFor(req.path ?? req.url)
+            const route = routeFor(req.path ?? req.url, req.hostname)
 
             // Does that mount answer OPTIONS itself?
             //
@@ -248,6 +248,36 @@ export function setupServer() {
             // away: its OPTIONS builds `DAV: 1, 3, 2` and an Allow list with
             // PROPFIND, LOCK and the rest.
             const ownsPreflight = Boolean(route?.methods?.includes('OPTIONS'))
+
+            // A bare OPTIONS is not a preflight, and must not be answered as
+            // one.
+            //
+            // A CORS preflight is defined by its headers: the browser sends
+            // `Access-Control-Request-Method`, and without it the request is
+            // something else entirely. This middleware used to answer ALL of
+            // them — so every path on the site, routed or not, replied 204 to
+            // any OPTIONS with a list of five REST verbs and no `DAV:` header.
+            //
+            // That is a manufactured "I exist and I am not WebDAV", and it is
+            // a stronger negative than the 404 a static path would otherwise
+            // give. The Microsoft WebDAV redirector establishes a session by
+            // walking up from the path it was given, and on a mikser site
+            // every level of that walk answered no — including `/` and
+            // `/drive`, neither of which is anything. Deployments that DO map
+            // on Windows (Nextcloud at /remote.php/dav, SharePoint) sit behind
+            // hosts that simply have nothing to say at those paths.
+            //
+            // Falling through costs nothing a browser wanted: a real preflight
+            // still carries the header and is still answered below, and a
+            // non-preflight OPTIONS now reaches whatever owns the path — the
+            // mount's own discovery response, or the static handler's 404.
+            //
+            // `origin: false` is how the package steps aside: with a falsy
+            // origin it never builds an originCallback, so it calls next()
+            // without touching the response (cors/lib/index.js:210-228).
+            if (req.method === 'OPTIONS' && !req.headers['access-control-request-method']) {
+                return callback(null, { origin: false })
+            }
 
             // A route that wants no CORS headers at all.
             //
