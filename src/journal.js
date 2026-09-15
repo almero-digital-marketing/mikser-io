@@ -336,5 +336,31 @@ onFinalized(async () => {
 })
 
 onCancelled(async () => {
-    clearJournal()
+    // NOT cleared. A cancelled cycle's entries are not superseded work —
+    // "this entity was created and nothing has processed it" is still true
+    // after the restart, and the restarted cycle will not re-journal it: the
+    // source gate compares checksums, finds the file unchanged, and emits
+    // nothing. So deleting these rows orphaned the entity permanently. It sat
+    // in the catalog with empty meta, no output, and no journal entry any
+    // future cycle would look at, under a green "Mikser completed" — and
+    // touching the file was the only way to get it back.
+    //
+    // Reported against a 4 MB PDF uploaded over WebDAV: the upload landed
+    // mid-cycle, the restart deleted the CREATE entry, and the page was never
+    // produced. Nothing about it was specific to the plugin that noticed —
+    // any consumer doing real work between a journal read and its write-back
+    // had the same hole.
+    //
+    // The asymmetry was the tell: a CRASH leaves these rows and `--resume`
+    // continues from them (see the leftover bootstrap above), while a restart
+    // deliberately deleted them. Keeping them makes a restart behave like the
+    // case the engine already handles.
+    //
+    // They are cleared by onFinalized when a cycle actually completes, so a
+    // run of cancellations carries its backlog forward and the first cycle to
+    // finish clears the lot.
+    const carried = stmtCount.get().n
+    if (carried > 0) {
+        useLogger()?.debug('Restart: carrying %d unprocessed journal entries into the next cycle', carried)
+    }
 })
