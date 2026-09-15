@@ -1039,6 +1039,12 @@ distinction is the whole of [Faults](#faults) above.
 | `preset-no-match` | warn | A configured preset matched none of the entities evaluated this run. Phrased as what was observed: an incremental cycle legitimately evaluates a handful. |
 | `preset-unknown` | warn | `--render-presets` named a preset that is not configured. |
 
+### Extraction (`mikser-io-ocr`)
+
+| Code | Severity | Means |
+| --- | --- | --- |
+| `ocr-schema-changed` | notice | A step's schema changed, so stored answers no longer match it by hash. Says how many documents are in the pass and which fields are being asked for. Answers that still satisfy the new schema are reused without a model call; the rest are asked only for the fields they are missing. |
+
 ### Configuration and stores
 
 | Code | Severity | Means |
