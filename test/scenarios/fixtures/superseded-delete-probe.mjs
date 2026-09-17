@@ -13,6 +13,7 @@ import runtime from '../../../src/runtime.js'
 import { addEntries, updateEntry } from '../../../src/journal.js'
 import { OPERATION } from '../../../src/constants.js'
 import { useDatabase } from '../../../src/database/index.js'
+import { bypassReason, REASON, forgetMissingOutputs } from '../../../src/invalidation.js'
 
 const dir = process.argv[2]
 const scenario = process.argv[3] ?? 'replaced'
@@ -37,6 +38,39 @@ const entityFor = (id) => ({
     id, collection: 'documents', name: 'probe', type: 'document',
     destination: DESTINATION, checksum: 'abc', stamp: Date.now(),
 })
+
+// The recovery-net scenarios: no journal work at all, just the state a bug of
+// this shape leaves behind — a catalog entity with a layout and no snapshot.
+if (scenario.startsWith('net-')) {
+    const db = useDatabase()
+    db.prepare(`INSERT OR REPLACE INTO mikser_entities (id, collection, name, type, meta_layout, data)
+                VALUES (?, 'documents', 'probe', 'document', ?, ?)`)
+        .run('/documents/probe.md',
+             scenario === 'net-no-layout' ? null : 'post',
+             JSON.stringify(entityFor('/documents/probe.md')))
+
+    // A previous build recorded SOMETHING, or this is a cold build and there
+    // is nothing to recover.
+    if (scenario !== 'net-cold') {
+        db.prepare(`INSERT OR REPLACE INTO mikser_snapshots (id, destination, inputHash, outputHash, renderedAt)
+                    VALUES ('/documents/other.md', '/other/index.html', 'h', 'h', ?)`).run(Date.now())
+    }
+    // A render that FAILED writes no snapshot on purpose, and the retry path
+    // owns that case.
+    if (scenario === 'net-failed') {
+        db.prepare(`INSERT OR REPLACE INTO mikser_failures
+                    (id, destination, error, firstFailedAt, lastFailedAt, attempts)
+                    VALUES ('/documents/probe.md', '/probe/index.html', 'boom', ?, ?, 1)`)
+            .run(Date.now(), Date.now())
+    }
+    forgetMissingOutputs()
+    const first = bypassReason({ id: '/documents/probe.md' })
+    const second = bypassReason({ id: '/documents/probe.md' })
+    console.log(JSON.stringify({ scenario,
+        recovers: first === REASON.NEVER_RECORDED,
+        repeats: second === REASON.NEVER_RECORDED }))
+    process.exit(0)
+}
 
 // The page this cycle rendered for the first time, already on disk — this is
 // the state right after writeOutput: mkdir, then the file.
@@ -109,6 +143,7 @@ for (const [index, entry] of batch.entries()) {
 // `renamed` the surviving entity is present; for `deleted` and `neutral` it
 // is not — which is what the catalog-presence test would read.
 const db = useDatabase()
+
 const present = { replaced: '/documents/probe.md', 'replaced-by-update': '/documents/probe.md',
     renamed: '/documents/probe.yml' }[scenario]
 if (present) {
@@ -137,5 +172,16 @@ for (const row of db.prepare('SELECT destination FROM mikser_snapshots').all()) 
     const claimed = path.join(runtime.options.outputFolder, row.destination)
     if (!await access(claimed).then(() => true, () => false)) missing++
 }
-console.log(JSON.stringify({ scenario, exists, snapshots, missing, warnings: warnings.length }))
+// The recovery net: would a later build notice a catalog entity with a
+// layout and no snapshot? Asked the way a gate asks, and asked TWICE, because
+// the guarantee is one dispatch per entity per process and not one per cycle.
+forgetMissingOutputs()
+const probeId = present ?? '/documents/probe.md'
+const firstAsk = bypassReason({ id: probeId })
+const secondAsk = bypassReason({ id: probeId })
+const recovers = firstAsk === REASON.NEVER_RECORDED
+const repeats = secondAsk === REASON.NEVER_RECORDED
+
+console.log(JSON.stringify({ scenario, exists, snapshots, missing,
+    warnings: warnings.length, recovers, repeats }))
 process.exit(0)

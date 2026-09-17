@@ -65,6 +65,10 @@ import { sha1, describeInputChange, buildRefClosure, buildSnapshot, rowToSnap, s
 
 
 export function createManifest(db) {
+    // See unrenderedIds(): prepared on first use, because it is the one
+    // statement that reaches outside the manifest's own tables.
+    let stmtUnrendered
+
     const {
         stmtCollisions,
         stmtClaimants,
@@ -502,6 +506,49 @@ export function createManifest(db) {
         // the failure mode this whole area exists to avoid.
         failedIds() {
             return [...new Set(stmtAllFailures.all().map(row => row.id))]
+        },
+
+        // Catalog entities that should have rendered and never did.
+        //
+        // The state a superseded DELETE used to leave behind: a catalog row
+        // with a layout, an output written and then unlinked, and NO snapshot
+        // — which made it invisible to missingOutputIds(), because that walks
+        // snapshots. The source gate saw the file unchanged, so nothing
+        // journalled it again either. Permanently missing page, green builds
+        // forever, and only --audit-output to say so.
+        //
+        // Both exclusions are load-bearing:
+        //   - a snapshot means it HAS rendered, so there is nothing to
+        //     recover;
+        //   - a failure means the render was attempted and threw. A failed
+        //     render writes no snapshot ON PURPOSE, so the last good bytes
+        //     survive, and the retry path owns that case. Re-dispatching it
+        //     here would fight the mechanism that exists for it.
+        //
+        // `meta_layout` is the column the layouts plugin mirrors its match
+        // into and carries a partial index, so this is an index scan that
+        // finds nothing in a healthy build.
+        //
+        // PREPARED LAZILY, and that is not a style choice: this is the only
+        // statement here that reaches outside the manifest's own tables, and
+        // a manifest is legitimately built against a database that holds no
+        // catalog — the unit suite does exactly that. Preparing it eagerly
+        // threw SQLITE_ERROR at construction and took twenty-one unrelated
+        // tests with it.
+        unrenderedIds() {
+            if (stmtUnrendered === undefined) {
+                try {
+                    stmtUnrendered = db.prepare(`
+                        SELECT e.id FROM mikser_entities e
+                        LEFT JOIN mikser_snapshots s ON s.id = e.id
+                        LEFT JOIN mikser_failures  f ON f.id = e.id
+                        WHERE e.meta_layout IS NOT NULL AND s.id IS NULL AND f.id IS NULL
+                    `)
+                } catch {
+                    stmtUnrendered = null      // no catalog here; nothing to recover
+                }
+            }
+            return stmtUnrendered ? stmtUnrendered.all().map(row => row.id) : []
         },
 
         allFailures() {

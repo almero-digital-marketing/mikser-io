@@ -52,6 +52,12 @@ export const REASON = Object.freeze({
     RELOAD: 'reload',
     REBUILD_INTERRUPTED: 'rebuild-interrupted',
     OUTPUT_MISSING: 'output-missing',
+    // A catalog entity with a layout that has no snapshot at all — distinct
+    // from NEVER_RENDERED below, which is a gate reporting what it found. This
+    // one is an OVERRIDE: nothing would otherwise look at such an entity,
+    // because every other mechanism starts from a snapshot. Claimed once per
+    // entity per process; see claimUnrendered.
+    NEVER_RECORDED: 'never-recorded',
     // Evidence — each layer's business, named here so the vocabulary is
     // legible as a whole.
     UNCHANGED: 'unchanged',
@@ -117,6 +123,49 @@ export function missingOutputIds() {
 
 export function forgetMissingOutputs() {
     cachedMissingOutputs = null
+    // `unrenderedOnce` is NOT dropped here. It is per PROCESS, not per cycle:
+    // clearing it would recompute the set every cycle and hand back the same
+    // un-renderable entity every time, which is the churn the claim-once rule
+    // exists to prevent.
+}
+
+// Entities with a layout that have never recorded a snapshot.
+//
+// The gap `missingOutputIds` cannot see: it walks SNAPSHOTS, so an entity
+// that never got one is invisible to it, and nothing else looks either — the
+// source gate sees the file unchanged and never journals it again. That is
+// the state a superseded DELETE left behind, and the reason it was permanent:
+// a missing page, green builds forever, and only --audit-output to say so.
+//
+// ONE DISPATCH PER ENTITY, per process, which is the whole safety of it.
+// Membership is CLAIMED rather than read: an id comes out once and is then
+// gone from the set. An entity that legitimately cannot render — a layout
+// that produces no destination is the real case, and `mikser_explain` names
+// it — therefore costs one wasted dispatch rather than one per cycle for the
+// life of the process. Re-dispatching such an entity forever is the failure
+// this net could otherwise become, and it would be quiet: slower builds and
+// nothing to point at.
+//
+// Computed lazily and only once, then dropped alongside the missing-output
+// cache at the end of onFinalize.
+let unrenderedOnce = null
+
+export function claimUnrendered(id) {
+    if (id === undefined) return false
+    if (!unrenderedOnce) {
+        // Nothing has ever rendered, so nothing is missing: this is a cold
+        // build and every entity is about to be dispatched on its own merits.
+        // Without this the whole corpus answers `never-recorded` on a first
+        // build — true, useless, and it would take the real reason off every
+        // page in `--json`.
+        const recorded = runtime.manifest?.size?.() ?? 0
+        unrenderedOnce = recorded > 0
+            ? new Set(runtime.manifest?.unrenderedIds?.() ?? [])
+            : new Set()
+    }
+    if (!unrenderedOnce.has(id)) return false
+    unrenderedOnce.delete(id)
+    return true
 }
 
 // What overrides a gate's own evidence, or null when nothing does.
@@ -138,6 +187,10 @@ export function bypassReason({ reload = false, id } = {}) {
     // this module exists, and this is the first override added since.
     if (runtime.options?.cacheRebuildInterrupted) return REASON.REBUILD_INTERRUPTED
     if (id !== undefined && missingOutputIds().has(id)) return REASON.OUTPUT_MISSING
+    // Last, and after OUTPUT_MISSING on purpose: an entity with a snapshot
+    // whose file went missing is the better-understood case and keeps its own
+    // reason, which `--json` callers and the scenario suite already match on.
+    if (claimUnrendered(id)) return REASON.NEVER_RECORDED
     return null
 }
 
