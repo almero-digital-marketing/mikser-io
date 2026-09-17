@@ -53,8 +53,47 @@ onFinalize(async () => {
     const newDestinationsByParent = new Map()
     const lostPagination = new Set()
 
-    for await (const { entity } of useJournal('Manifest cleanup', [OPERATION.DELETE])) {
-        deletedIds.push(entity.id)
+    // A DELETE only counts if nothing re-created the entity after it.
+    //
+    // Collected with no regard for supersession, this unlinked a page that
+    // had just been written. A file created, deleted and re-created AT THE
+    // SAME PATH while one cycle was held open leaves that cycle holding
+    // CREATE, DELETE and CREATE for one id — and since 11.10.2 a cancelled
+    // cycle's entries are carried rather than dropped, which is what lets
+    // the stale DELETE reach the cycle that finally renders the entity. That
+    // fix is right; this is the other end of it.
+    //
+    // The staging below and the `claimedByThisCycle` guard were both written
+    // for the RENAME case, where the DELETE carries the OLD id and the RENDER
+    // a NEW one. There the new destination is correctly protected. When the
+    // id is the SAME, the guard skipped the very destination just written,
+    // `stillClaimed` was empty because a first render has no snapshot row
+    // yet, and the unlink ran: an empty output directory, no snapshot, no
+    // failure, `Rendered: 1` and a green build. Nothing recovered it — the
+    // source gate saw the file unchanged, and missingOutputIds() iterates
+    // SNAPSHOTS, so an entity that never got one is invisible to it.
+    //
+    // ORDER, not catalog presence. Catalog presence gives the same answers
+    // today, but only because catalog.js's finalize drain happens to be
+    // registered before this one (index.js exports catalog.js first), so the
+    // row is already gone when cleanup reads it. That is an invisible
+    // coupling: reordering two exports would silently restore this bug. The
+    // journal knows the answer on its own, and mikser-io-layouts already
+    // reconciles the same journal by order when it seeds dispatch.
+    const lastDelete = new Map()
+    const lastWrite = new Map()
+    for await (const { id: seq, operation, entity } of useJournal(
+        'Manifest cleanup', [OPERATION.DELETE, OPERATION.CREATE, OPERATION.UPDATE])) {
+        if (!entity?.id) continue
+        const seen = operation === OPERATION.DELETE ? lastDelete : lastWrite
+        const prior = seen.get(entity.id)
+        if (prior === undefined || seq > prior) seen.set(entity.id, seq)
+    }
+    for (const [id, seq] of lastDelete) {
+        // `>` and not `>=`: a render that opts out of the catalog journals its
+        // DELETE after the entity's own CREATE, so the DELETE is genuinely
+        // later and must win — the rule 2e documents.
+        if (seq > (lastWrite.get(id) ?? -1)) deletedIds.push(id)
     }
 
     // Every destination claimed by a render task this cycle — whether it
