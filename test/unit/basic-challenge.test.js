@@ -21,26 +21,29 @@ import assert from 'node:assert/strict'
 import { basicChallenge } from '../../src/auth.js'
 
 describe('basicChallenge', () => {
-    it('omits charset by default', () => {
-        assert.equal(basicChallenge({ realm: 'mikser' }), 'Basic realm="mikser"')
-    })
-
-    it('emits it exactly as RFC 7617 writes it when asked', () => {
-        assert.equal(basicChallenge({ realm: 'mikser', charset: true }),
+    it('emits charset by default, exactly as RFC 7617 writes it', () => {
+        assert.equal(basicChallenge({ realm: 'mikser' }),
             'Basic realm="mikser", charset="UTF-8"')
     })
 
+    it('omits it when a deployment has measured a client that cannot parse it', () => {
+        assert.equal(basicChallenge({ realm: 'mikser', charset: false }),
+            'Basic realm="mikser"')
+    })
+
     it('defaults the realm rather than emitting an empty one', () => {
-        assert.equal(basicChallenge(), 'Basic realm="mikser"')
-        assert.equal(basicChallenge({}), 'Basic realm="mikser"')
+        assert.equal(basicChallenge(), 'Basic realm="mikser", charset="UTF-8"')
+        assert.equal(basicChallenge({}), 'Basic realm="mikser", charset="UTF-8"')
     })
 
     it('escapes a realm that would otherwise end the field early', () => {
         // A quoted-string, so a bare quote inside it hands the rest of the
         // header to the parser as garbage. Impossible to get right at five
         // call sites and trivial in one.
-        assert.equal(basicChallenge({ realm: 'say "hi"' }), 'Basic realm="say \\"hi\\""')
-        assert.equal(basicChallenge({ realm: 'back\\slash' }), 'Basic realm="back\\\\slash"')
+        assert.equal(basicChallenge({ realm: 'say "hi"', charset: false }),
+            'Basic realm="say \\"hi\\""')
+        assert.equal(basicChallenge({ realm: 'back\\slash', charset: false }),
+            'Basic realm="back\\\\slash"')
     })
 
     it('treats any truthy charset as the one value the RFC allows', () => {
@@ -48,6 +51,6 @@ describe('basicChallenge', () => {
         // so the flag is a boolean and cannot express a wrong charset.
         assert.equal(basicChallenge({ realm: 'r', charset: 1 }), 'Basic realm="r", charset="UTF-8"')
         assert.equal(basicChallenge({ realm: 'r', charset: false }), 'Basic realm="r"')
-        assert.equal(basicChallenge({ realm: 'r', charset: undefined }), 'Basic realm="r"')
+        assert.equal(basicChallenge({ realm: 'r', charset: 0 }), 'Basic realm="r"')
     })
 })

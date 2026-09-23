@@ -136,17 +136,28 @@ export function reachabilityOf({ auth, token, allowRemote } = {}) {
 // a non-ASCII password from a client that would otherwise send latin-1, which
 // this server cannot match because it decodes the header as UTF-8.
 //
-// OFF by default, because the measured cost is larger than that benefit. The
-// Windows WebDAV mini-redirector appears not to parse the parameter, and a
-// challenge carrying it leaves a mapped drive unable to reconnect from stored
-// credentials at all: before/after on a live deployment, with the parameter
-// stripped at the proxy as the only variable, the client went from never
-// sending an Authorization header to offering Basic unprompted. Interactive
-// entry worked either way — that path sends Basic blind and never reads the
-// challenge, which is the asymmetry that identified it.
+// ON by default, which is where it started and where the evidence leaves it.
 //
-// Turn it on where non-ASCII passwords matter more than Explorer does.
-export function basicChallenge({ realm = 'mikser', charset = false } = {}) {
+// It briefly defaulted off, on a report that stripping the parameter at the
+// gate let a Windows client reconnect from stored credentials. That
+// measurement did not hold: the improvement turned out to be a mapping
+// reconnect being compared against an ad-hoc UNC access, and with the rewrite
+// still in place the mount still fails. The third theory about that failure
+// to look convincing and not survive contact.
+//
+// What is left is the RFC's own reason, and it points the other way. The
+// clients that fail — the Windows mini-redirector and macOS WebDAVFS — both
+// fail when replaying a credential from a STORE while a hand-typed one works,
+// and a credential store is exactly where a non-ASCII password gets re-encoded
+// on the way out. This server decodes the header as UTF-8, so a client that
+// emits its platform codepage instead does not match. That is the case
+// `charset` exists to prevent, so removing it is at best neutral and at worst
+// the wrong direction.
+//
+// `charset: false` for a deployment that has measured a client which cannot
+// parse the parameter. The point of the option is that this is a deployment's
+// call, not that either answer is known to be right everywhere.
+export function basicChallenge({ realm = 'mikser', charset = true } = {}) {
     // A realm is a quoted-string, so a quote or a backslash inside one would
     // end the field early and hand the rest to the parser as garbage. Cheap
     // to prevent here, and impossible to prevent at five call sites.
