@@ -123,6 +123,37 @@ export function reachabilityOf({ auth, token, allowRemote } = {}) {
 // token-gated endpoint stayed open to localhost. It exists so the api and
 // mcp plugins can keep their documented semantics for a plain `token:`
 // while a real verifier gets the stricter default.
+// The exact bytes of a Basic challenge, in one place.
+//
+// It was written out at five call sites across two packages, which is how the
+// `charset` parameter came to be a hardcoded decision nobody could change
+// without a reverse-proxy rewrite.
+//
+// `charset="UTF-8"` is RFC 7617 §2.1, and the RFC is explicit about its
+// weight: "This information is purely advisory." It tells a client to encode
+// the user-pass as UTF-8 NFC; a client that ignores it is unaffected for
+// ASCII credentials, which is nearly all of them. It buys exactly one thing —
+// a non-ASCII password from a client that would otherwise send latin-1, which
+// this server cannot match because it decodes the header as UTF-8.
+//
+// OFF by default, because the measured cost is larger than that benefit. The
+// Windows WebDAV mini-redirector appears not to parse the parameter, and a
+// challenge carrying it leaves a mapped drive unable to reconnect from stored
+// credentials at all: before/after on a live deployment, with the parameter
+// stripped at the proxy as the only variable, the client went from never
+// sending an Authorization header to offering Basic unprompted. Interactive
+// entry worked either way — that path sends Basic blind and never reads the
+// challenge, which is the asymmetry that identified it.
+//
+// Turn it on where non-ASCII passwords matter more than Explorer does.
+export function basicChallenge({ realm = 'mikser', charset = false } = {}) {
+    // A realm is a quoted-string, so a quote or a backslash inside one would
+    // end the field early and hand the rest to the parser as garbage. Cheap
+    // to prevent here, and impossible to prevent at five call sites.
+    const quoted = String(realm).replace(/[\\"]/g, '\\$&')
+    return charset ? `Basic realm="${quoted}", charset="UTF-8"` : `Basic realm="${quoted}"`
+}
+
 export async function authorize(req, verifier, { allowRemote = false, trustLoopback = false } = {}) {
     const local = isLoopback(req.ip)
 
