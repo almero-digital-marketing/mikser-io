@@ -24,6 +24,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { networkInterfaces } from 'node:os'
 import { createServer } from 'node:net'
+import { readFile, writeFile, mkdir } from 'node:fs/promises'
 
 import runtime from './runtime.js'
 import { useLogger } from './engine/index.js'
@@ -84,23 +85,80 @@ export function requestedPort(server) {
     return Number.isInteger(asked) && asked >= 0 ? asked : DEFAULT_PORT
 }
 
+// Where the LAST USED port is remembered, per working folder.
+//
+// A bare `--server` picks a free port, which solved two people colliding on
+// 3001 and introduced a smaller annoyance: the number changed on every
+// restart, so a bookmark, a tab, a terminal scrollback and anything else
+// holding the old one went stale several times an afternoon.
+//
+// Last USED, not last auto-chosen: `--server 3002` once and a bare `--server`
+// after it keeps 3002. Naming a port is the strongest statement available
+// about which one is wanted, and forgetting it the moment the flag is dropped
+// would make the memory useless exactly where it is most deliberate.
+//
+// The runtime folder is the right lifetime. It is per working folder, so two
+// projects still get different ports and two users still do not collide; it
+// survives a restart, which is the whole point; and `--clear` removes the
+// cache database rather than this, so asking for a cold rebuild does not also
+// move the server. Deleting the folder forgets it, which is the correct
+// answer to "give me a different port".
+const PORT_FILE = 'server-port'
+
+const portFile = () => path.join(runtime.options.runtimeFolder ?? '.', PORT_FILE)
+
+async function rememberedPort() {
+    try {
+        const port = Number((await readFile(portFile(), 'utf8')).trim())
+        // A file someone edited by hand, or a half-written one. Anything that
+        // is not a usable port is treated as no preference rather than as an
+        // error — the fallback is exactly what this feature replaced.
+        return Number.isInteger(port) && port > 0 && port < 65536 ? port : null
+    } catch {
+        return null
+    }
+}
+
+async function rememberPort(port) {
+    try {
+        await mkdir(path.dirname(portFile()), { recursive: true })
+        await writeFile(portFile(), `${port}\n`)
+    } catch (err) {
+        // Not worth failing a build over. The cost is the port moving again
+        // next time, which is where this started.
+        useLogger()?.debug?.('Could not remember the server port: %s', err.message)
+    }
+}
+
 // A port nothing is listening on, according to the OS.
 //
-// Binds to 0, reads what it was given, and lets it go. There is a gap between
-// releasing it and the real listen below, so this is a strong preference
-// rather than a reservation — if something takes the port in between, the
-// EADDRINUSE handler further down says so plainly instead of pretending.
-// Narrow enough not to matter on the machine this exists for; not narrow
-// enough to claim it cannot happen.
-export async function freePort() {
-    return new Promise((resolve, reject) => {
+// Binds to `preferred` when one is given and takes it if it is free —
+// which is how a restart keeps the port it had. Falls back to binding 0,
+// which is the OS choosing.
+//
+// Either way it lets the port go again. There is a gap between releasing it
+// and the real listen below, so this is a strong preference rather than a
+// reservation — if something takes the port in between, the EADDRINUSE
+// handler further down says so plainly instead of pretending. Narrow enough
+// not to matter on the machine this exists for; not narrow enough to claim it
+// cannot happen.
+export async function freePort(preferred = 0) {
+    const bind = (port) => new Promise((resolve) => {
         const probe = createServer()
-        probe.once('error', reject)
-        probe.listen(0, () => {
-            const { port } = probe.address()
-            probe.close(() => resolve(port))
+        probe.once('error', () => resolve(null))
+        probe.listen(port, () => {
+            const { port: got } = probe.address()
+            probe.close(() => resolve(got))
         })
     })
+
+    if (preferred) {
+        const kept = await bind(preferred)
+        if (kept) return kept
+    }
+    const found = await bind(0)
+    if (found) return found
+    throw new Error('Could not find a free port to listen on')
 }
 
 // Wire the server lifecycle hooks. Called by engine.js's setup() AFTER
@@ -143,11 +201,29 @@ export function setupServer() {
             // So it becomes a real number as early as it can, and everything
             // downstream sees exactly what it would have seen from
             // `--server <that number>`.
-            const found = await freePort()
+            const kept = await rememberedPort()
+            const found = await freePort(kept)
             runtime.options.server = found
             runtime.options.port = found
-            logger.info('Server port: %d (nothing named one, so this is a free port)', found)
+            // Written BEFORE it is announced. Anything reading the log and
+            // acting on the port — a wrapper script, a test harness, a person
+            // with a fast Ctrl-C — can otherwise beat the write and leave the
+            // port unremembered, which looks exactly like the feature not
+            // working.
+            await rememberPort(found)
+            logger.info(found === kept
+                ? 'Server port: %d (the same one as last time)'
+                : kept
+                    ? 'Server port: %d (last time it was %d, which is taken)'
+                    : 'Server port: %d (nothing named one, so this is a free port)', found, kept)
         }
+        // A NAMED port is remembered too — that is what "last used" means,
+        // and it is the case where the number was chosen on purpose. The auto
+        // branch above has already written its own.
+        if (requestedPort(runtime.options.server) !== 0) {
+            await rememberPort(runtime.options.port)
+        }
+
         logger.debug('Server starting on port %d', runtime.options.port)
 
         // Trust-proxy: when mikser is behind a reverse proxy (nginx,
