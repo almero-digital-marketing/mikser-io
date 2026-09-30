@@ -20,7 +20,7 @@
 
 import { describe, it, after, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { writeFile, rm } from 'node:fs/promises'
+import { writeFile, rm, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import {
     setupFixture, runMikser, cleanup,
@@ -119,6 +119,21 @@ describe('aggregate layout invalidation', () => {
         // query matcher sees it → index invalidates. The deleted post
         // itself doesn't render (manifest.remove cleans the snapshot).
         assert.equal(rendered(combined), 1, `expected 1 render (index only)\n${combined}`)
+
+        // And what it re-rendered TO. Counting renders proves invalidation
+        // fired; it says nothing about whether the page that came out still
+        // advertises the entity that went away — and that is the half a
+        // reader cares about. Reported against 11.10.5 as a sitemap keeping
+        // its <loc> for a deleted document: the page was removed, routing
+        // 404'd immediately, and the entry stayed through every later
+        // incremental build until a --clear. This shape does not reproduce
+        // on this version, in one-shot or under --watch, and it would not
+        // have been noticed here either, because the assertion above passes
+        // whether the stale entry survives or not.
+        const index = await readFile(path.join(workdir, 'out/index.html'), 'utf8')
+        assert.doesNotMatch(index, /Post 2/,
+            'the aggregate re-rendered but still lists the deleted post')
+        assert.match(index, /Post 1/, 'and it still lists the one that stayed')
     })
 
     it('no changes → nothing renders', async () => {
