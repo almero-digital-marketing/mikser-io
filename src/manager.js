@@ -166,6 +166,18 @@ const AWAIT_WRITE_FINISH = { stabilityThreshold: 500, pollInterval: 100 }
 const WATCH_DEFAULTS = {
     ignored: ignoreJunk,
     ignoreInitial: true,
+}
+
+// Only the SOURCE watcher settles. `watchFolder` below is the generic one —
+// mikser-io-live points it at the output folder to push browser reloads, and
+// mikser-io-auth at an htpasswd — and neither has the problem this solves:
+// those files are written by mikser itself or edited in place, not staged
+// under a temporary name by an upload tool. Applying it there only delays a
+// reload, and measurably: an event that arrived in 3ms arrives in 753ms with
+// a 500ms settle, on top of live's own 250ms debounce. A caller that wants it
+// asks, the way files.js does.
+const SOURCE_WATCH_DEFAULTS = {
+    ...WATCH_DEFAULTS,
     awaitWriteFinish: AWAIT_WRITE_FINISH,
 }
 
@@ -218,7 +230,7 @@ export function watch(name, folder, options = {}) {
         }
     }
 
-    chokidar.watch(folder, { ...WATCH_DEFAULTS, ...options })
+    chokidar.watch(folder, { ...SOURCE_WATCH_DEFAULTS, ...options })
         .on('all', () => {
             clearTimeout(runtime.engine.processTimeout)
         })
