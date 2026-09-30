@@ -2,6 +2,7 @@
 import path from 'node:path'
 
 import { setup } from './index.js'
+import runtime from './src/runtime.js'
 import { forward, isInstanceLive } from './src/instance.js'
 
 // Before anything is imported or read.
@@ -132,6 +133,43 @@ async function main() {
     }
 
     const mikser = await setup()
+    guardAgainstSilentDeath()
     await mikser.start()
 }
+
+// A long-running process must not die of an asynchronous error nobody caught.
+//
+// Node's default for an unhandled rejection is to print it and exit 1. For a
+// one-shot build that is right — the build failed, and the exit code is how a
+// deploy finds out. For a WATCHER it is the worst available behaviour: the
+// process is gone, the only evidence is an exit code, and whoever is using it
+// finds out because the site stopped updating. Measured on a live site: four
+// deaths in one afternoon, each from a file that moved between the event and
+// the read, and each time the entire signal was "the server is not there any
+// more".
+//
+// So the handler is honest about the difference. It always says what happened,
+// with the stack, because a swallowed fault is the same silence in a different
+// costume. It only keeps the process alive where staying alive is the correct
+// answer.
+//
+// The specific rejections that caused those deaths are now caught where they
+// happen (src/manager.js), which is the better fix. This is the floor under
+// the ones nobody has found yet — a timer callback that rejects, a plugin's
+// detached promise — and there is no shortage of those in an engine this size.
+function guardAgainstSilentDeath() {
+    const longRunning = Boolean(runtime.options?.watch || runtime.options?.server)
+    process.on('unhandledRejection', (reason) => {
+        const logger = runtime.engine?.logger
+        const detail = reason?.stack ?? reason?.message ?? String(reason)
+        if (!longRunning) {
+            // Same outcome as the default, with a line saying so first.
+            logger?.fatal?.('Unhandled rejection: %s', detail)
+            process.exitCode = 1
+            throw reason
+        }
+        logger?.error('Unhandled rejection (the watcher is still running): %s', detail)
+    })
+}
+
 main()

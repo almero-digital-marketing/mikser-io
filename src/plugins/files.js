@@ -103,7 +103,21 @@ export function files(options = {}) {
 
             let synced = true
             switch (action) {
-                case ACTION.CREATE:
+                case ACTION.CREATE: {
+                    // The checksum FIRST, and the link only once it answered.
+                    //
+                    // Linking first left a symlink pointing at nothing when
+                    // the source moved between the event and the read: the
+                    // link was made, `checksum` threw ENOENT, the entity was
+                    // never created, and out/ kept a dangling link that no
+                    // catalog row admits to. It then broke whatever walked
+                    // the output with stat — a consumer's own scope check,
+                    // twice.
+                    //
+                    // Reading first makes the vanishing case leave nothing
+                    // behind: the throw happens before anything is written,
+                    // and the watcher logs it as the ordinary event it is.
+                    const sourceChecksum = await checksum(source)
                     await ensureLink(relativePath)
                     await createEntity({
                         id,
@@ -118,10 +132,11 @@ export function files(options = {}) {
                         // $-ref to this entity expands to it; consumers read
                         // meta.url for the served location (ADR-0011).
                         meta: { url: '/' + name },
-                        checksum: await checksum(source),
+                        checksum: sourceChecksum,
                         link: await link(source)
                     })
                     break
+                }
                 case ACTION.UPDATE: {
                     const current = await findEntity({ id })
                     // `checksum` is the source-checksum FUNCTION from the
@@ -177,7 +192,19 @@ export function files(options = {}) {
             logger.debug('Files folder: %s', runtime.options.filesFolder)
             await mkdir(runtime.options.filesFolder, { recursive: true })
 
-            watch(collection, runtime.options.filesFolder)
+            // A longer settle than the engine's default, because this is the
+            // collection large binaries land in and they are the case that
+            // bit: a video uploaded over WebDAV grows for as long as the link
+            // takes, and an event fired mid-upload gets a checksum of a
+            // partial file — once, of a file read at zero bytes, which was
+            // then published as current.
+            //
+            // Three seconds of stability costs nothing here (nobody edits a
+            // 300 MB video and waits for the page) and buys the margin a slow
+            // or stalling link needs.
+            watch(collection, runtime.options.filesFolder, {
+                awaitWriteFinish: { stabilityThreshold: 3000, pollInterval: 200 },
+            })
         })
 
         onImport(async () => {
