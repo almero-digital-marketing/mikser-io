@@ -60,6 +60,11 @@ const runtime = {
         finalized: [],
         sync: [],
         completed: [],
+        // Fires once a cycle is fully over and `processing` is false — see
+        // process(). The watcher uses it to replay file events it held back
+        // while the cycle ran; anything that must act BETWEEN cycles rather
+        // than inside one belongs here.
+        cycled: [],
     },
 
     // What each phase COST, not only what it did.
@@ -190,6 +195,11 @@ const runtime = {
             await this.cancel()
         }
         await this.mutex.use(async () => {
+            // True for the whole cycle, including the gaps between phases —
+            // `phase` goes null between them, so it cannot answer "is a cycle
+            // running". The watcher reads this to decide whether a file event
+            // belongs to this cycle or the next one; see src/manager.js.
+            this.processing = true
             try {
                 this.abortController = new AbortController()
                 const { signal } = this.abortController
@@ -205,8 +215,16 @@ const runtime = {
                 this.phase = 'cancelled'
                 for (let hook of this.hooks.cancelled) await hook()
                 this.phase = null
+            } finally {
+                this.processing = false
             }
         })
+
+        // After the mutex, so `processing` is already false and a hook that
+        // starts work of its own is not told a cycle is still running. Inside
+        // the cycle — at onFinalized, say — it would be, which is exactly the
+        // mistake this placement exists to avoid.
+        for (const hook of this.hooks.cycled) await hook()
     },
 
     async render(signal) {

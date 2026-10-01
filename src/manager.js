@@ -21,12 +21,52 @@ const tasks = []
 // Not done inside runtime.process(): the first cycle's `gated` count is
 // recorded during import, which runs BEFORE process(), so resetting there
 // would wipe it out of a one-shot build's report.
+// File events that arrived while a cycle was running, waiting for it to end.
+//
+// Keyed by nothing and deduplicated by nothing: a file touched three times
+// mid-cycle is three entries, and the source gate collapses them — it compares
+// checksums and skips what has not moved. Deduplicating here would mean
+// deciding that a CREATE and a DELETE for one path cancel out, which they do
+// not.
+const pending = []
+
+// Replay them, now that the cycle is over.
+//
+// Each delivery journals and schedules on its own, exactly as it would have
+// if it had arrived a moment later — which, as far as the engine is now
+// concerned, it did.
+async function flushPending() {
+    if (!pending.length || runtime.processing) return
+    const waiting = pending.splice(0, pending.length)
+    for (const { hook, name, relativePath, fullPath } of waiting) {
+        try {
+            await hook(name, { relativePath })
+        } catch (err) {
+            reportWatchFailure(err, fullPath)
+        }
+    }
+}
+
+// Every cycle ends here, whichever started it — the watcher, `start()`, or a
+// forwarded rebuild — so this is the one place that catches them all.
+//
+// `cycled` and not `onFinalized`: a finalize hook runs INSIDE the cycle, with
+// `runtime.processing` still true, so the flush would defer the events it was
+// called to deliver and the queue would sit there until something unrelated
+// moved. Measured — the first version of this fix did exactly that and
+// imported nothing.
+runtime.hooks.cycled.push(flushPending)
+
 function scheduleProcess() {
     clearTimeout(runtime.engine.processTimeout)
     runtime.engine.processTimeout = setTimeout(async () => {
         await warnConfigStale()
         resetReport()
-        runtime.process()
+        await runtime.process()
+        // A cancelled cycle runs no finalize hooks, so the flush above never
+        // fires for it and anything that arrived mid-cycle would wait for a
+        // later one that may never come.
+        await flushPending()
     }, 1000)
 }
 
@@ -223,6 +263,33 @@ export function watch(name, folder, options = {}) {
     // not the process.
     const deliver = async (hook, fullPath) => {
         const relativePath = fullPath.replace(`${folder}/`, '')
+        // A file that changes WHILE a cycle is running belongs to the next
+        // one, so it waits.
+        //
+        // Delivered immediately, the sync journals the entity behind a cycle
+        // that has already passed its source gate and its dispatch. Later
+        // phases still walk the journal and the catalog is updated, so the
+        // change is half-applied — and then onFinalized clears the journal,
+        // so the next cycle starts with nothing to do and the entity never
+        // renders. No error anywhere; the build is green twice.
+        //
+        // Reported from production, and it is the shape a plugin reaches for
+        // on purpose: one that re-derives pages by touching its sources from
+        // `onProcess`. 47 PDFs touched, every mtime updated, two cycles
+        // completed, not one file re-imported. Worse than a missed rebuild,
+        // because the plugin had already recorded the work as handled — so
+        // nothing retried, and 46 pages served four-day-old prices with
+        // nothing in the log to say so.
+        //
+        // Deferring is the honest reading of what a cycle is: it processes
+        // the state as of its start. The alternative — keeping those journal
+        // entries for the next cycle — does not work, because the engine's
+        // own later walks legitimately consume them first; measured before
+        // choosing this.
+        if (runtime.processing) {
+            pending.push({ hook, name, relativePath, fullPath })
+            return
+        }
         try {
             await hook(name, { relativePath })
         } catch (err) {
