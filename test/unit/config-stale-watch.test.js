@@ -15,7 +15,7 @@
 
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile, rm, utimes } from 'node:fs/promises'
+import { mkdtemp, writeFile, rm, utimes, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -42,7 +42,7 @@ describe('configStale', () => {
         await withConfig(async ({ file, helper }) => {
             runtime.options.configCoverage = { files: [file, helper], complete: true }
             assert.equal(await configStale(), null, 'nothing to compare against yet')
-            assert.ok(runtime.options.configStamps[file] > 0, 'the baseline was recorded')
+            assert.ok(runtime.options.configStamps[file]?.hash, 'the baseline records a content hash')
         })
     })
 
@@ -56,6 +56,55 @@ describe('configStale', () => {
             const future = new Date(Date.now() + 2000)
             await utimes(helper, future, future)
             assert.equal(await configStale(), helper)
+        })
+    })
+
+    it('says nothing when a file is rewritten with identical content', async () => {
+        // A `git rebase`, `git checkout` or `rsync` does exactly this: new
+        // mtime, same bytes. Keying on mtime made the instance refuse every
+        // forwarded command while `git diff HEAD` reported nothing — and on
+        // production a config the engine believes has moved wipes the cache,
+        // so a no-op rebase buys a full cold re-derive.
+        await withConfig(async ({ file, helper }) => {
+            runtime.options.configCoverage = { files: [file, helper], complete: true }
+            await configStale()
+
+            const identical = await readFile(helper, 'utf8')
+            const future = new Date(Date.now() + 2000)
+            await writeFile(helper, identical)
+            await utimes(helper, future, future)
+
+            assert.equal(await configStale(), null, 'same bytes is not a change')
+        })
+    })
+
+    it('still reports a file whose CONTENT moved, mtime or not', async () => {
+        await withConfig(async ({ file, helper }) => {
+            runtime.options.configCoverage = { files: [file, helper], complete: true }
+            await configStale()
+            await writeFile(helper, 'export const derive = () => 99\n')
+            const future = new Date(Date.now() + 2000)
+            await utimes(helper, future, future)
+            assert.equal(await configStale(), helper)
+        })
+    })
+
+    it('re-stamps an identical rewrite, so the next check is a stat again', async () => {
+        // Without this the file is hashed on every check for the life of the
+        // instance — and configStale runs on every watch rebuild.
+        await withConfig(async ({ file, helper }) => {
+            runtime.options.configCoverage = { files: [file, helper], complete: true }
+            await configStale()
+            const before = runtime.options.configStamps[helper].mtime
+
+            const identical = await readFile(helper, 'utf8')
+            const future = new Date(Date.now() + 2000)
+            await writeFile(helper, identical)
+            await utimes(helper, future, future)
+            await configStale()
+
+            assert.notEqual(runtime.options.configStamps[helper].mtime, before,
+                'the new mtime must be adopted, or every later check re-reads the file')
         })
     })
 

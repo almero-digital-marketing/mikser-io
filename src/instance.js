@@ -31,7 +31,8 @@ import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { existsSync, unlinkSync } from 'node:fs'
-import { chmod } from 'node:fs/promises'
+import { chmod, stat } from 'node:fs/promises'
+import { checksum } from './utils/index.js'
 
 import runtime from './runtime.js'
 import { onLoaded } from './lifecycle.js'
@@ -288,23 +289,55 @@ function configMismatch(theirs) {
 // configCoverage lists every local module the config graph pulled in, so a
 // stat over that list catches an edit to an imported module — which a
 // client-side checksum of the entry file would miss entirely.
+// Has a config file CHANGED since this instance started?
+//
+// Content, not mtime. A `git rebase`, `git checkout` or `rsync` rewrites a
+// file with byte-identical content and a new mtime, and the instance then
+// refused every forwarded command — "this instance's config changed on disk
+// since it started" — while `git diff HEAD` reported nothing. Twice in one
+// afternoon on one machine.
+//
+// On production the cost is not a restart. The config checksum is what the
+// cache is stamped with, so a config the engine believes has moved buys a
+// full cold re-derive of every asset, which is how a no-op rebase turns into
+// twenty minutes of ffmpeg.
+//
+// mtime is kept as a PRE-FILTER, not as the answer: it is a stat against a
+// read, and in the ordinary case nothing has moved and nothing is read. Only
+// a file whose mtime shifted gets hashed, and only a file whose CONTENT
+// shifted is reported. A file rewritten identically has its stamp refreshed
+// so the next check is cheap again.
+async function configFingerprint(file) {
+    try {
+        return { mtime: (await stat(file)).mtimeMs, hash: await checksum(file) }
+    } catch {
+        // Deleted, or unreadable. A stable sentinel, so a file that is still
+        // missing on the next check does not read as having changed again.
+        return { mtime: 0, hash: null }
+    }
+}
+
 export async function configStale() {
     const covered = runtime.options.configCoverage?.files ?? []
     if (!covered.length) return null
-    const { stat } = await import('node:fs/promises')
     const stamps = runtime.options.configStamps
     if (!stamps) {
         // First call: record, do not judge. Nothing to compare against yet.
         runtime.options.configStamps = Object.fromEntries(
-            await Promise.all(covered.map(async (file) => {
-                try { return [file, (await stat(file)).mtimeMs] } catch { return [file, 0] }
-            })))
+            await Promise.all(covered.map(async (file) => [file, await configFingerprint(file)])))
         return null
     }
     for (const file of covered) {
-        let now = 0
-        try { now = (await stat(file)).mtimeMs } catch { /* deleted counts as changed */ }
-        if (stamps[file] !== now) return file
+        const was = stamps[file]
+        const now = await configFingerprint(file)
+        if (was?.mtime === now.mtime) continue          // nothing touched it
+        if (was?.hash === now.hash) {
+            // Touched and identical — a checkout, a rebase, a sync. Not a
+            // change, and re-stamped so this file is a stat again next time.
+            stamps[file] = now
+            continue
+        }
+        return file
     }
     return null
 }
