@@ -77,6 +77,34 @@ describe('translate — operators', () => {
         assert.deepEqual(t.params, ['x', 'y'])
     })
 
+    it('equality against null → IS NULL, not `= NULL`', () => {
+        // `column = NULL` is NULL in SQL and therefore never true, so this
+        // pushed down as a clause matching NOTHING — while sift reads
+        // `{field: null}` as "null or absent" and matches both. The clause
+        // WAS translatable, so no jsFilter was left behind to correct it and
+        // the query simply returned no rows.
+        //
+        // The shape that found it: a multilingual catalog asking for its
+        // language-neutral entities, `{ 'meta.lang': null }`, which is every
+        // row imported once because it has no language.
+        const t = translate({ 'meta.lang': null })
+        assert.equal(t.sql, 'WHERE meta_lang IS NULL')
+        assert.deepEqual(t.params, [])
+        assert.equal(t.jsFilter, null, 'nothing was left for sift to re-check')
+    })
+
+    it('$eq against null → IS NULL', () => {
+        const t = translate({ 'meta.lang': { $eq: null } })
+        assert.equal(t.sql, 'WHERE meta_lang IS NULL')
+        assert.deepEqual(t.params, [])
+    })
+
+    it('equality against a value is unchanged', () => {
+        const t = translate({ 'meta.lang': 'bg' })
+        assert.equal(t.sql, 'WHERE meta_lang = ?')
+        assert.deepEqual(t.params, ['bg'])
+    })
+
     it('$ne against null → IS NOT NULL', () => {
         const t = translate({ type: { $ne: null } })
         assert.equal(t.sql, 'WHERE type IS NOT NULL')

@@ -49,7 +49,20 @@ const TRANSLATABLE_OPS = new Set([
 
 function sqlForOp(column, op, value) {
     switch (op) {
-        case '$eq':  return { sql: `${column} = ?`,  params: [value] }
+        case '$eq':
+            // NULL-safe equality. `column = NULL` is NULL in SQL, never
+            // true, so this pushed down as a clause that matched NOTHING —
+            // while sift reads `{field: null}` as "null or absent" and
+            // matches both. The filter was translatable, so there was no
+            // jsFilter left behind to correct it: the query simply returned
+            // no rows. `$ne` has been null-safe since it was written; this
+            // is the same care on the other side of it.
+            //
+            // An absent key and an explicit null are the same NULL in an
+            // indexed column, so IS NULL is exactly sift's answer here.
+            return value === null
+                ? { sql: `${column} IS NULL`, params: [] }
+                : { sql: `${column} = ?`,  params: [value] }
         case '$ne':  // NULL-safe inequality — IS NOT for null, != otherwise
             return value === null
                 ? { sql: `${column} IS NOT NULL`, params: [] }
