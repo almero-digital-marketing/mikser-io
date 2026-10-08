@@ -746,10 +746,55 @@ export async function* iterateEntities(query) {
 // references (ADR-0007). Used by the api plugin's HTTP handlers,
 // mikser-io-mcp's tools, and any library-mode caller.
 
-async function findRef(ref) {
+// Resolve a ref string to one entity, optionally WITHIN a scope.
+//
+// A multilingual catalog resolves a `$`-ref inside the asking document's
+// language — `{ ...refFilter(ref), 'meta.lang': lang }` — and that scoping is
+// load-bearing: without it a Bulgarian page referencing an untranslated
+// document silently resolves to the English one, and "unresolved ref" is the
+// signal that a translation is missing.
+//
+// It also makes shared data unreachable. Data imported ONCE because it has no
+// language — a price list, a specification table, a taxonomy — carries no
+// `meta.lang` at all, so a scoped filter excludes it on every build. Importing
+// it per language instead means maintaining the same rows three times.
+//
+// So: the scope first, then a target that is outside the scope ENTIRELY. That
+// narrowing is what keeps the guard. An untranslated document HAS a language,
+// just the wrong one, so it still fails to resolve and still warns; only a
+// target with no language at all is reachable by fallback.
+//
+// The fallback asks for it. The shape that suggests itself —
+//
+//     const any = await findEntity(refFilter(ref))
+//     return any?.meta?.lang == null ? any : null
+//
+// — is a different query: it takes an ARBITRARY match among every language and
+// then inspects it, so a ref matching both a language-neutral row and a
+// language-specific document resolves to whichever row came back, and the
+// neutral one becomes unreachable at random. Asking for the absent key is
+// deterministic, and `meta.lang` is an indexed column, so it is also cheap.
+//
+// `scope` is a plain sift fragment and this knows nothing about language:
+// `{ 'meta.lang': lang }` is one use, a tenant or a brand is another. The
+// language lives at the call site, which is the only place that knows the
+// asking document.
+//
+// A caller that wants STRICT scoping, with no fallback, writes the filter
+// directly — `findEntity({ ...refFilter(ref), ...scope })` — which is exactly
+// what it wrote before this existed.
+export async function findRef(ref, scope) {
     if (!ref || typeof ref !== 'string') return null
-    const matches = await findEntities(refFilter(ref))
-    return matches[0] ?? null
+    const filter = refFilter(ref)
+    const scopeKeys = scope ? Object.keys(scope) : []
+    if (!scopeKeys.length) return (await findEntities(filter))[0] ?? null
+
+    const scoped = await findEntities({ ...filter, ...scope })
+    if (scoped.length) return scoped[0]
+
+    // Outside the scope entirely: every scoped key absent.
+    const unscoped = Object.fromEntries(scopeKeys.map(key => [key, { $exists: false }]))
+    return (await findEntities({ ...filter, ...unscoped }))[0] ?? null
 }
 
 function expandLimits() {

@@ -415,6 +415,44 @@ const entity = await findEntity({ id: '/documents/post.md' })
 const entity = await findEntity(e => e.meta?.featured === true)
 ```
 
+### `findRef(ref, scope?)`
+
+Resolves a `$`-ref string — an id, a `meta.href`, a `meta.url`, or an id
+minus its extension — to one entity, or `null`.
+
+With a `scope`, it resolves **within** that scope first, then falls back to a
+target that is **outside the scope entirely** (every scoped key absent):
+
+```js
+// A $-ref from a Bulgarian page finds the Bulgarian target…
+const target = await findRef(ref, { 'meta.lang': 'bg' })
+```
+
+That is the multilingual case it exists for. Scoping a ref lookup by language
+is load-bearing — without it a page referencing an untranslated document
+silently resolves to another language's copy — but it also excludes data that
+is imported *once* because it has no language: a price list, a specification
+table, a taxonomy. The fallback reaches exactly those and nothing else. An
+untranslated document *has* a language, just the wrong one, so it stays
+unresolved and still warns.
+
+Pass the scope as a plain sift fragment; `findRef` knows nothing about
+language, and a tenant or a brand works the same way. Resolution is
+deterministic: the fallback asks for the absent key rather than taking any
+match and inspecting it, so a ref matching both a neutral row and a
+language-specific document always resolves to the neutral one.
+
+For **strict** scoping with no fallback, build the filter directly:
+
+```js
+const target = await findEntity({ ...refFilter(ref), 'meta.lang': lang })
+```
+
+Note that resolution is separate from invalidation. The `$`-ref edge in
+`mikser_refs` is recorded by core language-blind, so an edited target
+re-renders every page referencing it whatever scope the resolver used — which
+is why a `$`-ref beats looking a row up by key in a sidecar.
+
 ### `findEntities(query?)`
 
 Returns an array of all entities matching the query. Returns all entities

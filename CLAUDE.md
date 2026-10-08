@@ -93,7 +93,19 @@ brevity.
   same query shape, seek-paginated — use it when results may be
   corpus-scale and the caller doesn't need an array), `queryEntities`,
   `readEntity`, `subscribe`, `assertExpand`. Expand internals
-  (`expandLimits`, `expandAndProject`, `findRef`) are PRIVATE.
+  (`expandLimits`, `expandAndProject`) are PRIVATE. `findRef(ref, scope?)`
+  is PUBLIC: it resolves a ref within `scope` and then falls back to a target
+  OUTSIDE the scope entirely (every scoped key absent). That is the
+  multilingual case — scoping by `meta.lang` is load-bearing, and it also
+  excludes data imported once because it has no language. The fallback asks
+  for the absent key rather than taking any match and inspecting it, which is
+  the difference between deterministic and row-order. `scope` is a plain sift
+  fragment; core has no language concept and `lang` is NOT in `refFilter`'s
+  vocabulary — a ref is a NAME, the language is the asker's context, and
+  refFilter/matchesRef/lookupKeys are one relation whose reverse direction
+  (`mikser_refs.target_ref`) has no room for it. Resolution is independent of
+  INVALIDATION: `indexEntity` resolves edges language-blind, so an edited
+  target re-renders every referencing page whatever the resolver scoped to.
   All three readers accept either a sift object or a **function**
   predicate; a function cannot be pushed into SQL, so it forces a full
   scan and a JSON.parse per row — prefer an object, and `refFilter(ref)`
