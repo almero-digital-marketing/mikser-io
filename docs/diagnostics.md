@@ -1070,6 +1070,7 @@ distinction is the whole of [Faults](#faults) above.
 
 | Code | Severity | Means |
 | --- | --- | --- |
+| `resources-local-library` | warn | A `resources()` library declared with `match` and no `url`, so it matches LOCAL paths. The plugin fetches remote things and serves them locally; a local match reaches neither half — nothing watches the files and nothing deploys them, while `meta.url` promises a served path. The entity is rebuilt only when a referencing document is journalled, so editing the file has no effect and neither does a restart. Use `sources()` for originals that must not reach the output, or `files()` for files the site serves as they are. |
 | `source-content-not-text` | warn | A `sources()` collection with `content: true` loaded a file whose bytes are not text. They are decoded as UTF-8 and stored mangled, and every consumer inherits that. Set `content: false` to catalogue the files by path instead — `entity.uri` still points at them. Once per collection. |
 | `front-matter-unreadable` | warn | A file's front-matter block is present but not valid YAML. Its attributes are not available and the text is left as written. Previously this threw and ended the whole run with a parser stack that never named the file. |
 | `source-vanished` | warn | A watched file disappeared between the event and the read. Nothing was imported for it. This is what an upload that writes a temporary file and renames it looks like, and it used to kill the process. |

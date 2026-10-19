@@ -67,6 +67,42 @@ export function resources(options = {}) {
 
         for (let library in (options.libraries || [])) {
             let resource = options.libraries[library]
+            // A library with `match` and no `url` is not a library.
+            //
+            // This plugin fetches REMOTE things and serves them locally: the
+            // download writes into resourcesFolder, and that folder is
+            // symlinked into the output — inside `if (downloads.length)`, so
+            // a library with nothing to download links nothing. A local
+            // `match` reaches neither half. It creates an entity pointing at
+            // a file already in the working folder and stamps `meta.url` on
+            // it, which under ADR-0011 promises a deployed path that nothing
+            // here deploys.
+            //
+            // And it is never re-read. The entity is built inside onProcessed
+            // while walking the journal, so its checksum is recomputed only
+            // when a REFERENCING DOCUMENT is journalled — editing the file
+            // itself changes nothing, and a restart does not help either,
+            // because the startup scan's checksum gate skips the unchanged
+            // document so it never enters the journal. Correct on the first
+            // build and stale forever after, which is the most expensive
+            // shape a mistake can take.
+            //
+            // A watcher cannot fix it here. `match` is a regex over reference
+            // STRINGS, not a folder, so there is nothing to watch without
+            // watching the working folder and filtering — and that, with a
+            // folder boundary, a checksum gate and a delete sweep, is
+            // `useSource`. Two of those would be one too many.
+            if (resource?.match && !resource?.url) {
+                useLogger().warn(
+                    { code: 'resources-local-library', library, match: resource.match },
+                    'Resources library %j is declared with `match` and no `url`, so it matches LOCAL paths. '
+                    + 'Nothing watches them and nothing serves them: the entity is rebuilt only when a '
+                    + 'document referencing it changes, so editing the file itself has no effect and neither '
+                    + 'does a restart. Catalogue the folder instead — sources({ %s: { folder: ... } }) for '
+                    + 'originals that must NOT reach the output (transcoded by mikser-io-assets, say), or '
+                    + 'files({ filesFolder: ... }) for files the site serves as they are.',
+                    library, library)
+            }
                 // The key is a REGULAR EXPRESSION source, which is what the
             // escapeStringRegexp call says: you only escape a string you are
             // about to compile. The render helper has always read it that way
