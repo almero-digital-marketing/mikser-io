@@ -40,6 +40,7 @@
 import path from 'node:path'
 import { mkdir, readFile } from 'node:fs/promises'
 import { globby } from 'globby'
+import { minimatch } from 'minimatch'
 import pMap from 'p-map'
 import runtime from './runtime.js'
 import { useLogger } from './engine/index.js'
@@ -326,6 +327,35 @@ export function warnIfNotText(collection, name, bytes, logger) {
 // to see a file header without decoding a whole document twice.
 const SNIFF_BYTES = 8 * 1024
 
+// The glob a collection's `extensions` select, for globby and minimatch alike.
+//
+// A SINGLE extension must not go through brace syntax: `**/*.{css}` matches
+// NOTHING in minimatch/globby — a one-element brace is not expanded — so a
+// source declaring one extension silently imported zero files and reported
+// "Styles loaded: 0" as though the folder were empty.
+export function sourcePattern(extensions = ['*']) {
+    if (extensions.includes('*')) return '**/*'
+    return extensions.length === 1 ? `**/*.${extensions[0]}` : `**/*.{${extensions.join(',')}}`
+}
+
+// Whether a path the watcher reports belongs to this collection — the scan's
+// own rules, applied to one file.
+//
+// The watcher sees the whole FOLDER. Without this, every file arriving
+// between restarts becomes an entity of the collection whatever its
+// `extensions` say — a `.txt` beside the `.json` reports of an
+// `extensions: ['json']` collection is catalogued as a report — and the next
+// restart's scan, which honours the declaration, sweeps it away again. Two
+// collections sharing a folder by extension (reports, and the photos beside
+// them) would each take the other's files.
+//
+// `dot: false` like globby's default, so the two agree on dotfiles too.
+export function sourceAccepts(relativePath, { pattern, ignore = [] }) {
+    const file = relativePath.replace(/\\/g, '/')
+    if (!minimatch(file, pattern, { dot: false })) return false
+    return !ignore.some(glob => minimatch(file, glob, { dot: true }))
+}
+
 export function useSource(core, options) {
     const {
         runtime,
@@ -366,23 +396,14 @@ export function useSource(core, options) {
     const prefix = idPrefix ?? `/${collection}`
     const cap = collection.replace(/^./, c => c.toUpperCase())
     const progressLabel = progress ?? `${cap} import`
-    // A SINGLE extension must not go through brace syntax: `**/*.{css}`
-    // matches NOTHING in minimatch/globby — a one-element brace is not
-    // expanded — so a source declaring one extension silently imported zero
-    // files and reported "Styles loaded: 0" as though the folder were empty.
-    // Same shape as the other silent-declaration failures: green build,
-    // nothing there.
-    const pattern = extensions.includes('*')
-        ? '**/*'
-        : extensions.length === 1
-            ? `**/*.${extensions[0]}`
-            : `**/*.{${extensions.join(',')}}`
+    const pattern = sourcePattern(extensions)
 
     // Hot-reload — chokidar dispatches into onSync(collection) when
     // a file inside the folder changes.
     onSync(collection, async ({ action, context }) => {
         const logger = useLogger()
         if (!context?.relativePath) return false
+        if (!sourceAccepts(context.relativePath, { pattern, ignore: [...junkIgnore(), ...ignore] })) return false
 
         // DELETE doesn't need to touch the file — we identify the
         // entity by id derived from the path alone. Allows onSync
