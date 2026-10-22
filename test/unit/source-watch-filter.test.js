@@ -32,13 +32,13 @@ describe('sourceAccepts', () => {
     const jpg = { pattern: sourcePattern(['jpg']) }
 
     it('takes a file with a declared extension, at any depth', () => {
-        assert.equal(sourceAccepts('Janus/0878562193_201026.json', json), true)
+        assert.equal(sourceAccepts('Janus/0000000000_201026.json', json), true)
         assert.equal(sourceAccepts('report.json', json), true)
     })
 
     it('refuses a file with another extension', () => {
         assert.equal(sourceAccepts('Janus/zz-probe.txt', json), false)
-        assert.equal(sourceAccepts('Janus/0878562193_201026__F_WH.jpg', json), false)
+        assert.equal(sourceAccepts('Janus/0000000000_201026__F_WH.jpg', json), false)
     })
 
     it('lets two collections split one folder by extension', () => {
