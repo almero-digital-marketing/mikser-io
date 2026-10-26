@@ -730,6 +730,18 @@ scheme. Two schemes are handled inline by built-in providers
   `entity.meta.httpTimeoutMs`. Test affordance:
   `__resetHttpCacheForTests()` clears the module-level caches
   between unit tests.
+  **Two reads are two fetches.** The cache only answers a 304 and
+  `inflight` only joins reads that overlap, so against a server with
+  no ETag or Last-Modified every read goes to the network — and an
+  eventually-consistent origin (a published Google Sheet right after
+  a publish) answers two reads in one cycle with different bytes. A
+  plugin that owns a URL entity and decides something from its body
+  puts that body on `entity.content`, so every later
+  `readEntityContent` in the cycle gets the same bytes through the
+  fast path, and reads with `{ reload: true }` when it wants what
+  the URL serves now. `mikser-io-csv` does this for its URL parents;
+  without it a consumer kept a different version from the rows,
+  and every poll matched the fanout's checksum and stayed silent.
 
 Any other scheme (`gdrive://`, `notion://`, `s3://`, …) routes
 through the dynamic-import-by-name path — `mikser-io-provider-<scheme>`
