@@ -19,7 +19,7 @@ export function prepareStatements(db) {
         SELECT id FROM mikser_snapshots WHERE destination = ?
     `)
     const stmtLookupByDestination = db.prepare(`
-        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, metaReads, consumedReads, renderedAt, parent
+        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, metaReads, consumedReads, renderedAt, parent, dispatcher
         FROM mikser_snapshots WHERE destination = ?
     `)
     const stmtDeleteByDestination = db.prepare(`
@@ -56,41 +56,41 @@ export function prepareStatements(db) {
     `)
 
     const stmtLookupById = db.prepare(`
-        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, metaReads, consumedReads, renderedAt, parent
+        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, metaReads, consumedReads, renderedAt, parent, dispatcher
         FROM mikser_snapshots WHERE id = ? ORDER BY destination
     `)
     const stmtLookup = db.prepare(`
-        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, metaReads, consumedReads, renderedAt, parent
+        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, metaReads, consumedReads, renderedAt, parent, dispatcher
         FROM mikser_snapshots WHERE id = ? AND destination = ?
     `)
     const stmtUpsert = db.prepare(`
         INSERT OR REPLACE INTO mikser_snapshots
-            (id, destination, inputHash, inputParts, outputHash, refClosure, metaReads, consumedReads, renderedAt, parent)
+            (id, destination, inputHash, inputParts, outputHash, refClosure, metaReads, consumedReads, renderedAt, parent, dispatcher)
         VALUES
-            (@id, @destination, @inputHash, @inputParts, @outputHash, @refClosure, @metaReads, @consumedReads, @renderedAt, @parent)
+            (@id, @destination, @inputHash, @inputParts, @outputHash, @refClosure, @metaReads, @consumedReads, @renderedAt, @parent, @dispatcher)
     `)
     const stmtDeleteByPK = db.prepare(`
         DELETE FROM mikser_snapshots WHERE id = ? AND destination = ?
     `)
     const stmtSelectByIdOrParent = db.prepare(`
-        SELECT id, destination, parent FROM mikser_snapshots
+        SELECT id, destination, parent, dispatcher FROM mikser_snapshots
         WHERE id = ? OR parent = ?
     `)
     const stmtDeleteByIdOrParent = db.prepare(`
         DELETE FROM mikser_snapshots WHERE id = ? OR parent = ?
     `)
     const stmtSelectByParent = db.prepare(`
-        SELECT id, destination FROM mikser_snapshots WHERE parent = ?
+        SELECT id, destination, dispatcher FROM mikser_snapshots WHERE parent = ?
     `)
     // Every destination one entity claims. An entity legitimately claims
     // several — one per matched layout, and one per page when paginated — so
     // "the destinations this id produced" is a SET, never a single value, and
     // that is the whole reason this query exists separately from stmtLookup.
     const stmtDestinationsById = db.prepare(`
-        SELECT id, destination, parent FROM mikser_snapshots WHERE id = ?
+        SELECT id, destination, parent, dispatcher FROM mikser_snapshots WHERE id = ?
     `)
     const stmtSelectAll = db.prepare(`
-        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, metaReads, consumedReads, renderedAt, parent
+        SELECT id, destination, inputHash, inputParts, outputHash, refClosure, metaReads, consumedReads, renderedAt, parent, dispatcher
         FROM mikser_snapshots
     `)
     const stmtCount = db.prepare(`SELECT COUNT(*) AS c FROM mikser_snapshots`)
@@ -103,6 +103,17 @@ export function prepareStatements(db) {
         SELECT id, MIN(inputHash) AS inputHash
         FROM mikser_snapshots
         WHERE inputHash IS NOT NULL
+        GROUP BY id
+    `)
+    // The same, for one dispatcher's rows. A row is only re-recorded when its
+    // own task renders, so two dispatchers' rows for one id drift apart — a
+    // page re-renders on derived meta while the derivatives beside it are
+    // reused from their markers — and MIN over both could hand a dispatcher
+    // the OTHER one's hash: a page whose inputs moved back reads as current.
+    const stmtEntityInputHashesFor = db.prepare(`
+        SELECT id, MIN(inputHash) AS inputHash
+        FROM mikser_snapshots
+        WHERE inputHash IS NOT NULL AND dispatcher IS ?
         GROUP BY id
     `)
     const stmtDepHashes = db.prepare(`
@@ -190,6 +201,7 @@ export function prepareStatements(db) {
         stmtSelectAll,
         stmtCount,
         stmtEntityInputHashes,
+        stmtEntityInputHashesFor,
         stmtDepHashes,
         stmtSnapshotsWithQuery,
         stmtSnapshotsWithLayout,

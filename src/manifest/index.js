@@ -92,15 +92,17 @@ export function createManifest(db) {
         stmtSelectAll,
         stmtCount,
         stmtEntityInputHashes,
+        stmtEntityInputHashesFor,
         stmtDepHashes,
         stmtSnapshotsWithQuery,
         stmtSnapshotsWithLayout,
         edgeCandidates,
     } = prepareStatements(db)
-    // Ids a dispatcher reported as producing nothing this cycle. Owned by
-    // this instance rather than the module, so a test that builds its own
-    // manifest gets its own set. Drained and cleared by onFinalize.
-    const noOutputIds = new Set()
+    // Ids a dispatcher reported as producing nothing this cycle, each with the
+    // dispatchers that said so. Owned by this instance rather than the module,
+    // so a test that builds its own manifest gets its own set. Drained and
+    // cleared by onFinalize.
+    const noOutputIds = new Map()
     const manifest = {
         // Look up a previously-recorded entry by entity (or by an
         // object with `{id, destination}`). Returns the snapshot, or
@@ -556,8 +558,8 @@ export function createManifest(db) {
         },
 
         // Record a successful render. Single INSERT OR REPLACE.
-        record(entity, deps, metaReads, consumedReads) {
-            stmtUpsert.run(snapToRow(buildSnapshot(entity, deps, undefined, metaReads, consumedReads)))
+        record(entity, deps, metaReads, consumedReads, dispatcher) {
+            stmtUpsert.run(snapToRow(buildSnapshot(entity, deps, undefined, metaReads, consumedReads, dispatcher)))
         },
 
         // Return the set of entity ids whose recorded snapshots have a
@@ -619,8 +621,15 @@ export function createManifest(db) {
         //
         // Per cycle: onFinalize clears the set after draining it. Saying it
         // twice for one entity is harmless.
-        recordNoOutput(id) {
-            if (id) noOutputIds.add(id)
+        //
+        // `dispatcher` is the name the caller puts on its render tasks, and
+        // the report reaches only that dispatcher's rows. A report that no
+        // layout matched says nothing about the derivatives a preset made
+        // from the same entity.
+        recordNoOutput(id, dispatcher = null) {
+            if (!id) return
+            if (!noOutputIds.has(id)) noOutputIds.set(id, new Set())
+            noOutputIds.get(id).add(dispatcher)
         },
 
         // paginated children whose `parent` is set to this id). Returns
@@ -669,10 +678,17 @@ export function createManifest(db) {
         // that one decision, and a second consumer would otherwise have to
         // rediscover the same caveat. missingOutputIds() is memoized for the
         // cycle, so this shares the walk the source gate already paid for.
-        recordedHashes() {
+        //
+        // `dispatcher`, when given, reads only the hashes that dispatcher's
+        // own renders recorded — see stmtEntityInputHashesFor. Without it,
+        // every row counts.
+        recordedHashes(dispatcher) {
             const missingOutputs = missingOutputIds()
             const map = new Map()
-            for (const row of stmtEntityInputHashes.iterate()) {
+            const entityHashes = dispatcher === undefined
+                ? stmtEntityInputHashes.iterate()
+                : stmtEntityInputHashesFor.iterate(dispatcher)
+            for (const row of entityHashes) {
                 if (missingOutputs.has(row.id)) continue
                 map.set(row.id, row.inputHash)
             }

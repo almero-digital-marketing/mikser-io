@@ -82,7 +82,7 @@ export function buildRefClosure(entity, deps) {
     return closure
 }
 
-export function buildSnapshot(entity, deps, outputHash, metaReads, consumedReads) {
+export function buildSnapshot(entity, deps, outputHash, metaReads, consumedReads, dispatcher) {
     const snapshot = {
         id: entity.id,
         destination: entity.destination,
@@ -101,6 +101,7 @@ export function buildSnapshot(entity, deps, outputHash, metaReads, consumedReads
     if (consumedReads?.length) snapshot.consumedReads = consumedReads
     if (entity.parent) snapshot.parent = entity.parent
     if (outputHash) snapshot.outputHash = outputHash
+    if (dispatcher) snapshot.dispatcher = dispatcher
     return snapshot
 }
 
@@ -119,6 +120,7 @@ export function rowToSnap(row) {
         consumedReads: row.consumedReads ? JSON.parse(row.consumedReads) : undefined,
         renderedAt:  row.renderedAt ?? undefined,
         parent:      row.parent ?? undefined,
+        dispatcher:  row.dispatcher ?? undefined,
     }
 }
 
@@ -134,6 +136,7 @@ export function snapToRow(snap) {
         consumedReads: snap.consumedReads ? JSON.stringify(snap.consumedReads) : null,
         renderedAt:  snap.renderedAt  ?? null,
         parent:      snap.parent      ?? null,
+        dispatcher:  snap.dispatcher  ?? null,
     }
 }
 

@@ -726,7 +726,7 @@ What was rendered and whether it needs redoing.
 | `snapshotsFor(id)` | every snapshot for an entity, without knowing its destinations |
 | `lookup({id, destination})` | one snapshot |
 | `skipDecision(entity, …)` | `{ skip, reason }` — the same reason `--json` reports |
-| `recordedHashes()` | the dep-hashes dependents last saw |
+| `recordedHashes(dispatcher?)` | the input hash each entity last rendered from (one dispatcher's renders when named), and the dep-hashes dependents last saw |
 | `queryAffected(mutated)` | which query-dependent snapshots this mutation hits |
 | `snapshotsAt(destination)` | every snapshot claiming a destination — the reverse of `snapshotsFor`, and the way back from a built file to what produced it |
 | `sourcesBehind(snapshot)` | the source entities that fed one render, each with `via` naming HOW it got there (layout, partial, ref, or the recorded query it matched) |
@@ -788,6 +788,21 @@ this and matched nothing" — never for a failure, and never for a declaration
 that could not be resolved, since mikser keeps the last good output through an
 error rather than taking the page down. `mikser-io-layouts` makes it; any
 other dispatcher can.
+
+Pass the same `dispatcher` the plugin puts on its render tasks —
+`recordNoOutput(id, 'layouts')`. The report then reaches only that
+dispatcher's snapshots: an entity that matches no layout any more can still be
+the source of preset derivatives, and those are not the layout plugin's to
+drop.
+
+**Every snapshot carries the `dispatcher` that rendered it**, and the
+finalize cleanup never compares across dispatchers. That cleanup infers "this
+entity no longer produces that file" from what was scheduled this cycle, which
+is only sound for a dispatcher that scheduled something. One entity can be a
+page and the source of preset derivatives, and the two plugins gate it on
+different evidence — so a cycle where only the presets were scheduled is
+ordinary, and read across dispatchers it unlinked the page and dropped its
+snapshot, leaving nothing anywhere to say the page was missing.
 
 Without it, an entity that stops producing output leaves its page on disk with
 a snapshot still vouching for it — and because the file still matches the hash

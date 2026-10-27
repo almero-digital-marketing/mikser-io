@@ -374,6 +374,22 @@ brevity.
   of folder names written in the plugin. A hardcoded list misses every
   collection a project registers through `sources()`, which produced 63
   false warnings per build on a real site.
+- **The manifest compares claims PER DISPATCHER.** A render task names the
+  plugin that produced it (`options.dispatcher` — `'layouts'`, `'assets'`),
+  every snapshot records it (`mikser_snapshots.dispatcher`), and the finalize
+  cleanup (moved destination, renders-nothing, pagination shrunk/lost) only
+  ever compares a dispatcher's tasks this cycle with that dispatcher's own
+  rows. `recordNoOutput(id, dispatcher)` and `recordedHashes(dispatcher)`
+  are scoped the same way. One entity is routinely a page AND a preset
+  source under one id, and the two plugins gate it on different evidence —
+  layouts on the input hash, assets on its markers and preset revisions — so
+  a cycle where only one schedules it is ordinary. Compared by id alone, a
+  cycle of preset renders unlinked the page as "Destination moved" and
+  dropped its snapshot, so neither the audit nor any gate could see it was
+  gone; a sheet edit took every report page of a clinic site to 404. The
+  same overlap is why mikser-io-layouts' onComplete skips another
+  dispatcher's task: a preset task clones its source, `layout` included.
+  Unnamed tasks share one anonymous dispatcher.
 - **A preset `.md5` marker means a render FINISHED, and its absence is read.**
   (Now in `mikser-io-assets`; kept here because the invariant reaches into
   core's manifest and invalidation, and because core is where it was wrong.)

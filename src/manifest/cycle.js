@@ -21,6 +21,28 @@ import { renderedByDependency } from '../report.js'
 let sharedDb = null
 let sharedManifest = null
 
+// `id → dispatcher → claim`, the shape every per-cycle claim takes below.
+//
+// Keyed by dispatcher because the claims are only complete PER dispatcher. One
+// entity can be a page and the source of preset derivatives, and the two
+// plugins decide independently whether to schedule it: layouts drops a seed
+// whose input hash is unchanged, assets schedules every journaled source and
+// every source of a preset whose revision moved. Keyed by id alone, a cycle
+// where only the presets ran reads the page's silence as "this entity no
+// longer produces that page" and unlinks it, and its snapshot with it — so
+// nothing notices the page is gone. A sheet edit that re-derives a set of
+// reports to the same meta takes every one of their pages off the site.
+function slot(map, id, dispatcher, create) {
+    if (!map.has(id)) map.set(id, new Map())
+    const byDispatcher = map.get(id)
+    if (!byDispatcher.has(dispatcher)) byDispatcher.set(dispatcher, create())
+    return byDispatcher.get(dispatcher)
+}
+
+// A row recorded before a task named its dispatcher reads as unnamed, which is
+// what such a task is.
+const sameDispatcher = (row, dispatcher) => (row.dispatcher ?? null) === dispatcher
+
 export function registerManifestHooks(createManifest) {
 // from their own onLoaded see a fully-populated `runtime.manifest`.
 // Cleanup + persist happen at onFinalize, matching the cycle's natural
@@ -50,8 +72,8 @@ onFinalize(async () => {
     // below needs to be sync. Stage everything, then commit.
     const deletedIds = []          // entity ids to drop from manifest
     const renderedEntries = []     // RENDER entries to record
-    const newDestinationsByParent = new Map()
-    const lostPagination = new Set()
+    const newDestinationsByParent = new Map()   // parent → dispatcher → destinations
+    const lostPagination = new Map()            // id → dispatchers
 
     // A DELETE only counts if nothing re-created the entity after it.
     //
@@ -112,11 +134,14 @@ onFinalize(async () => {
     //   failed    a failed render writes no snapshot on purpose, so the last
     //             good bytes survive. Treating the gap as abandonment
     //             destroys exactly what that rule protects.
+    //
+    // A dispatcher that scheduled nothing for an entity has made no claim at
+    // all, which is why these are kept per dispatcher — see `slot` above.
     const claimedByRenderTasks = new Map()
-    for await (const { output, entity, deps } of useJournal('Output', [OPERATION.RENDER])) {
+    for await (const { output, entity, deps, options } of useJournal('Output', [OPERATION.RENDER])) {
+        const dispatcher = options?.dispatcher ?? null
         if (entity?.id && entity.destination) {
-            if (!claimedByRenderTasks.has(entity.id)) claimedByRenderTasks.set(entity.id, new Set())
-            claimedByRenderTasks.get(entity.id).add(entity.destination)
+            slot(claimedByRenderTasks, entity.id, dispatcher, () => new Set()).add(entity.destination)
         }
         // A catalog-neutral render leaves no snapshot. A snapshot is the
         // manifest's claim about a CATALOG ENTITY's output — it is what
@@ -143,15 +168,13 @@ onFinalize(async () => {
         if (entity?.options?.neutral) continue
         if (output?.success && !output.skipped) {
             renderedEntries.push({ entity, deps, metaReads: output.metaReads,
-                                   consumedReads: output.consumedReads })
+                                   consumedReads: output.consumedReads, dispatcher })
             if (entity.pages > 1) {
                 const parentId = entity.parent ?? entity.id
-                if (!newDestinationsByParent.has(parentId)) {
-                    newDestinationsByParent.set(parentId, new Set())
-                }
-                newDestinationsByParent.get(parentId).add(entity.destination)
+                slot(newDestinationsByParent, parentId, dispatcher, () => new Set()).add(entity.destination)
             } else if (!entity.parent) {
-                lostPagination.add(entity.id)
+                if (!lostPagination.has(entity.id)) lostPagination.set(entity.id, new Set())
+                lostPagination.get(entity.id).add(dispatcher)
             }
         }
     }
@@ -211,20 +234,27 @@ onFinalize(async () => {
     // departed would let another entity's cleanup unlink a destination this
     // one still claims.
     const droppedClaims = new Set()
-    for (const [parentId, keep] of newDestinationsByParent) {
+    for (const [parentId, byDispatcher] of newDestinationsByParent) {
         const rows = m._stmtSelectByParent.all(parentId)
-        for (const row of rows) {
-            if (keep.has(row.destination)) continue
-            filesToUnlink.push({ destination: row.destination, reason: 'Pagination shrunk' })
-            snapshotsToDelete.push({ id: row.id, destination: row.destination })
-            departingIds.add(row.id)
+        for (const [dispatcher, keep] of byDispatcher) {
+            for (const row of rows) {
+                if (!sameDispatcher(row, dispatcher) || keep.has(row.destination)) continue
+                filesToUnlink.push({ destination: row.destination, reason: 'Pagination shrunk' })
+                snapshotsToDelete.push({ id: row.id, destination: row.destination })
+                departingIds.add(row.id)
+            }
         }
     }
 
     // 2c. Pagination lost — parent went from paginated to single-page.
-    for (const parentId of lostPagination) {
+    //
+    // Only for the dispatcher that rendered the single page. A preset renders
+    // its source once and never paginates, so read across dispatchers, every
+    // derivative of a paginated page's entity would say its pages were gone.
+    for (const [parentId, dispatchers] of lostPagination) {
         const rows = m._stmtSelectByParent.all(parentId)
         for (const row of rows) {
+            if (!dispatchers.has(row.dispatcher ?? null)) continue
             filesToUnlink.push({ destination: row.destination, reason: 'Pagination dropped' })
             snapshotsToDelete.push({ id: row.id, destination: row.destination })
             departingIds.add(row.id)
@@ -266,38 +296,44 @@ onFinalize(async () => {
     // every destination the entity used to hold is stale. Reported by
     // mikser-io-layouts when an entity it dispatched matched no layout; the
     // call is general, and any other dispatcher can make it.
-    const claims = new Map(claimedByRenderTasks)
-    for (const id of m._noOutputIds) {
+    //
+    // Both compare a row only with its OWN dispatcher's claims. The rows of a
+    // dispatcher that scheduled nothing this cycle are not in question.
+    const claims = claimedByRenderTasks
+    for (const [id, dispatchers] of m._noOutputIds) {
         // A task contradicts the report — something did render, so believe
         // what happened over what was predicted.
-        if (!claims.has(id)) claims.set(id, new Set())
+        for (const dispatcher of dispatchers) slot(claims, id, dispatcher, () => new Set())
     }
     m._noOutputIds.clear()
 
-    for (const [id, claimed] of claims) {
+    for (const [id, byDispatcher] of claims) {
         if (deleted.has(id)) continue
-        // An entity that renders nothing takes its paginated children with
-        // it. There are no tasks left to own them, and 2b/2c reach children
-        // only when a render told them this cycle's page count — so for this
-        // entity they never fire, and the children would be left claiming
-        // files nothing produces. Where tasks DID run, children stay with
-        // 2b/2c, which know about shrinking in a way this pass does not.
-        const rows = claimed.size
-            ? m._stmtDestinationsById.all(id)
-            : m._stmtSelectByIdOrParent.all(id, id)
-        for (const row of rows) {
-            if (claimed.has(row.destination)) continue
-            if (claimed.size && row.parent) continue
-            filesToUnlink.push({
-                destination: row.destination,
-                reason: claimed.size ? 'Destination moved' : 'Entity renders nothing',
-            })
-            snapshotsToDelete.push({ id: row.id, destination: row.destination })
-            if (row.parent) {
-                // A child is genuinely gone, not moved — its id departs.
-                departingIds.add(row.id)
-            } else {
-                droppedClaims.add(`${row.id}\t${row.destination}`)
+        for (const [dispatcher, claimed] of byDispatcher) {
+            // An entity that renders nothing takes its paginated children with
+            // it. There are no tasks left to own them, and 2b/2c reach children
+            // only when a render told them this cycle's page count — so for this
+            // entity they never fire, and the children would be left claiming
+            // files nothing produces. Where tasks DID run, children stay with
+            // 2b/2c, which know about shrinking in a way this pass does not.
+            const rows = (claimed.size
+                ? m._stmtDestinationsById.all(id)
+                : m._stmtSelectByIdOrParent.all(id, id))
+                .filter(row => sameDispatcher(row, dispatcher))
+            for (const row of rows) {
+                if (claimed.has(row.destination)) continue
+                if (claimed.size && row.parent) continue
+                filesToUnlink.push({
+                    destination: row.destination,
+                    reason: claimed.size ? 'Destination moved' : 'Entity renders nothing',
+                })
+                snapshotsToDelete.push({ id: row.id, destination: row.destination })
+                if (row.parent) {
+                    // A child is genuinely gone, not moved — its id departs.
+                    departingIds.add(row.id)
+                } else {
+                    droppedClaims.add(`${row.id}\t${row.destination}`)
+                }
             }
         }
     }
@@ -406,10 +442,10 @@ onFinalize(async () => {
     // Entities whose output moved while their inputs did not — collected
     // inside the transaction, reported by the caller once it commits.
     const drifted = []
-    for (const { entity, deps, metaReads, consumedReads } of renderedEntries) {
+    for (const { entity, deps, metaReads, consumedReads, dispatcher } of renderedEntries) {
         if (deleted.has(entity.id) || (entity.parent && deleted.has(entity.parent))) continue
         const outputHash = await hashOutputFile(entity.destination)
-        recordedSnapshots.push(buildSnapshot(entity, deps, outputHash, metaReads, consumedReads))
+        recordedSnapshots.push(buildSnapshot(entity, deps, outputHash, metaReads, consumedReads, dispatcher))
     }
 
     // Apply all DB mutations atomically.

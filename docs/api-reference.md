@@ -305,10 +305,19 @@ Batch-adds multiple RENDER operations.
 
 ```js
 await renderEntities([
-  { entity: e1, options: { renderer: 'hbs' }, context: {} },
-  { entity: e2, options: { renderer: 'hbs' }, context: {} }
+  { entity: e1, options: { renderer: 'hbs', dispatcher: 'my-plugin' }, context: {} },
+  { entity: e2, options: { renderer: 'hbs', dispatcher: 'my-plugin' }, context: {} }
 ])
 ```
+
+**`options.dispatcher` names the plugin that produced the task**, and a plugin
+that schedules renders for entities another plugin also renders should set it.
+`mikser-io-layouts` uses `'layouts'`, `mikser-io-assets` uses `'assets'`. The
+manifest records it on the snapshot and only ever compares a dispatcher's
+claims this cycle with that dispatcher's own earlier outputs — so a cycle
+where one plugin schedules an entity and another, finding its outputs current,
+does not, leaves the quiet plugin's outputs alone. Unnamed tasks share one
+anonymous dispatcher.
 
 ### `postprocessEntity(entity, options?, context?)`
 

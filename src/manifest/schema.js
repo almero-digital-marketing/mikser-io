@@ -28,6 +28,17 @@ export const SNAPSHOTS_SCHEMA = `
         consumedReads TEXT,
         renderedAt  INTEGER,
         parent      TEXT,
+        -- The plugin whose render task produced this row — the 'dispatcher'
+        -- task option, NULL when a task names none.
+        --
+        -- One entity can have outputs from several dispatchers: a report that
+        -- is a PAGE (mikser-io-layouts) and the SOURCE of preset derivatives
+        -- (mikser-io-assets) carries one id on both. They gate independently —
+        -- layouts on the input hash, assets on its markers — so a cycle where
+        -- one schedules and the other does not is ordinary. Every "what did
+        -- this entity claim this cycle" comparison has to stay inside one
+        -- dispatcher, or the one that stayed quiet loses its outputs.
+        dispatcher  TEXT,
         PRIMARY KEY (id, destination)
     ) WITHOUT ROWID;
     CREATE INDEX IF NOT EXISTS idx_mikser_snapshots_parent ON mikser_snapshots(parent) WHERE parent IS NOT NULL;
