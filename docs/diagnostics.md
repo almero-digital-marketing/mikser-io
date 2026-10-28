@@ -29,6 +29,7 @@ engine source, the entry point is missing and belongs on this page.
 | I edited the build and nothing rebuilt | `--json` → `config.files` |
 | Is another mikser already holding this folder? | run any command — it forwards, or says so |
 | Why did this build do any work at all? | `--json` → `invalidated` |
+| Why was there a long pause before anything rendered? | [the cycle's own timing lines](#where-a-cycle-spends-its-time) |
 | Did my new pattern get a chance to match? | `--json` → `evaluated` |
 
 ## Command line
@@ -954,6 +955,40 @@ into json mode for its own output or for the next caller.
 `--audit-output` is the exception, and it is the same with or without an
 instance: it reports through the log and writes no document, so `--json` there
 only moves its output to stderr.
+
+## Where a cycle spends its time
+
+Every phase that walks the journal reports itself — `Documents import
+finished: 273 in 103ms`, `Rendering finished: 20287 in 12.1s`. The time
+between two of those lines is the part nobody measured, and on a large site
+that is where a restart goes: a plugin deciding what to dispatch, before any
+of it reaches the journal.
+
+Two lines close that gap.
+
+```
+Assets planning: 20287 render task(s), 20287 reused, in 6.3s, first dispatched after 68ms
+First render after 11.2s
+```
+
+`First render after` comes from the engine, once per cycle, on the first
+render that gets past the skip gates. A cycle that renders nothing says
+nothing — a skip is not a render. The clock starts where a restart's clock
+starts: the process, for the first cycle, and the rebuild's own trigger for
+every cycle after it. That is deliberately not `cycle.startedAt` from
+`--json`, which spans the processing cycle only and so begins after the import
+scan — most of what the reader was waiting through.
+
+`Assets planning` comes from `mikser-io-assets`, with `Assets marker scan` and
+`Assets unfinished sweep` beside it; `Layouts recorded hashes` comes from
+`mikser-io-layouts`. Each of those is shown at `info` only when it takes a
+second or more, and at `debug` otherwise, so an ordinary incremental cycle
+stays quiet.
+
+A plugin that walks the catalog should do the same for its own long steps.
+There is no engine hook for it — just time the step and log it at `info` past
+a threshold. A step with no line is a step nobody can account for, and the
+first thing a reader does with an unexplained pause is assume a hang.
 
 ## Faults
 

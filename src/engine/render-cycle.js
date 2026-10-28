@@ -12,8 +12,9 @@ import { queryContext } from '../database/query-context.js'
 import { withGate } from './gate.js'
 import { updateEntry, useJournal } from '../journal.js'
 import { onRender } from '../lifecycle.js'
-import { renderErrorCount, reportAssetUse, reportError, reportRendered, reportSkipped } from '../report.js'
+import { cycleBeganAt, renderErrorCount, reportAssetUse, reportError, reportRendered, reportSkipped } from '../report.js'
 import { createTrack, mergeTrack } from '../track.js'
+import { formatDuration } from '../logger/index.js'
 import { useLogger } from '../use-logger.js'
 import { formatErrorContext, inputHashOf, lookupKeys, projectMeta } from '../utils/index.js'
 import { workerMessages, workerSafeOptions } from './workers.js'
@@ -23,6 +24,19 @@ export function registerRenderCycle() {
     onRender(async (signal) => {
         const logger = useLogger()
         const renderJobs = new Set()
+        // How long the cycle took to get a render started.
+        //
+        // Between a restart and the first render there is planning — a plugin
+        // deciding what to dispatch — and until this line there was nothing
+        // in the log that measured it. mikser-io-assets planning 20,000
+        // preset tasks took two minutes on a live site and the only evidence
+        // was the gap between two journal lines, which reads as a hang rather
+        // than as work.
+        //
+        // Reported on the FIRST render that gets past the skip gates, not on
+        // the first journal entry: an entry the manifest skips is not a
+        // render, and a cycle with nothing to do should say nothing here.
+        let firstRenderLogged = false
         // destination → the entity ids that actually rendered to it this
         // cycle. Recorded past the skip gate rather than alongside renderJobs
         // so it holds renders that ran, which is what makes "one overwrote
@@ -128,6 +142,10 @@ export function registerRenderCycle() {
                     reportSkipped(entity, decision.reason)
                     logger.debug('Manifest skip: %s → %s', entity.name || entity.id, entity.destination)
                     return
+                }
+                if (!firstRenderLogged) {
+                    firstRenderLogged = true
+                    logger.info('First render after %s', formatDuration(Date.now() - cycleBeganAt()))
                 }
                 if (entity.destination) {
                     if (!renderedTo.has(entity.destination)) renderedTo.set(entity.destination, new Set())

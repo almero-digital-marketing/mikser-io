@@ -64,6 +64,26 @@ export function currentCycle() {
     return runtime.state?.cycle ?? null
 }
 
+// When the work this cycle is doing began — for measuring how long it took to
+// get somewhere, not for reporting the cycle's window.
+//
+// NOT `cycle.startedAt`, which is deliberately narrower: it is stamped by
+// resetReport() when a rebuild is triggered, and on the FIRST cycle it is
+// filled in lazily by whatever first reported — so it spans the processing
+// cycle only, and on a cold build it can land well after the build started.
+// That is the right thing for `finishedAt - startedAt`; it is the wrong thing
+// for "how long until the first render", where the import scan is most of
+// what the reader is waiting through.
+//
+// So: the first cycle measures from the process, which is when a restart's
+// clock really starts, and every rebuild after it measures from its own
+// trigger.
+export function cycleBeganAt() {
+    const id = runtime.state?.cycle?.id
+    if (id === undefined || id === 1) return performance.timeOrigin
+    return runtime.state.cycle.startedAt
+}
+
 // Finished cycles, newest first. `n` of them.
 export function cycleHistory(n = 1) {
     return history().slice(-Math.max(1, n)).reverse()
