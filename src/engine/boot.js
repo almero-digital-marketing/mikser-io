@@ -10,6 +10,8 @@ import { onInitialize, onInitialized, onLoad, onLoaded } from '../lifecycle.js'
 import { INSTALLED_LOG_TTL_MS, LOG_LEVELS, applyLogRequest, rememberBaseLevel } from '../logger/index.js'
 import { attachServerCliOptions, setupServer } from '../server.js'
 import { useLogger } from '../use-logger.js'
+import { resolveThreads } from './threads.js'
+import { resizeWorkerPools } from './workers.js'
 import { mkdir, readdir, rm } from 'fs/promises'
 
 // `options` is setup's own argument, not runtime.options: a programmatic
@@ -51,6 +53,11 @@ export function registerBoot(options) {
                 + 'dies with the process. Levels as above.')
             .option('--log-reset', 'return a running instance to its configured log level', false)
             .option('-e --runtime-folder <folder>', 'set mikser runtime folder relative to working folder', 'runtime')
+            // No default on purpose: "not given" has to stay distinguishable
+            // from "given 4", because that is what the CLI-over-config
+            // precedence rests on. The default lives in threads.js.
+            .option('--threads <n>', 'how many renders and postprocesses may run at once — '
+                + 'sizes the inline dispatchers and both worker pools (default: 4)')
         attachServerCliOptions(runtime.engine.commander)
 
         // Which check answers which question.
@@ -280,6 +287,34 @@ The full version, with what each code means: docs/diagnostics.md`)
         if (runtime.options.siteRoots.length) {
             logger.info('Site roots: %s', runtime.options.siteRoots.join(', '))
         }
+
+        // How wide this build renders, now that the config has been read.
+        //
+        // The pools were built in setup() to whatever a programmatic caller
+        // asked for, which is before the config exists — so this is where a
+        // `threads` key or a `--threads` flag reaches them. Said once, because
+        // it sizes everything and is otherwise invisible: a 24-core container
+        // rendering four at a time looks exactly like a slow site.
+        //
+        // Only a TYPED flag counts as CLI — the same test `--config` uses.
+        // With no default on the option, commander omits the key entirely
+        // when it is absent, so reading runtime.options would see whatever
+        // setup() put there and call every build a CLI one.
+        const typed = runtime.engine?.commander?.getOptionValueSource?.('threads') === 'cli'
+        const { threads, source } = resolveThreads({
+            cli: typed ? runtime.options.threads : runtime.engine?.requestedThreads,
+            config: runtime.config?.threads,
+        })
+        runtime.options.threads = threads
+        await resizeWorkerPools(threads)
+        // Read back from the POOL, not from the number just resolved. The
+        // inline dispatchers take `runtime.options.threads` every cycle, so
+        // they follow on their own; the pools are built before the config
+        // exists and only follow because of the call above. Logging the
+        // resolved number instead would report a width the pools might not
+        // have, which is exactly the failure this whole change is about.
+        const effective = runtime.engine.renderWorkers.options.maxThreads
+        logger.info('Render width: %d at once (%s)', effective, source)
 
         const cli = runtime.options.url
         const cfg = runtime.config?.url

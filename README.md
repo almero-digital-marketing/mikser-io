@@ -258,6 +258,35 @@ For a working starter — config with a real plugin set, sample `documents/`, ex
 - **Plugins** — Functionality is delivered via plugins. Built-in plugins handle common sources (documents, files, layouts, assets). Custom plugins can be added to any project.
 - **Runtime Singleton** — A plain module-level object holds all global state and coordinates the lifecycle. The ES module cache guarantees every importer gets the same instance.
 - **Watch Mode** — In watch mode, file changes trigger incremental re-processing without restarting.
+- **Build width** — `threads` is how many renders and postprocesses run at once. One number sizes the inline dispatchers and both worker pools; the default is 4. See below.
+
+### Build width — `threads`
+
+```bash
+mikser --threads 12
+```
+
+```js
+export default { threads: 12, plugins: [ /* … */ ] }
+```
+
+Command line over config over the default. The effective width is logged once
+at startup, with where it came from:
+
+```
+Render width: 12 at once (cli)
+```
+
+**The default is 4 and raising it is a decision about one machine and one
+workload.** Wide-by-default is dangerous for a renderer that spawns external
+processes — four concurrent `ffmpeg` encodes is how `mikser-io-assets` learned
+to offer a per-preset cap — and a build that is memory-bound gets *worse* with
+more of it in flight. On a many-core box rendering ordinary pages, raising it
+is free speed; measure rather than assume, with `npm run test:perf` or your
+own corpus.
+
+Anything that is not a positive whole number refuses the build instead of
+quietly rendering one at a time.
 
 ## What you can build with it
 

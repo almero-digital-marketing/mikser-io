@@ -1,6 +1,5 @@
 
 
-import Piscina from 'piscina'
 import Queue from 'p-queue'
 import packageInfo from '../../package.json' with { type: 'json' }
 import path from 'node:path'
@@ -18,11 +17,17 @@ import { registerReportDispatch } from './dispatch.js'
 import { registerRenderCycle } from './render-cycle.js'
 import { registerPostprocessCycle } from './postprocess-cycle.js'
 import { registerFinalize } from './finalize.js'
+import { createWorkerPools } from './workers.js'
+import { resolveThreads } from './threads.js'
 export { runReportOnly } from './report-only.js'
 export { useLogger } from '../use-logger.js'
 
 export async function setup(options) {
-    runtime.options.threads = options?.threads !== undefined ? options.threads : 4
+    // The width a programmatic caller asked for, or the default. The CLI flag
+    // and the config key are resolved later, at onLoad, because the config is
+    // not loaded yet here — see resolveThreads and boot.js. The pools below
+    // are rebuilt there if that resolution moves the number.
+    runtime.options.threads = resolveThreads({ cli: options?.threads }).threads
     runtime.engine = {
         // Logger built from logger.js — pino + multistream + inline
         // pino-pretty over a gauge-aware terminal stream. Initial level
@@ -31,32 +36,17 @@ export async function setup(options) {
         // (e.g. to supply a pre-configured pino instance with their own
         // transports); progress-bar coordination is then their problem.
         logger: options?.logger || createMikserLogger('info'),
+        // What a programmatic caller asked for, kept so boot's post-config
+        // resolution can treat it the way it treats a typed --threads. The
+        // resolved value alone cannot say whether 4 was asked for or defaulted.
+        requestedThreads: options?.threads,
         commander: new Command(),
-        // Lazily-allocated worker pools. Render and postprocess both
-        // default to INLINE; Piscina only matters when a layout opts
-        // into TASKS.WORKER (`task: 'worker'`). minThreads: 0 prevents
-        // Piscina from pre-spawning workers at construction time —
-        // INLINE-only workloads pay zero worker cost. idleTimeout
-        // unspawns workers that have sat idle, so transient bursts of
-        // WORKER tasks don't leave threads alive for the rest of the
-        // build.
-        //
-        // Separate pools for render and postprocess: a long PDF
-        // postprocess shouldn't starve render dispatch (or vice versa),
-        // and the two have very different per-task profiles
-        // (renders ~μs-ms, postprocess often hundreds of ms).
-        renderWorkers: new Piscina({
-            filename: new URL('../render.js', import.meta.url).href,
-            maxThreads: runtime.options.threads,
-            minThreads: 0,
-            idleTimeout: 30_000,
-        }),
-        postprocessWorkers: new Piscina({
-            filename: new URL('../postprocess.js', import.meta.url).href,
-            maxThreads: runtime.options.threads,
-            minThreads: 0,
-            idleTimeout: 30_000,
-        }),
+        // Lazily-allocated worker pools, sized by `threads`. Render and
+        // postprocess both default to INLINE; Piscina only matters when a
+        // layout opts into TASKS.WORKER (`task: 'worker'`). See
+        // createWorkerPools for why they are built here and may be replaced
+        // once the config has been read.
+        ...createWorkerPools(runtime.options.threads),
         queue: new Queue({ concurrency: 1 })
     }
     runtime.state = {}
