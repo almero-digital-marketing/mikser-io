@@ -691,9 +691,15 @@ substrate.
   both of which already guarded for the plugin's absence. `renderPreset()`
   must be declared in the plugins array now: it was resolved implicitly by
   render.js's last fallback, a path into core's own `src/plugins/render/`,
-  and that is also why preset renders stay INLINE — a worker resolves by
-  package name (`mikser-io-render-<name>`), which this package does not
-  answer to.
+  A worker resolves a renderer by package name
+  (`mikser-io-render-<name>`), which this package does not answer to — so its
+  descriptors carry `module: import.meta.url` and `workerSafeOptions` passes
+  that through as `pluginModules`, which is how a preset renders on a worker
+  at all. Preset renders are INLINE by DEFAULT, like every render; a preset
+  asks for the pool with `tasks: 'worker'` in its options. A declared
+  `concurrency` no longer forces INLINE: the cap is held by the dispatcher
+  (`engine/gate.js`), around the dispatch and before the mode is chosen, so
+  one counter on the main thread bounds every mode.
 - **`mikser-io-layouts`** — the canonical SSG-flavor task-production
   policy. Owns multi-match layout assignment (`meta.layout` /
   `meta.layouts` dual key + `autoLayouts` peel ladder), per-layout

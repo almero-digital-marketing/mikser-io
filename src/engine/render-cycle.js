@@ -9,6 +9,7 @@ import render from '../render.js'
 import runtime from '../runtime.js'
 import { OPERATION, TASKS } from '../constants.js'
 import { queryContext } from '../database/query-context.js'
+import { withGate } from './gate.js'
 import { updateEntry, useJournal } from '../journal.js'
 import { onRender } from '../lifecycle.js'
 import { renderErrorCount, reportAssetUse, reportError, reportRendered, reportSkipped } from '../report.js'
@@ -202,7 +203,19 @@ export function registerRenderCycle() {
                     // boundaries; WORKER mode crosses a thread boundary
                     // so its renders don't pick up the context — they
                     // fall back to layout-only deps.
-                    result = await queryContext.run({ entityId: entity.id, track }, async () => {
+                    // A cap on how many of THIS kind of render run at once,
+                    // held around the dispatch rather than inside it — see
+                    // engine/gate.js. Before the switch, so it bounds every
+                    // dispatch mode: a renderer that shells out cannot hold
+                    // its own cap under WORKER, where its code runs in a
+                    // worker and the counter would be per thread.
+                    //
+                    // Keyed by the task, not by the renderer, so two capped
+                    // presets do not serialise against each other.
+                    result = await withGate(
+                        renderOptions.options.concurrencyKey ?? renderOptions.options.renderer,
+                        renderOptions.options.concurrency,
+                        () => queryContext.run({ entityId: entity.id, track }, async () => {
                         switch (renderOptions.options.tasks) {
                             case TASKS.INLINE:
                                 renderOptions.logger = logger
@@ -247,7 +260,7 @@ export function registerRenderCycle() {
                                     { signal, transferList: [mc.port1] }
                                 )
                         }
-                    })
+                    }))
 
                     // One shape from both dispatch modes. A worker returns its
                     // track's CONTENTS alongside the output, because the track

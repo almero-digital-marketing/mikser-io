@@ -7,6 +7,7 @@ import path from 'node:path'
 import postprocess from '../postprocess.js'
 import render from '../render.js'
 import runtime from '../runtime.js'
+import { withGate } from './gate.js'
 import { OPERATION, TASKS } from '../constants.js'
 import { updateEntry, useJournal } from '../journal.js'
 import { onBeforePostprocess, onPostprocess, postprocessEntities } from '../lifecycle.js'
@@ -130,6 +131,20 @@ export function registerPostprocessCycle() {
                     }
                     try {
                         let result
+                        // The same cap the render dispatcher holds, for the
+                        // same reason — a postprocessor that drives a headless
+                        // browser is the shape that needs it most. Around the
+                        // dispatch, so it bounds every mode; keyed by the
+                        // task, so two capped postprocessors do not serialise
+                        // against each other. See engine/gate.js.
+                        //
+                        // The switch assigns `result` and breaks rather than
+                        // returning, so the gate closes over it instead of
+                        // being restructured around it.
+                        await withGate(
+                            postprocessOptions.options.concurrencyKey ?? postprocessOptions.options.postprocessor,
+                            postprocessOptions.options.concurrency,
+                            async () => {
                         switch (postprocessOptions.options.tasks) {
                             case TASKS.INLINE:
                                 postprocessOptions.logger = logger
@@ -181,6 +196,7 @@ export function registerPostprocessCycle() {
                                 break
                             }
                         }
+                        })
                         if (!signal.aborted) {
                             entry.output = { success: true }
                             if (result) entry.output.result = result
