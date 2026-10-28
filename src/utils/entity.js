@@ -6,7 +6,7 @@ import yaml from 'yaml'
 import { checksumOf } from './hash.js'
 import { isRefKey } from './refs.js'
 import { contentType } from 'mime-types'
-import { minimatch } from 'minimatch'
+import { Minimatch } from 'minimatch'
 import { mkdir, open, readFile, unlink, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { missingCollectionWrite } from '../auth.js'
@@ -287,14 +287,44 @@ export async function readEntityContent(entity, { reload = false } = {}) {
     }
 }
 
+// Compiled glob patterns, by pattern string.
+//
+// `minimatch(path, pattern)` — the one-shot form this used — parses and
+// compiles the pattern on EVERY call, and this function is asked the same
+// question about the same handful of patterns once per entity. On a catalog
+// of 6,800 files with 29 asset presets that is 5.7 million compilations, and
+// pattern compilation was HALF the CPU of a whole restart — 44s of 89s, all
+// of it inside minimatch's parser, none of it inside its matcher.
+//
+// A compiled Minimatch is immutable and `.match()` is what the one-shot form
+// calls anyway, including its own handling of `#` comment patterns, so this
+// is the same answer with the parse paid once.
+//
+// Bounded, because `match` is public API and a caller may build patterns from
+// data. The cap is far above any real config's pattern count; reaching it
+// means something is generating patterns, and the cheapest correct answer
+// there is to start the cache over rather than grow without limit.
+const COMPILED_PATTERN_LIMIT = 10_000
+const compiledPatterns = new Map()
+
+function compiledPattern(pattern) {
+    let compiled = compiledPatterns.get(pattern)
+    if (!compiled) {
+        if (compiledPatterns.size >= COMPILED_PATTERN_LIMIT) compiledPatterns.clear()
+        compiled = new Minimatch(pattern)
+        compiledPatterns.set(pattern, compiled)
+    }
+    return compiled
+}
+
 export function matchEntity(entity, match) {
     if (!match) return false
     if (typeof match == 'function') return match(entity)
     else if (typeof match == 'string') {
         if (match.substring(0, 2) == '@/') {
-            return minimatch(typeof entity == 'string' ? entity : entity.name, match.substring(2))
+            return compiledPattern(match.substring(2)).match(typeof entity == 'string' ? entity : entity.name)
         } else {
-            return minimatch(typeof entity == 'string' ? entity : entity.id, match)
+            return compiledPattern(match).match(typeof entity == 'string' ? entity : entity.id)
         }
     }
     else if (typeof match == 'object') return _.isMatch(entity, match)
