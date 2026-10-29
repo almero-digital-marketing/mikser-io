@@ -136,6 +136,9 @@ export function resetReport() {
     runtime.state.renderErrors = []
     // Per cycle, unlike the wipe: what changed is a fact about THIS build.
     runtime.state.changed = { ids: [], count: 0 }
+    // Per cycle too, and in practice only ever true of the first one: a
+    // carried journal is drained by the cycle that finalizes.
+    runtime.state.carried = 0
     // Per cycle too: an asset referenced by a page that did not re-render this
     // time was not re-checked, and claiming otherwise would be the kind of
     // completeness this codebase keeps having to walk back.
@@ -212,6 +215,25 @@ function store() {
 export function reportWipe(cause, detail = {}) {
     runtime.state ??= {}
     runtime.state.wipe = { cause, ...detail }
+}
+
+// Work this cycle INHERITED rather than found.
+//
+// A previous run journalled these sources, persisted them — persist runs
+// before render — and was interrupted before rendering them. Nothing on disk
+// has changed since, so the scan correctly reports every one of them as
+// unchanged and `changed` stays empty, while the carried journal entries send
+// real renders through. Without this the report answered `nothing` beside a
+// list of rendered pages, which is the same defect `invalidated` exists to
+// close, read from the other end.
+//
+// Deliberately NOT routed through reportChanged: these files are counted by
+// the scan as gated, and the complement of gated and changed has to keep
+// adding up to what the engine looked at.
+export function reportCarried(count) {
+    if (!count) return
+    runtime.state ??= {}
+    runtime.state.carried = count
 }
 
 // One source whose bytes moved. The complement of reportGated: between them
@@ -518,13 +540,19 @@ export function cycleMovedNothing() {
 function invalidation() {
     const wipe = runtime.state?.wipe
     if (wipe) return wipe
+    const carried = runtime.state?.carried
     const { ids, count } = changedStore()
-    if (!count) return { cause: 'nothing' }
+    // Both can be true at once — a file that moved again while mikser was
+    // down is a changed source AND the interrupted run left entries for the
+    // ones that did not. The changed sources are the more specific answer, so
+    // they keep the cause and the carry is reported beside them.
+    if (!count) return carried ? { cause: 'interrupted', carried } : { cause: 'nothing' }
     return {
         cause: 'sources',
         changed: ids,
         count,
         ...(count > ids.length ? { truncated: count - ids.length } : {}),
+        ...(carried ? { carried } : {}),
     }
 }
 

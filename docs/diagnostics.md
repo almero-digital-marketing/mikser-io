@@ -231,6 +231,7 @@ the engine failed to notice:
 | --- | --- |
 | `nothing` | the engine looked and there was no work. A finding, not an absence — check `summary.gated` to see how much it looked at |
 | `sources` | these files changed, named in `changed` (capped, with `truncated` when there were more) |
+| `interrupted` | a previous run journalled `carried` source changes, persisted them and was killed before rendering them; nothing on disk has moved since, so this cycle's work comes from its journal. Appears as a `carried` field beside `sources` when both are true |
 | `config` | the config or a module it imports moved, so the cache was wiped |
 | `version` | the engine version moved, with `from` and `to` |
 | `clear` | you passed `--clear` |
@@ -436,7 +437,7 @@ thing `find out -type f` cannot do.
 | Flag | Use |
 | --- | --- |
 | `-f, --force` | ignore all three gates (import checksum, dispatch, manifest) and re-render everything |
-| `-R, --resume` | continue from a previous interrupted run's journal; skips the filesystem scan |
+| `-R, --resume` | replay a previous interrupted run's render tasks rather than deriving them again; skips the filesystem scan |
 | `-r, --clear` | clear state before running |
 | `-l, --log <level>` | set the level for this run; `trace` includes per-entity catalog writes |
 | `--log-install <level>` | raise the level on a RUNNING instance without restarting it — restarting drops every connected MCP and drive session, so the tool you need should not require the risky act you are diagnosing. Expires after 30 minutes, dies with the process, and appears in the build report under `logLevel` so a level left on production is findable. |
@@ -624,7 +625,7 @@ The cache holds five tables:
 | Table | Holds |
 | --- | --- |
 | `mikser_entities` | the catalog — one row per entity, `data` is the JSON body |
-| `mikser_journal` | the current cycle's operations, in order — cleared per cycle, which is what makes `--resume` possible |
+| `mikser_journal` | the current cycle's operations, in order — cleared once a cycle finalizes, so a non-empty table at startup is work the previous run never finished |
 | `mikser_refs` | the dependency graph, both directions |
 | `mikser_snapshots` | what was rendered, where, and from which inputs |
 | `mikser_meta` | schema version and config checksum, for cache invalidation |

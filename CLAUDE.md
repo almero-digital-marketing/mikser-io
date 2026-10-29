@@ -71,8 +71,19 @@ brevity.
   `onFinalized`/`onCancel`/`onCancelled`. Plus `runtime.create`/
   `.update`/`.delete` (journal helpers).
 - `journal.js` — per-cycle queue, persisted to `mikser_journal` rows in
-  `runtime/mikser.sqlite`. Drained at onFinalized; survives crashes so
-  `--resume` (`-R`) can pick up unfinalized entries on the next start.
+  `runtime/mikser.sqlite`. Drained at onFinalized; survives crashes, and
+  **the next run carries what an interrupted one left** — its source
+  entries into the first cycle, its render/postprocess entries dropped and
+  derived again (`--resume` (`-R`) replays those too and skips the scan).
+  Discarding both lost the work silently: persist runs before render, so
+  the catalog already held the new checksums, the source gate compared a
+  file against a catalog that matched it and emitted nothing, and no gate
+  further down was ever asked. A deploy that restarted pm2 35 seconds into
+  a cycle took 262 entries with it — the stylesheet bundle among them —
+  and the site served the previous day's CSS under a green build. Carrying
+  the SOURCE entries is enough because everything a cycle renders descends
+  from them; the derived ones were decided by the code the restart just
+  replaced.
   Same public surface: `addEntry`/`addEntries`/`updateEntry`/
   `useJournal`/`clearJournal`. Inserts `JSON.stringify` the row body for
   snapshot isolation (replaces the prior `structuredClone`). Walks are

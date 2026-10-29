@@ -52,7 +52,7 @@ These options are part of `runtime.options` and apply to the engine itself.
 | `clear` | `-r, --clear` | boolean | `false` | Delete `outputFolder` and `runtimeFolder` before each run. |
 | `watch` | `-w, --watch` | boolean | `false` | Watch source folders for changes and rebuild incrementally. |
 | `force` | `-f, --force` | boolean | `false` | Rebuild everything; disable incremental dispatch. |
-| `resume` | `-R, --resume` | boolean | `false` | Continue from journal entries left by a previous interrupted run; skip the initial filesystem scan. The journal table survives crashes, so an interrupted cycle can be picked up by re-running with `--resume`. |
+| `resume` | `-R, --resume` | boolean | `false` | Replay the render and postprocess entries a previous interrupted run left, rather than deriving them again, and skip the initial filesystem scan. That run's source entries are carried with or without the flag — see [watch mode](watch-mode.md#after-an-interrupted-run). |
 | — | `--audit-output` | boolean | `false` | Check every tree mikser writes into against the manifest snapshots — report drift instead of building. Command line only; there is no config key. |
 | `log` | `-l, --log` | string | — | Log level for this run: `trace`, `debug`, `info`, `notice`, `warn`, `error`, `fatal`, `silent`. A level above `info` suppresses the version banner too. |
 | `logInstall` | `--log-install` | string | — | Set the level on a **running** instance, so its own rebuilds are verbose too — the case a per-request flag cannot serve. Expires after 30 minutes, dies with the process, and is disclosed in the build report under `logLevel`. |

@@ -44,7 +44,34 @@ startup
 
 The import phase runs **only once** at startup. Subsequent cycles start from `process()`, which re-reads whatever was changed in the journal by the sync handlers.
 
-The journal is the `mikser_journal` table in `runtime/mikser.sqlite` — so a crash mid-cycle leaves an inspectable record of what hadn't finalized yet, and `--resume` (below) picks up where the prior run left off.
+The journal is the `mikser_journal` table in `runtime/mikser.sqlite` — so a crash mid-cycle leaves an inspectable record of what hadn't finalized yet.
+
+## After an interrupted run
+
+A run that is killed between `persist` and `finalize` leaves the catalog holding the new checksums and the output holding the previous build. Nothing on disk has changed since, so every gate correctly answers "unchanged" — the leftover journal is the only record that there is work to do.
+
+So mikser keeps it. On the next start, with no flag at all:
+
+- The **source entries** (`create` / `update` / `delete`) are carried into the first cycle. They are what moved on disk, and nothing else can tell you so any more.
+- The **render and postprocess entries** are dropped, and this run derives them again. They were decided by the code that was just restarted over — a restart mid-cycle is usually a deploy — and a re-derived task is current where a replayed one is not.
+
+A carried entry never wins over a fresh one: its sequence number is lower than anything the new run journals, so a file that moved again while mikser was down is applied last. The engine says what it carried:
+
+```
+🟡 Previous run was interrupted with 262 unfinalized journal entries — carrying 14
+   unprocessed source change(s) into this cycle and re-deriving the 248 render
+   task(s) they produced (--resume replays those instead)
+```
+
+The `--json` report says the same thing under `invalidated`: `{ cause: "interrupted", carried: 14 }`, or a `carried` field beside `cause: "sources"` when a file moved while mikser was down as well.
+
+The carry is work, and work can be what killed the process — an entity that OOMs or segfaults a render is carried into the next run and tried again, which under a process supervisor is a restart loop rather than a quiet one. The log line names it on every restart, and dropping the entries is one statement:
+
+```bash
+sqlite3 runtime/mikser.sqlite 'DELETE FROM mikser_journal'
+```
+
+That loses exactly what the previous run had not processed, and nothing else — unlike `--clear`, which discards the whole cache and rebuilds from cold.
 
 ## Resuming an interrupted run
 
@@ -54,9 +81,9 @@ mikser --watch --resume
 mikser -w -R
 ```
 
-`--resume` does two things at startup:
+`--resume` does two things on top of that:
 
-1. **Keeps the leftover journal entries.** Without `--resume`, mikser warns and discards any rows the prior run wrote but never finalized. With `--resume`, those rows stay and the next cycle picks them up.
+1. **Keeps the render and postprocess entries too**, replaying the previous run's tasks as it decided them instead of deriving them again.
 2. **Skips the initial filesystem scan.** The startup `source.sweep` is bypassed, so a 110k-entity corpus doesn't pay another minute of scan time just to confirm everything's the same as it was.
 
 This is the right shape for two scenarios in particular:
@@ -66,7 +93,7 @@ This is the right shape for two scenarios in particular:
 
 The chokidar watcher attaches normally after a `--resume` start, so any source change between the kill and the restart flows through the sync hook as a fresh journal entry.
 
-If you're not in watch mode and not interrupted, you don't need `--resume`. The default warning + discard behaviour is the safe path for one-shot builds.
+Skipping the scan is the half to think about: changes made while mikser was down are out of scope for `--resume`, and a plain restart is what catches them.
 
 ## File Watching
 

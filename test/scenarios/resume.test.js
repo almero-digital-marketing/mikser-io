@@ -1,15 +1,18 @@
 // Integration tests for --resume behavior.
 //
-// Resume picks up a journal left by an interrupted cycle and continues
-// from it; without --resume, mikser warns and discards the leftover
-// rows. To simulate an interrupted cycle without killing a subprocess
-// at an unpredictable time, we pre-populate the mikser_journal table
-// directly via better-sqlite3 — same effect as "previous run died
-// after journaling CREATEs but before onFinalized cleared the table."
+// A journal left by an interrupted cycle is picked up either way. The
+// default carries its SOURCE entries and drops the render/postprocess ones,
+// which this run derives again; --resume keeps the lot, replaying the
+// previous run's render tasks as they were and skipping the scan. To
+// simulate an interrupted cycle without killing a subprocess at an
+// unpredictable time, we pre-populate the mikser_journal table directly via
+// better-sqlite3 — same effect as "previous run died after journaling
+// CREATEs but before onFinalized cleared the table."
 
 import { describe, it, after, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdir, writeFile, rm } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import path from 'node:path'
 import Database from 'better-sqlite3'
 import {
@@ -34,14 +37,16 @@ function doc(content) {
 // (CREATE for one of the fixture's documents) but never reached
 // onFinalized. Requires the schemas to already exist — runMikser the
 // fixture once cleanly first.
-function injectJournalRow(workdir, { operation, entity }) {
+function injectJournalRow(workdir, { operation, entity, options, context }) {
     const dbPath = path.join(workdir, 'runtime', 'mikser.sqlite')
     const db = new Database(dbPath)
     try {
         db.prepare(`
-            INSERT INTO mikser_journal (operation, entity)
-            VALUES (?, ?)
-        `).run(operation, JSON.stringify(entity))
+            INSERT INTO mikser_journal (operation, entity, options, context)
+            VALUES (?, ?, ?, ?)
+        `).run(operation, JSON.stringify(entity),
+            options ? JSON.stringify(options) : null,
+            context ? JSON.stringify(context) : null)
     } finally {
         db.close()
     }
@@ -75,7 +80,11 @@ describe('--resume', () => {
         assert.equal(readJournalCount(workdir), 0, 'baseline journal is empty')
     })
 
-    it('non-empty journal + no --resume → warns and discards', async () => {
+    it('non-empty journal + no --resume → carries the source entries, re-derives the rest', async () => {
+        // A source entry the previous run never processed, and a render task
+        // it had already derived from one. The source entry is the work; the
+        // render task is this run's to produce again, from code that may well
+        // have just been deployed over the code that produced it.
         injectJournalRow(workdir, {
             operation: 'create',
             entity: {
@@ -88,16 +97,43 @@ describe('--resume', () => {
                 content: '<p>synthetic</p>',
             },
         })
-        assert.equal(readJournalCount(workdir), 1, 'precondition: leftover row inserted')
+        // A render task the previous run had already derived, complete enough
+        // to succeed if it were replayed — so the assertion below is about
+        // the task being dropped, not about a half-built row failing.
+        injectJournalRow(workdir, {
+            operation: 'render',
+            entity: {
+                id: '/documents/hello.html',
+                collection: 'documents',
+                type: 'document',
+                format: 'html',
+                name: 'hello',
+                meta: { layout: 'post' },
+                layout: { id: '/layouts/post.hbs', name: 'post', format: 'hbs' },
+                content: '<p>hi</p>',
+                destination: '/stale-destination.html',
+            },
+            options: { renderer: 'hbs', dispatcher: 'layouts' },
+            context: {},
+        })
+        assert.equal(readJournalCount(workdir), 2, 'precondition: leftover rows inserted')
 
         const { code, combined } = await runMikser(workdir)
         assert.equal(code, 0)
-        assert.match(combined, /Previous run had 1 unfinalized journal entries/,
-            'warns about leftover')
-        assert.match(combined, /use --resume to keep/,
-            'mentions --resume in the warning')
+        assert.match(combined, /carrying 1 unprocessed source change\(s\) into this cycle/,
+            'says what it carried')
+        assert.match(combined, /re-deriving the 1 render task\(s\)/,
+            'says what it will derive again')
+        assert.match(combined, /--resume replays those instead/,
+            'mentions --resume')
+
+        const catalog = await readCatalog(workdir)
+        assert.ok(catalog.entities.find(e => e.id === '/documents/synthetic.html'),
+            'the carried source entry was processed, not dropped')
+        assert.equal(existsSync(path.join(workdir, 'out/stale-destination.html')), false,
+            'the dropped render task was not replayed')
         assert.equal(readJournalCount(workdir), 0,
-            'leftover row discarded on the new clean cycle')
+            'the journal is drained once this cycle finalizes')
     })
 
     it('--resume + non-empty journal → continues from leftover, skips initial scan', async () => {

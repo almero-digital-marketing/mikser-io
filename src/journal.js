@@ -7,8 +7,8 @@
 // on per-process memory; moving it to sqlite:
 //   - bounds memory at any corpus size (rows on disk, iterator streams
 //     them through `.iterate()`)
-//   - makes the journal crash-survivable — `--resume` continues from
-//     a partial run instead of starting fresh
+//   - makes the journal crash-survivable — the next run carries what a
+//     partial one left instead of starting fresh
 //   - aligns the last holdout with the rest of the substrate
 //
 // Snapshot semantics on insert: addEntry / updateEntry serialize via
@@ -31,8 +31,10 @@ import {
 } from './lifecycle.js'
 import { stopProgress, trackProgress, updateProgress } from './logger/index.js'
 import { useLogger } from './engine/index.js'
+import { reportCarried } from './report.js'
 import { AbortError } from './utils/index.js'
 import { registerSchema, useDatabase } from './database/index.js'
+import { OPERATION } from './constants.js'
 import runtime from './runtime.js'
 
 const JOURNAL_SCHEMA = `
@@ -66,6 +68,13 @@ onInitialize(async () => {
 // statement, .all() into a small array, GC the array between chunks).
 const CHUNK_SIZE = 500
 
+// The operations a cycle DERIVES from its own source entries, as opposed to
+// the ones that report what moved on disk. Built from OPERATION so the two
+// cannot drift: a sixth operation added there is a source entry here until
+// someone says otherwise, which is the safe default — carrying one costs a
+// re-import, dropping one loses the work it describes.
+const DERIVED_OPERATIONS = [OPERATION.RENDER, OPERATION.POSTPROCESS]
+
 // Prepared statements + handle. Set in onLoaded after the database
 // substrate opens; persist across cycles (sqlite stays open for the
 // lifetime of the process).
@@ -77,6 +86,7 @@ let stmtUpdateDeps = null
 let stmtMaxSeq = null
 let stmtCount = null
 let stmtDelete = null
+let stmtDeleteDerived = null
 // Cache prepared chunked-SELECTs by operation-tuple so hot paths don't
 // re-prepare. Keyed by the sorted operation list; one statement per
 // distinct filter shape we see in a process.
@@ -296,6 +306,9 @@ onLoaded(async () => {
     stmtMaxSeq       = db.prepare(`SELECT MAX(seq) AS maxSeq FROM mikser_journal`)
     stmtCount        = db.prepare(`SELECT COUNT(*) AS n FROM mikser_journal`)
     stmtDelete       = db.prepare(`DELETE FROM mikser_journal`)
+    stmtDeleteDerived = db.prepare(
+        `DELETE FROM mikser_journal WHERE operation IN (`
+        + DERIVED_OPERATIONS.map(() => '?').join(', ') + `)`)
     stmtChunkAll     = db.prepare(`
         SELECT * FROM mikser_journal
         WHERE seq > ? AND seq <= ?
@@ -311,22 +324,57 @@ onLoaded(async () => {
     // Leftover-journal bootstrap. Successful runs DELETE FROM
     // mikser_journal at onFinalized; a non-empty table at startup means
     // the previous run was interrupted (crash, kill, OOM, deploy).
-    //   - default: discard leftover work, warn loudly so the signal isn't
-    //     silent
-    //   - --resume: keep the rows; subsequent useJournal walks will see
-    //     them and feed the lifecycle, picking up from wherever the
-    //     prior run died
+    //
+    // The SOURCE entries are carried into this run. The RENDER and
+    // POSTPROCESS ones are dropped, because this run re-derives them.
+    //
+    // Discarding both lost work silently, for the reason onCancelled gives
+    // below and one more that only a restarted PROCESS has: the catalog
+    // already holds the new checksums. The interrupted run journalled what
+    // moved, persisted it — persist runs before render — and died before
+    // anything rendered. Discarding the entries then leaves every layer
+    // agreeing that there is nothing to do: the source gate compares the file
+    // against a catalog that already matches it and emits nothing, so the
+    // dispatcher has no seed, so no gate further down is ever asked. The
+    // output keeps the previous build's bytes under a green "Mikser
+    // completed", and touching the file is the only way back.
+    //
+    // Reported against a deploy that restarted pm2 35 seconds into a cycle:
+    // 262 entries went, among them the stylesheet bundle, and the site served
+    // the previous day's CSS with nothing anywhere saying so.
+    //
+    // Carrying the SOURCE entries is enough, and is why the derived ones can
+    // go. Everything a cycle renders descends from them — the dispatcher
+    // walks the journal for CREATE/UPDATE/DELETE, takes the refs closure and
+    // the query-affected set from exactly those seeds, and produces its render
+    // tasks again. The derived entries, in contrast, were decided by the code
+    // that has just been REPLACED (a restart mid-cycle is usually a deploy),
+    // and carry a destination and renderer options chosen under it. Re-derived
+    // they are current; replayed they are not. `--resume` keeps them anyway,
+    // which is what it is for.
+    //
+    // A carried entry never wins over a fresh one: its seq is lower than
+    // anything this run journals, and the catalog drain applies in seq order,
+    // so a file that moved again while mikser was down is applied last.
+    //
+    // Nothing here has to reason about an incompatible cache. A release that
+    // changes the shape of what is stored, or a config change, unlinks the
+    // database file — the journal with it — so a leftover row can only ever
+    // come from a run of the same shape.
     const leftover = stmtCount.get().n
     if (leftover > 0) {
         const logger = useLogger()
         if (runtime.options.resume) {
             logger.info('Resuming from %d journal entries left by a previous run', leftover)
         } else {
+            const derived = stmtDeleteDerived.run(...DERIVED_OPERATIONS).changes
+            reportCarried(leftover - derived)
             logger.warn(
-                'Previous run had %d unfinalized journal entries — discarding (use --resume to keep)',
-                leftover,
+                'Previous run was interrupted with %d unfinalized journal entries — '
+                + 'carrying %d unprocessed source change(s) into this cycle and re-deriving '
+                + 'the %d render task(s) they produced (--resume replays those instead)',
+                leftover, leftover - derived, derived,
             )
-            stmtDelete.run()
         }
     }
 })

@@ -110,8 +110,9 @@ mikser [options]
   -o, --output-folder <folder>     Output folder (default: out)
   -w, --watch                      Watch for file changes
   -f, --force                      Rebuild everything; disable incremental dispatch
-  -R, --resume                     Continue from journal entries left by a previous
-                                   interrupted run; skip the initial filesystem scan
+  -R, --resume                     Replay a previous interrupted run's render tasks
+                                   instead of deriving them again; skip the initial
+                                   filesystem scan
       --audit-output                     Audit output against recorded snapshots; report
                                    drift instead of building
   -l, --log <level>                Log level for this run: trace, debug, info,
@@ -122,7 +123,7 @@ mikser [options]
   -e, --runtime-folder <folder>    Runtime/temp folder (default: runtime)
 ```
 
-`--resume` is the flag for picking up where an interrupted run left off — PM2 auto-restart, CI checkpoint, anything that killed mikser mid-cycle. Without `--resume`, leftover journal entries from the prior run are discarded at startup with a warning. Pair `--resume` with `--watch` to also catch filesystem changes that happened after the restart.
+An interrupted run — PM2 auto-restart, CI checkpoint, anything that killed mikser mid-cycle — is picked up by the next one without a flag: the source changes it never processed are carried into the first cycle, and the render tasks it had derived are derived again. `--resume` replays those tasks as the prior run decided them and skips the startup scan, which is the faster path when nothing changed on disk in between.
 
 ## Using Mikser Programmatically
 

@@ -40,7 +40,7 @@ await runtime.start()
 | `clear` | boolean | `false` | Clear output before run |
 | `watch` | boolean | `false` | Watch mode |
 | `force` | boolean | `false` | Rebuild everything; disable incremental dispatch |
-| `resume` | boolean | `false` | Continue from journal left by a previous interrupted run; skip the initial filesystem scan |
+| `resume` | boolean | `false` | Replay a previous interrupted run's render tasks instead of deriving them again, and skip the initial filesystem scan. Its source entries are carried either way |
 | `auditOutput` | boolean | `false` | Audit the output folder against the snapshots the last build recorded — detects files changed or removed outside mikser, not a render that changed |
 | `debug` | boolean | `false` | Debug logging |
 | `trace` | boolean | `false` | Trace logging |
@@ -393,8 +393,10 @@ Update an existing journal entry's entity or output fields.
 ### `clearJournal()`
 
 `DELETE FROM mikser_journal` — clear all journal rows. Called at `onFinalized`.
-Anything still in the table when the process exits will be picked up by a
-later `--resume` run.
+Anything still in the table when the process exits is picked up by the next
+run: its source entries are carried into that run's first cycle, and its
+render and postprocess entries are derived again (`--resume` replays those
+instead).
 
 ---
 

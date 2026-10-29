@@ -97,9 +97,10 @@ written on `createEntity` / `updateEntity` / `deleteEntity` /
 `renderEntity` / `postprocessEntity`, drained on the matching phase,
 and cleared at `onFinalized` (`DELETE FROM mikser_journal`).
 
-Because the table survives crashes, an interrupted run can be resumed
-with `mikser --resume`: the engine picks up the leftover rows and
-skips the initial filesystem scan.
+Because the table survives crashes, an interrupted run is picked up by
+the next one: its CREATE/UPDATE/DELETE rows are carried into the first
+cycle, and its RENDER/POSTPROCESS rows are derived again. `mikser
+--resume` replays those too and skips the initial filesystem scan.
 
 ### Journal Schema
 
@@ -330,7 +331,7 @@ tables.
 | Purpose | Per-cycle producer/consumer queue between phases | Entity registry, queryable substrate |
 | Storage | `mikser_journal` table | `mikser_entities` table |
 | Rows | CREATE / UPDATE / DELETE / RENDER / POSTPROCESS | Current entity state, indexed for sift→SQL pushdown |
-| Cleared | Yes, at `onFinalized` (`DELETE FROM mikser_journal`). Leftover rows survive crashes for `--resume`. | No — updated incrementally during persist |
+| Cleared | Yes, at `onFinalized` (`DELETE FROM mikser_journal`). Leftover rows survive a crash and are carried by the next run. | No — updated incrementally during persist |
 
 The catalog is updated during the `persist` phase by reading CREATE/UPDATE/DELETE operations from the journal and applying them inside a single transaction.
 

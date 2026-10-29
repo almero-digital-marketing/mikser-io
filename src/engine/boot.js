@@ -29,7 +29,7 @@ export function registerBoot(options) {
             .option('-o --output-folder <folder>', 'set mikser output folder relative to working folder', 'out')
             .option('-w --watch', 'watch entities for changes', false)
             .option('-f --force', 'rebuild everything; disable incremental dispatch', false)
-            .option('-R --resume', 'continue from journal entries left by a previous interrupted run; skip the initial filesystem scan', false)
+            .option('-R --resume', "replay a previous interrupted run's render tasks instead of deriving them again; skip the initial filesystem scan", false)
             .option('--audit-output', 'audit the output folder against the snapshots the last build recorded — detects files changed or removed outside mikser, NOT a render that changed', false)
             .option('--explain <entity>', 'explain one entity — layout, destination, hashes, refClosure, and whether a build would re-render it. Accepts an id, a meta.href, or an id without its extension. Reports instead of building.')
             .option('--json', 'machine-readable output (with --explain, --tool, and for a build\'s render/skip/warning report)', false)

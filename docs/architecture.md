@@ -13,7 +13,7 @@ mikser-io/
     ├── runtime.js            Singleton object — global state and lifecycle coordination
     ├── engine/               setup() and the lifecycle phases, one file each: boot, dispatch, render-cycle, postprocess-cycle, finalize; plus report-only, checks and workers. index.js wires them in order
     ├── lifecycle.js          Hook registration functions + entity write helpers
-    ├── journal.js            Per-cycle queue persisted to mikser_journal (auto-persist on yielded entities; survives crashes so --resume can pick up)
+    ├── journal.js            Per-cycle queue persisted to mikser_journal (auto-persist on yielded entities; survives crashes, and the next run carries what it left)
     ├── catalog.js            Persistent entity registry (mikser_entities sqlite table + 10k LRU on findById)
     ├── refs.js               Inverse-reference graph (mikser_refs sqlite table)
     ├── manifest/            schema, snapshot build/parse, sources, prepared statements, the onLoaded/onFinalize cycle; index.js keeps createManifest
@@ -184,7 +184,8 @@ Converted output files
 [FINALIZE phase]
   catalog/refs/manifest commit their per-cycle transaction; journal is
   cleared with DELETE FROM mikser_journal. Anything left when the
-  process exits is fair game for the next `--resume` run.
+  process exits is carried by the next run — its source entries into
+  the first cycle, its render tasks derived again.
 ```
 
 ## Plugin Architecture
