@@ -488,6 +488,9 @@ export default {
 }
 ```
 
+A share removed from `locations` has its link taken out of the output folder at
+the next start (see `docs/plugins.md#shares`).
+
 ### `api`
 
 The api plugin exposes the catalog over HTTP via one or more **named

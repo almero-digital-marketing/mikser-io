@@ -537,6 +537,22 @@ shares({
 })
 ```
 
+Each link it makes is recorded in `runtime/shares.json` (link → source), so the
+config stays the whole truth about what is shared:
+
+- A share taken out of the config has its link removed at the next start, even
+  though its source is still there and the link is not broken. Only a link this
+  plugin made, still pointing where it did, is removed; other plugins' links in
+  the output folder are left alone.
+- A share whose `source` changed is pointed at the new one.
+- A destination that is already in the output folder and is not a link is left
+  as it is, with a `Not shared` warning.
+
+The record lives in the runtime folder rather than the cache because removing a
+share changes the config, and a changed config wipes the cache. A run that only
+answers a question (`--tool`, `--explain`, `--audit-output`) creates missing
+links but removes and moves nothing.
+
 ### `api`
 
 Exposes a lightweight HTTP API over the Mikser pipeline. Useful for headless CMS workflows, live preview, and programmatic content management.
