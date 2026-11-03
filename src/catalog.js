@@ -383,6 +383,29 @@ function compiledPattern(pattern) {
     return compiled
 }
 
+// Prepared statements for the queries whose SQL is BUILT rather than written
+// out — findEntity / findEntities / countEntities / iterateEntities, each
+// assembling a WHERE clause from a sift filter.
+//
+// The text is built per call but repeats constantly: every ref resolution in a
+// cycle produces the same `refFilter` shape, differing only in bound values,
+// so one SQL string served 2,000 consecutive lookups and was parsed 2,000
+// times. Preparing is most of what such a lookup costs once the query itself
+// is a seek.
+//
+// Keyed on the SQL text and cleared where `db` is assigned, so these share the
+// lifetime of the statements prepared there and cannot outlive their handle.
+const preparedQueries = new Map()
+
+function preparedQuery(sql) {
+    let statement = preparedQueries.get(sql)
+    if (!statement) {
+        statement = db.prepare(sql)
+        preparedQueries.set(sql, statement)
+    }
+    return statement
+}
+
 /**
  * Restore an entity to the row it had before a catalog-neutral render, or
  * remove it if it had none. Called by useRenderer as soon as the render
@@ -401,6 +424,7 @@ export function restoreEntity(id, prior) {
 
 onLoaded(async () => {
     db = useDatabase()
+    preparedQueries.clear()
     if (!db) {
         // Shouldn't happen — src/database/index.js's onLoaded runs
         // first (it's imported earlier in index.js). Treat as a
@@ -596,7 +620,7 @@ export async function findEntity(query) {
         // With a residual predicate we may need to scan multiple rows
         // before finding a match; without one, LIMIT 1 short-circuits.
         const matcher = residualMatcher(query, t.jsFilter)
-        const stmt = db.prepare(matcher
+        const stmt = preparedQuery(matcher
             ? `SELECT data FROM mikser_entities ${t.sql}`
             : `SELECT data FROM mikser_entities ${t.sql} LIMIT 1`)
         for (const row of stmt.iterate(...t.params)) {
@@ -674,7 +698,7 @@ export async function findEntities(query) {
             return stmtAllData.all().map(r => JSON.parse(r.data))
         }
         const t = siftToSql(query)
-        const stmt = db.prepare(`SELECT data FROM mikser_entities ${t.sql}`)
+        const stmt = preparedQuery(`SELECT data FROM mikser_entities ${t.sql}`)
         const rows = stmt.all(...t.params)
         const entities = rows.map(r => JSON.parse(r.data))
         const matcher = residualMatcher(query, t.jsFilter)
@@ -712,7 +736,7 @@ export function countEntities(query) {
     const t = siftToSql(query)
     // A residual matcher means part of the filter never reached SQL.
     if (residualMatcher(query, t.jsFilter)) return null
-    return db.prepare(`SELECT COUNT(*) AS c FROM mikser_entities ${t.sql}`).get(...t.params).c
+    return preparedQuery(`SELECT COUNT(*) AS c FROM mikser_entities ${t.sql}`).get(...t.params).c
 }
 
 // Streaming variant of findEntities. Same query shape, same sift→SQL
@@ -746,7 +770,7 @@ export async function* iterateEntities(query) {
         const where = t.sql
             ? `${t.sql} AND id > ?`
             : `WHERE id > ?`
-        const stmt = db.prepare(
+        const stmt = preparedQuery(
             `SELECT id, data FROM mikser_entities ${where} ORDER BY id LIMIT ?`,
         )
         const matcher = residualMatcher(query, t.jsFilter)

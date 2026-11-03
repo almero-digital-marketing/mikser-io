@@ -244,31 +244,49 @@ function translateField(field, value, indexed) {
 }
 
 // $or and $and recursively translate sub-clauses.
+//
+// The two differ in what an unpushable branch costs, and it is the whole of
+// why they are not one path. An $or is true of a row when SOME branch is, so
+// a branch SQL cannot evaluate makes the disjunction unanswerable: dropping
+// it excludes rows that branch alone would have matched. An $and is true only
+// when EVERY branch is, so any subset of the branches selects a SUPERSET of
+// the answer — the rest is left to the residual matcher, which is what
+// findEntities already runs over the rows SQL returns.
+//
+// Punting the whole conjunction is not a slower correct answer, it is a full
+// scan and a JSON.parse per row. On gpoint's catalog — 11,174 entities, 31 of
+// them with an href — an endpoint scope of `meta.href` ANDed with a caller's
+// filter on the unindexed `meta.route` pushed NOTHING: every request read and
+// parsed all 11,174 rows to return one, around three thousand times an hour,
+// and the event loop stopped getting a turn. Pushing the half that indexes
+// turns the same query into a seek over 31.
 function translateLogical(op, clauses, indexed) {
     if (!Array.isArray(clauses) || clauses.length === 0) {
         return { pushed: null, fallback: { field: op, value: clauses } }
     }
     const parts = []
     const allParams = []
-    const jsFallbacks = []
+    const residual = []
     for (const sub of clauses) {
-        const sub_t = translate(sub, indexed)
-        if (sub_t.scanAll) {
-            // A sub-clause can't push at all → whole $or/$and can't
-            // be split safely. Punt.
+        const translated = translate(sub, indexed)
+        if (op === '$or' && (translated.scanAll || translated.jsFilter)) {
             return { pushed: null, fallback: { field: op, value: clauses } }
         }
-        if (sub_t.jsFilter) {
-            // Partial pushdown in a sub-clause — within $or, we can't
-            // safely split (need ALL of the predicate on each branch).
-            return { pushed: null, fallback: { field: op, value: clauses } }
+        if (translated.sql) {
+            parts.push(`(${translated.sql.replace(/^WHERE /, '')})`)
+            allParams.push(...translated.params)
         }
-        parts.push(`(${sub_t.sql.replace(/^WHERE /, '')})`)
-        allParams.push(...sub_t.params)
-        jsFallbacks.push(...(sub_t.jsFallbacks ?? []))
+        // What SQL could not express stays for sift. `scanAll` with no
+        // jsFilter is a clause that is not an object at all — a function
+        // predicate — so the clause itself is what sift has to see.
+        if (translated.jsFilter) residual.push(translated.jsFilter)
+        else if (translated.scanAll) residual.push(sub)
+    }
+    if (!parts.length) {
+        return { pushed: null, fallback: { field: op, value: clauses } }
     }
     const glue = op === '$or' ? ' OR ' : ' AND '
-    return { pushed: { sql: parts.join(glue), params: allParams } }
+    return { pushed: { sql: parts.join(glue), params: allParams }, residual }
 }
 
 // Top-level translator. `filter` is a sift query object. Returns the
@@ -291,6 +309,12 @@ export function translate(filter, indexed = new Set(Object.keys(INDEXED_COLUMNS)
             if (t.pushed) {
                 sqlParts.push(`(${t.pushed.sql})`)
                 params.push(...t.pushed.params)
+                // A partially pushed $and leaves branches for sift. They are
+                // conjunctive wherever they came from, so they recombine
+                // under $and whatever the operator above them was.
+                if (t.residual?.length) {
+                    jsClauses.$and = [...(jsClauses.$and ?? []), ...t.residual]
+                }
             } else {
                 jsClauses[field] = t.fallback.value
             }

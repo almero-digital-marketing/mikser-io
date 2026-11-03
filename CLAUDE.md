@@ -1036,6 +1036,15 @@ There is **no `--mcp` CLI flag**. Activation is plugin-presence only.
   (the index walk alone, no lookups), and a prefix range there took
   5.2ms to 26.9ms. The regex runs on every candidate either way, so
   narrowing the candidate set is the only move that pays.
+- **Built queries are prepared once per SQL text.** findEntity /
+  findEntities / countEntities / iterateEntities assemble a WHERE clause
+  per call, but the text repeats constantly — every ref resolution in a
+  cycle produces the same `refFilter` shape, differing only in bound
+  values, so one string was parsed 2,000 times in a row. Cached in
+  `catalog.js` on the text and cleared where `db` is assigned, so the
+  statements share their handle's lifetime. Worth ~2x on a ref
+  resolution (0.21ms → 0.11ms) once the query itself is a seek, which
+  is most of what is left after that.
 - **The REGEXP user function runs once per row, so it compiles once per
   pattern, not once per call.** `new RegExp(pattern)` inside it built
   10,972,471 identical objects over 2,000 ref resolutions; the pattern

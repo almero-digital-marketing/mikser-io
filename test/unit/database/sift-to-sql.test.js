@@ -192,6 +192,50 @@ describe('translate — $or / $and', () => {
         })
         assert.equal(t.sql, 'WHERE ((collection = ?) AND (type = ?))')
     })
+
+    // An $and is true only when every branch is, so any subset of the branches
+    // selects a superset of the answer and the rest is the residual matcher's.
+    // Punting the whole conjunction instead is a full scan and a JSON.parse per
+    // row — the shape every scoped api endpoint takes, caller filter AND scope.
+    it('$and pushes the indexed branch and leaves the rest to sift', () => {
+        const t = translate({
+            $and: [{ 'meta.status': 'published' }, { collection: 'documents' }],
+        })
+        assert.equal(t.sql, 'WHERE ((collection = ?))')
+        assert.deepEqual(t.params, ['documents'])
+        assert.deepEqual(t.jsFilter, { $and: [{ 'meta.status': 'published' }] })
+        assert.equal(t.scanAll, false)
+    })
+
+    it('$and keeps the un-pushed half of a partially pushed branch', () => {
+        const t = translate({
+            $and: [{ collection: 'documents', 'meta.status': 'x' }],
+        })
+        assert.equal(t.sql, 'WHERE ((collection = ?))')
+        assert.deepEqual(t.jsFilter, { $and: [{ 'meta.status': 'x' }] })
+    })
+
+    it('$and with no indexed branch at all still scans', () => {
+        const t = translate({
+            $and: [{ 'meta.status': 'x' }, { 'meta.route': '/' }],
+        })
+        assert.equal(t.sql, '')
+        assert.equal(t.scanAll, true)
+        assert.deepEqual(t.jsFilter, {
+            $and: [{ 'meta.status': 'x' }, { 'meta.route': '/' }],
+        })
+    })
+
+    // The asymmetry with $and: a branch SQL cannot evaluate makes a
+    // disjunction unanswerable, because dropping it excludes rows that branch
+    // alone would have matched.
+    it('$or with one un-indexed branch still punts entirely', () => {
+        const t = translate({
+            $or: [{ collection: 'documents' }, { 'meta.status': 'x' }],
+        })
+        assert.equal(t.sql, '')
+        assert.ok(t.jsFilter.$or)
+    })
 })
 
 describe('translate — scanAll detection', () => {
