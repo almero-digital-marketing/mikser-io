@@ -1,7 +1,10 @@
 // Unit tests for the sift→SQL translator.
 
-import { describe, it } from 'node:test'
+import { describe, it, after } from 'node:test'
 import assert from 'node:assert/strict'
+
+import Database from 'better-sqlite3'
+import sift from 'sift'
 
 import { translate } from '../../../src/database/sift-to-sql.js'
 
@@ -126,16 +129,16 @@ describe('translate — operators', () => {
         assert.equal(t.sql, 'WHERE meta_href IS NULL')
     })
 
-    it('$regex (string)', () => {
+    it('$regex (string) → primary-key range plus the pattern', () => {
         const t = translate({ id: { $regex: '^/blog/' } })
-        assert.equal(t.sql, 'WHERE id REGEXP ?')
-        assert.deepEqual(t.params, ['^/blog/'])
+        assert.equal(t.sql, 'WHERE (id >= ? AND id < ? AND id REGEXP ?)')
+        assert.deepEqual(t.params, ['/blog/', '/blog0', '^/blog/'])
     })
 
     it('$regex (RegExp object) → source', () => {
         const t = translate({ id: { $regex: /^\/foo/ } })
-        assert.equal(t.sql, 'WHERE id REGEXP ?')
-        assert.deepEqual(t.params, ['^\\/foo'])
+        assert.equal(t.sql, 'WHERE (id >= ? AND id < ? AND id REGEXP ?)')
+        assert.deepEqual(t.params, ['/foo', '/fop', '^\\/foo'])
     })
 
     it('unknown operator → js fallback', () => {
@@ -169,8 +172,10 @@ describe('translate — $or / $and', () => {
                 { id: { $regex: '^/foo\\.[^./]+$' } },
             ],
         })
-        assert.equal(t.sql, 'WHERE ((id = ?) OR (meta_href = ?) OR (id REGEXP ?))')
-        assert.deepEqual(t.params, ['/foo', '/foo', '^/foo\\.[^./]+$'])
+        assert.equal(
+            t.sql,
+            'WHERE ((id = ?) OR (meta_href = ?) OR ((id >= ? AND id < ? AND id REGEXP ?)))')
+        assert.deepEqual(t.params, ['/foo', '/foo', '/foo.', '/foo/', '^/foo\\.[^./]+$'])
     })
 
     it('$or with un-indexed inside → js fallback for the whole $or', () => {
@@ -231,4 +236,124 @@ describe('translate — observer sweep filter (audit real case)', () => {
         assert.match(t.sql, /time < \?/)
         assert.match(t.sql, /id IS NULL OR id NOT IN \(\?, \?\)/)
     })
+})
+
+
+// The range exists so a $regex on the primary key can be SEEKED instead of
+// scanned — inside refFilter's $or it is also what keeps the other three
+// branches indexed, since one unindexable branch disqualifies SQLite's
+// multi-index OR for all of them. It is only ever a narrowing: the REGEXP
+// term still decides, so a prefix read too greedily does not return wrong
+// rows, it loses right ones. Hence the agreement test below.
+describe('translate — $regex prefix range', () => {
+    const paramsFor = (pattern) => translate({ id: { $regex: pattern } }).params
+
+    it('an unanchored pattern has no prefix to range on', () => {
+        const t = translate({ id: { $regex: '/blog/' } })
+        assert.equal(t.sql, 'WHERE id REGEXP ?')
+        assert.deepEqual(t.params, ['/blog/'])
+    })
+
+    it('a metacharacter straight after the anchor has none either', () => {
+        const t = translate({ id: { $regex: '^(web|system)' } })
+        assert.equal(t.sql, 'WHERE id REGEXP ?')
+    })
+
+    it('only on the primary key — a secondary index is slower seeked', () => {
+        // Measured, not assumed: an index walk plus a primary-key lookup per
+        // surviving row cost 5x a plain scan over a 49MB catalog.
+        const t = translate({ 'meta.href': { $regex: '^/web/' } })
+        assert.equal(t.sql, 'WHERE meta_href REGEXP ?')
+        assert.deepEqual(t.params, ['^/web/'])
+    })
+
+    it('stops before a character a quantifier can skip', () => {
+        assert.deepEqual(paramsFor('^ab*c').slice(0, 2), ['a', 'b'])
+        assert.deepEqual(paramsFor('^ab?c').slice(0, 2), ['a', 'b'])
+        assert.deepEqual(paramsFor('^ab{2}c').slice(0, 2), ['a', 'b'])
+    })
+
+    it('keeps a character `+` requires, and stops after it', () => {
+        assert.deepEqual(paramsFor('^ab+c').slice(0, 2), ['ab', 'ac'])
+    })
+
+    it('reads an escaped metacharacter as the character itself', () => {
+        assert.deepEqual(paramsFor('^a\\.b').slice(0, 2), ['a.b', 'a.c'])
+    })
+
+    it('stops at a class escape, which is not a literal', () => {
+        assert.deepEqual(paramsFor('^ab\\dz').slice(0, 2), ['ab', 'ac'])
+    })
+
+    it('a flagged pattern is left to sift, which honours the flags', () => {
+        // The user function compiles the SOURCE and gets no flags, so pushing
+        // `/Foo/i` down quietly made it `/Foo/` — the same filter answering
+        // differently depending on whether the field happened to be indexed.
+        const t = translate({ id: { $regex: /^\/Foo/i } })
+        assert.equal(t.sql, '')
+        assert.deepEqual(t.jsFilter, { id: { $regex: /^\/Foo/i } })
+    })
+})
+
+describe('translate — $regex pushdown agrees with sift', () => {
+    const ids = [
+        '/documents/blog/post.html',
+        '/documents/blog/post.md',
+        '/documents/blog/post',
+        '/documents/blog/post/index.html',
+        '/documents/blog/poster.html',
+        '/documents/blog/post.with.dots.html',
+        '/documents/blog0/post.html',
+        '/documents/BLOG/post.html',
+        '/documents/blog/post-2.html',
+        '/files/blog/post.html',
+        '/documents/бг/страница.html',
+        '/documents/blog/emoji-😀.html',
+    ]
+
+    const db = new Database(':memory:')
+    db.exec('CREATE TABLE mikser_entities (id TEXT PRIMARY KEY) WITHOUT ROWID')
+    const compiled = new Map()
+    db.function('REGEXP', { deterministic: true }, (pattern, value) => {
+        if (value == null) return 0
+        let regex = compiled.get(pattern)
+        if (regex === undefined) {
+            try { regex = new RegExp(pattern) } catch { regex = null }
+            compiled.set(pattern, regex)
+        }
+        return regex?.test(String(value)) ? 1 : 0
+    })
+    const insert = db.prepare('INSERT INTO mikser_entities (id) VALUES (?)')
+    for (const id of ids) insert.run(id)
+    after(() => db.close())
+
+    const patterns = [
+        '^/documents/blog/post\\.[^./]+$',
+        '^/documents/blog/post',
+        '^/documents/blog/post$',
+        '^/documents/blog/post(er)?\\.html$',
+        '^/documents/blog/posts*\\.html$',
+        '^/documents/blog0?/post\\.html$',
+        '^/documents/b[lL]og/post\\.html$',
+        '^/documents/\\u0431\\u0433/',
+        '^/documents/бг/',
+        '^/documents/blog/emoji-😀\\.html$',
+        '^/files/',
+        '^/',
+        'blog',
+        '^/documents/blog/post\\d*\\.html$',
+    ]
+
+    for (const pattern of patterns) {
+        it(`${pattern} selects what sift selects`, () => {
+            const filter = { id: { $regex: pattern } }
+            const expected = ids.map(id => ({ id })).filter(sift(filter))
+                .map(row => row.id).sort()
+            const t = translate(filter)
+            assert.equal(t.jsFilter, null, 'the whole clause pushed down')
+            const actual = db.prepare(`SELECT id FROM mikser_entities ${t.sql}`)
+                .raw().all(...t.params).map(row => row[0]).sort()
+            assert.deepEqual(actual, expected)
+        })
+    }
 })

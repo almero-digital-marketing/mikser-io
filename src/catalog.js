@@ -348,6 +348,41 @@ function restoreRow(id, prior, refsIndex = useRefsIndex()) {
     cacheEvict(id)
 }
 
+// Compiled `$regex` patterns, for the REGEXP user function below.
+//
+// A user function runs ONCE PER ROW the statement evaluates, so compiling
+// inside it compiles once per row. The pattern arrives as a bound parameter
+// and is therefore the same string for every row of a statement: resolving
+// one ref against an 11k catalog built 11k identical RegExp objects and threw
+// all but one away, which is most of what that query costs. Compiling per
+// distinct pattern instead is the whole of the saving — the regex itself is
+// cheap to run.
+//
+// Capped rather than kept: patterns are derived from refs and ids, so a long
+// run meets a great many distinct ones. Clearing wholesale costs one recompile
+// per live pattern and keeps this to a bounded Map; tracking recency to evict
+// one at a time would cost more per row than it saves.
+//
+// An unparseable pattern is cached as `null` — "matches nothing", which is
+// what sift does with it, and caching the failure is what stops the throw
+// from repeating per row.
+const COMPILED_PATTERN_LIMIT = 256
+const compiledPatterns = new Map()
+
+function compiledPattern(pattern) {
+    const cached = compiledPatterns.get(pattern)
+    if (cached !== undefined) return cached
+    let compiled = null
+    try {
+        compiled = new RegExp(pattern)
+    } catch {
+        compiled = null
+    }
+    if (compiledPatterns.size >= COMPILED_PATTERN_LIMIT) compiledPatterns.clear()
+    compiledPatterns.set(pattern, compiled)
+    return compiled
+}
+
 /**
  * Restore an entity to the row it had before a catalog-neutral render, or
  * remove it if it had none. Called by useRenderer as soon as the render
@@ -378,11 +413,8 @@ onLoaded(async () => {
     // matches. Matches sift semantics.
     db.handle.function('REGEXP', { deterministic: true }, (pattern, value) => {
         if (value == null) return 0
-        try {
-            return new RegExp(pattern).test(String(value)) ? 1 : 0
-        } catch {
-            return 0
-        }
+        const compiled = compiledPattern(pattern)
+        return compiled?.test(String(value)) ? 1 : 0
     })
 
     stmtGet = db.prepare('SELECT data FROM mikser_entities WHERE id = ?')

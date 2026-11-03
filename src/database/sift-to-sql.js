@@ -47,6 +47,63 @@ const TRANSLATABLE_OPS = new Set([
     '$exists', '$regex',
 ])
 
+// The column `mikser_entities` is keyed on. The table is WITHOUT ROWID, which
+// is what makes a range over this column free where a range over any other
+// indexed column is not.
+const PRIMARY_KEY_COLUMN = 'id'
+
+// Characters that end a literal run: each starts a construct that is not one
+// required character of text.
+const REGEX_METACHARACTERS = new Set(
+    ['.', '(', ')', '[', ']', '{', '}', '|', '$', '^', '*', '+', '?'])
+
+// The literal text every match of `pattern` has to begin with, or '' when it
+// pins none down. Only a `^`-anchored pattern has one.
+//
+// Reading stops at the first construct that is not a single required
+// character, and a character carrying a quantifier that may skip or repeat it
+// is dropped rather than trusted: `^ab*` requires only `a`. `+` keeps its
+// character — it is required at least once — but ends the prefix, because
+// nothing after a repeat sits at a fixed offset.
+function literalPrefix(pattern) {
+    if (!pattern.startsWith('^')) return ''
+    let prefix = ''
+    let index = 1
+    while (index < pattern.length) {
+        let character = String.fromCodePoint(pattern.codePointAt(index))
+        let width = character.length
+        if (character === '\\') {
+            const escaped = pattern.codePointAt(index + 1)
+            if (escaped === undefined) break
+            character = String.fromCodePoint(escaped)
+            // \d, \w, \b, \uXXXX and friends stand for something other than
+            // themselves. Only escaped punctuation is a literal character.
+            if (/[A-Za-z0-9]/.test(character)) break
+            width = 1 + character.length
+        } else if (REGEX_METACHARACTERS.has(character)) {
+            break
+        }
+        const next = pattern[index + width]
+        if (next === '*' || next === '?' || next === '{') break
+        prefix += character
+        if (next === '+') break
+        index += width
+    }
+    return prefix
+}
+
+// The exclusive upper bound of the range holding every string that starts with
+// `prefix`: the prefix with its last code point stepped by one. Null when
+// there is no next code point to step to, which leaves the pattern unbounded
+// rather than wrongly bounded.
+function upperBound(prefix) {
+    const characters = Array.from(prefix)
+    const last = characters.pop()
+    const next = last.codePointAt(0) + 1
+    if (next > 0x10ffff || (next >= 0xd800 && next <= 0xdfff)) return null
+    return characters.join('') + String.fromCodePoint(next)
+}
+
 function sqlForOp(column, op, value) {
     switch (op) {
         case '$eq':
@@ -100,8 +157,48 @@ function sqlForOp(column, op, value) {
             // Driver registers a REGEXP user function at open() —
             // see catalog.js. The function is null-safe and returns
             // 0 for null columns (matches sift semantics).
+            //
+            // Flags do not survive the trip: the user function compiles the
+            // SOURCE, with none. A flagged pattern therefore stays in JS,
+            // where sift applies it as written — pushed down, `/Foo/i`
+            // quietly became `/Foo/` and the same filter answered differently
+            // depending on whether the field happened to be indexed.
+            if (value instanceof RegExp && value.flags) return null
             const pattern = value instanceof RegExp ? value.source : value
-            return { sql: `${column} REGEXP ?`, params: [pattern] }
+            if (typeof pattern !== 'string') return null
+
+            // A user function is opaque to the query planner, so `col REGEXP ?`
+            // alone is a full table scan — and inside an OR it is worse than
+            // that: one unindexable branch disqualifies SQLite's multi-index
+            // OR for every branch, so the three indexed equality terms of a
+            // refFilter were scanned for too. Resolving one ref read all 11k
+            // rows of a real catalog.
+            //
+            // An anchored pattern usually pins down the literal text a match
+            // must start with, which on the PRIMARY KEY is a range the planner
+            // can seek. The REGEXP term stays as the arbiter — the range only
+            // skips rows it would have rejected anyway — so this narrows what
+            // is scanned without moving the decision into SQL.
+            //
+            // Only on the primary key. `mikser_entities` is WITHOUT ROWID, so
+            // a range on `id` is a subrange of the very btree a scan walks and
+            // cannot cost more than the scan: measured over a 49MB catalog, a
+            // loose prefix broke even and a tight one went 7ms → 0.05ms. Every
+            // other indexed column is a SECONDARY index, where the same range
+            // buys an index walk plus a primary-key lookup per surviving row —
+            // 5x SLOWER than simply scanning (5.2ms → 26.9ms), because a
+            // WITHOUT ROWID index entry carries the whole key and the regex
+            // still runs on every candidate either way. Narrowing the
+            // candidate set is the only thing that pays here, and off the
+            // primary key a prefix does not narrow it enough to cover the
+            // seeks.
+            const prefix = column === PRIMARY_KEY_COLUMN ? literalPrefix(pattern) : ''
+            const upper = prefix && upperBound(prefix)
+            if (!upper) return { sql: `${column} REGEXP ?`, params: [pattern] }
+            return {
+                sql: `(${column} >= ? AND ${column} < ? AND ${column} REGEXP ?)`,
+                params: [prefix, upper, pattern],
+            }
         }
         default:
             throw new Error(`Unhandled op ${op} (should be filtered before sqlForOp)`)
@@ -135,9 +232,13 @@ function translateField(field, value, indexed) {
             // give up on the whole field and let JS handle it.
             return { pushed: null, fallback: { field, value } }
         }
-        const { sql, params } = sqlForOp(column, op, v)
-        parts.push(sql)
-        allParams.push(...params)
+        const translated = sqlForOp(column, op, v)
+        // The op is translatable in general but this value is not — a regex
+        // carrying flags. Same answer as an untranslatable op: hand the whole
+        // field to sift.
+        if (!translated) return { pushed: null, fallback: { field, value } }
+        parts.push(translated.sql)
+        allParams.push(...translated.params)
     }
     return { pushed: { sql: parts.join(' AND '), params: allParams } }
 }

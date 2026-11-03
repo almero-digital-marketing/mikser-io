@@ -1016,6 +1016,32 @@ There is **no `--mcp` CLI flag**. Activation is plugin-presence only.
   materialize the table per cycle. `findById` is a 10k-entry LRU in
   front of PK lookup. Without those two, sqlite is strictly slower
   than the old Map (we measured it — see ADR-0009).
+- **A `$regex` is pushed down with the literal prefix it implies, and
+  only on `id`.** A user function is opaque to the planner, so `col
+  REGEXP ?` alone is a full scan — and inside an OR it is worse, since
+  one unindexable branch disqualifies SQLite's multi-index OR for all
+  of them: `refFilter`'s three indexed equality terms were being
+  scanned for too, and resolving ONE ref read all 11k rows of a real
+  catalog at 8ms a time. An anchored pattern names the text a match
+  must start with, which on `id` is a range — and because the table is
+  WITHOUT ROWID, that range is a subrange of the btree a scan walks,
+  so it cannot cost more. End to end through `refFilter`: 8.07ms →
+  0.13ms per ref, `SCAN` → `MULTI-INDEX OR`. The REGEXP term still
+  decides; the range only skips rows it would have rejected.
+  **Not on any other column, and not via `IS NOT NULL`.** Both make
+  the planner reach for a SECONDARY index, where a WITHOUT ROWID entry
+  carries the whole primary key and every surviving row costs another
+  btree descent for `data` — measured over a 49MB catalog, `IS NOT
+  NULL` on meta_href took 9.9ms to 151ms on a pattern matching NOTHING
+  (the index walk alone, no lookups), and a prefix range there took
+  5.2ms to 26.9ms. The regex runs on every candidate either way, so
+  narrowing the candidate set is the only move that pays.
+- **The REGEXP user function runs once per row, so it compiles once per
+  pattern, not once per call.** `new RegExp(pattern)` inside it built
+  10,972,471 identical objects over 2,000 ref resolutions; the pattern
+  is a bound parameter and constant for the whole statement. Cached
+  (bounded, cleared wholesale) in `catalog.js`. Half the cost of the
+  scan above was this, and it is still worth it once the scan is gone.
 - Piscina is lazy (`minThreads: 0` + `idleTimeout: 30_000`). INLINE
   dispatch is the default for both render and postprocess; layouts
   that opt into TASKS.WORKER (`task: worker` in frontmatter) get a
