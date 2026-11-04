@@ -168,6 +168,20 @@ brevity.
   the dynamic `import('../explain.js')`. `registerBoot(options)` takes
   `setup`'s own argument, the one closure that was not self-contained: a
   programmatic caller passes resolved options and skips the CLI parse.
+  **`--clear` deletes `outputFolder` and the engine's own two scratch
+  directories (`runtime/preview`, `runtime/postprocess-scratch`), and NOTHING
+  else in the runtime folder.** The cache is wiped by its own unlink in
+  `database/index.js`; the durable store is a different file. It used to empty
+  the runtime folder with one exemption (`.sqlite*`), i.e. it kept what the
+  engine recognised and deleted what it did not — which was every plugin's
+  expensive self-validating state: the provider mirrors of remote content
+  (`gdrive-cache`, `github-cache`, `directus-cache`, each with its own `.sha`
+  / `.modified` / mtime marker), `mikser-io-drive`'s `trash/` of files moved
+  so a delete could be undone, `layouts-modules.json`, and `server-port`,
+  whose own comment already claimed `--clear` did not take it. A plugin that
+  keeps expensive state clears it under its own flag — `--clear-assets`,
+  `--clear-vectors` — because deleting it is a decision and the decision
+  belongs to whoever knows what it cost.
 - The engine, as a whole: `setup()`, lifecycle wiring, render + postprocess
   dispatchers, manifest tracking. Owns the Piscina worker pools
   (`renderWorkers`, `postprocessWorkers`); both are lazy

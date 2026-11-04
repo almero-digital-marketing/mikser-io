@@ -1,16 +1,20 @@
-// --clear has to reach the derivatives.
+// --clear must NOT reach the derivatives, and the orphan goes anyway.
 //
-// It removes outputFolder and the runtime folder, but the assets folder sits
-// at the working-folder ROOT — outside both — so it was never cleared. A
-// derivative whose source had gone stayed there indefinitely: still on disk,
-// still SERVED through the symlink the plugin puts in the output, and absent
-// from `find out -type f` because that tree is reached through a link. The
-// only way out was deleting the folder by hand, which is how this was found.
+// The assets folder sits at the working-folder ROOT, outside both
+// outputFolder and the runtime folder, and it is symlinked into the output.
+// A derivative whose source had gone stayed there indefinitely: still on
+// disk, still SERVED through that symlink, and absent from `find out -type f`
+// because the tree is reached through a link. --clear deleting the whole
+// folder was the first answer to that.
 //
-// Note what this does NOT fix: an orphan still survives an ordinary build.
-// Sources deleted from the catalog are a separate gap (the files plugin does
-// no delete sweep), and this is deliberately the narrower change — --clear
-// already means "throw away what was derived", and derivatives are derived.
+// It is not the answer any more, on both halves. The orphan is removed by
+// every build now — the files plugin reconciles the deleted source and the
+// assets plugin drops the derivative that lost it — and deleting the live
+// ones with it was never cleanup, it was hours: the marker beside each
+// derivative survives the cache wipe, so a cleared build reuses what it finds
+// (20,287 derivatives in 45s, measured with the catalog deleted). From
+// mikser-io-assets 11.7.0 the deletion is --clear-assets, which names what it
+// removes.
 
 import { describe, it, after, before } from 'node:test'
 import assert from 'node:assert/strict'
@@ -73,17 +77,15 @@ describe('--clear and derivatives', () => {
             `a plain build reconciles it now\n${combined}`)
     })
 
-    it('--clear removes it', async () => {
+    it('--clear leaves the orphan gone and the live derivative alone', async () => {
         const { code, combined } = await runMikser(workdir, ['--clear'])
         assert.equal(code, 0, combined)
         assert.equal(existsSync(derivative('doomed.jpg')), false,
-            `--clear must reach the derivatives\n${combined}`)
-    })
-
-    it('and rebuilds the ones that still have a source', async () => {
-        // The failure mode on the other side: a --clear that wipes and does
-        // not re-derive leaves the site without its images.
-        assert.ok(existsSync(derivative('keep.jpg')),
-            'clearing must be followed by re-deriving what is still live')
+            `the sweep already removed it and nothing should bring it back\n${combined}`)
+        // The half that used to be deleted and re-derived. On a real site
+        // that is hours of ffmpeg and sharp, bought by a flag people reach
+        // for when a build looks wrong.
+        assert.equal(existsSync(derivative('keep.jpg')), true,
+            `--clear deleted a live derivative\n${combined}`)
     })
 })

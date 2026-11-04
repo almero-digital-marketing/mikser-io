@@ -12,7 +12,7 @@ import { attachServerCliOptions, setupServer } from '../server.js'
 import { useLogger } from '../use-logger.js'
 import { resolveThreads } from './threads.js'
 import { resizeWorkerPools } from './workers.js'
-import { mkdir, readdir, rm } from 'fs/promises'
+import { mkdir, rm } from 'fs/promises'
 
 // `options` is setup's own argument, not runtime.options: a programmatic
 // caller can pass a resolved options object and skip the CLI parse entirely,
@@ -218,30 +218,63 @@ The full version, with what each code means: docs/diagnostics.md`)
         // and never appears in outputFolder.
         runtime.options.previewFolder = path.join(runtime.options.runtimeFolder, 'preview')
 
-        // The sqlite file and the WAL sidecars it leaves beside it.
-        const isDatabaseArtifact = (name) =>
-            name.endsWith('.sqlite') || name.endsWith('.sqlite-wal') || name.endsWith('.sqlite-shm')
-
         if (runtime.options.clear) {
             try {
-                runtime.engine.logger.info('Clearing folders')
+                runtime.engine.logger.info(
+                    'Clearing the output folder and the cache. The runtime folder is kept: %s',
+                    runtime.options.runtimeFolder)
                 await rm(runtime.options.outputFolder, { recursive: true })
-                // Everything in the runtime folder EXCEPT the database.
+
+                // The engine's own scratch, and nothing else in this folder.
                 //
-                // Removing the folder wholesale took the database with it, and
-                // with it every table registered `durable` — an OAuth client
-                // registration, a refresh token, a form submission: data no
-                // file can reproduce, which is the whole reason that flag
-                // exists. `--clear` promising a rebuild and delivering a
-                // sign-out is the same bug the durable flag was added to fix,
-                // reached by a different route.
+                // This used to empty the runtime folder with one exemption —
+                // `.sqlite`, `.sqlite-wal`, `.sqlite-shm` — which kept the
+                // durable store and the cache (the cache has its own wipe,
+                // which drops derived tables and keeps durable ones) and
+                // deleted everything else. The exemption was a list of what
+                // the ENGINE recognised, so it kept what the engine owned and
+                // deleted what it did not, which is backwards.
                 //
-                // The database is cleared too, but through its own wipe, which
-                // drops the derived tables and keeps the durable ones.
-                for (const entry of await readdir(runtime.options.runtimeFolder, { withFileTypes: true })
-                    .catch(() => [])) {
-                    if (isDatabaseArtifact(entry.name)) continue
-                    await rm(path.join(runtime.options.runtimeFolder, entry.name), { recursive: true, force: true })
+                // What it deleted:
+                //
+                //   runtime/gdrive-cache, github-cache, directus-cache — the
+                //     provider plugins' mirrors of remote content, each with
+                //     its own on-disk validity marker (a `.sha`, a
+                //     `.modified`, an mtime against Drive's modifiedTime).
+                //     Every one of them survives a catalog wipe perfectly
+                //     well and is reused; deleting the folder re-downloads an
+                //     entire Drive, every blob in a repository against
+                //     GitHub's hourly limit, a whole Directus asset library.
+                //   runtime/trash/<stamp> — files the drive plugin MOVED
+                //     rather than unlinked, precisely so a delete could be
+                //     undone. Not expensive to recompute: gone.
+                //   runtime/layouts-modules.json — whose own comment says a
+                //     catalog wipe should not cost a full re-render of every
+                //     layout that imports a shared helper. It was costing one.
+                //   runtime/server-port — whose own comment says "`--clear`
+                //     removes the cache database rather than this, so asking
+                //     for a cold rebuild does not also move the server". That
+                //     was not true; this is what makes it true.
+                //
+                // Nothing in the folder needs deleting for a clear to be a
+                // clear. Every file there is either self-validating against
+                // its source or deliberately durable, except the engine's own
+                // two scratch directories: `preview`, for intermediates when
+                // a caller rendered with `save: false`, and
+                // `postprocess-scratch`, for a chain's intermediate files.
+                // Both are per-run working space that nothing reads later;
+                // what is in them at all is what an interrupted build left.
+                //
+                // The trade: a plugin that is uninstalled leaves its folder
+                // behind, and `--clear` is no longer the broom. That is the
+                // same trade `mikser-io-assets` and `mikser-io-vector` make
+                // for their own expensive state — deleting it is a decision,
+                // and a decision belongs to whoever knows what it cost.
+                for (const scratch of [
+                    runtime.options.previewFolder,
+                    path.join(runtime.options.runtimeFolder, 'postprocess-scratch'),
+                ]) {
+                    await rm(scratch, { recursive: true, force: true })
                 }
             } catch (err) {
                 if (err.code != 'ENOENT')

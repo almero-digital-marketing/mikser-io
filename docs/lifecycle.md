@@ -94,7 +94,7 @@ onInitialized(async () => {
 - Sets the logger level from `--log <level>`, moving the terminal stream with it
 - Resolves absolute paths for `workingFolder`, `outputFolder`, `runtimeFolder`
 - Creates the `runtimeFolder` directory
-- Clears `outputFolder` and `runtimeFolder` if `--clear` was set
+- Clears `outputFolder` and the engine's own `runtime/preview` scratch if `--clear` was set. The rest of the runtime folder is kept — see [configuration](configuration.md)
 
 ---
 

@@ -1202,10 +1202,13 @@ surfaces that turn silence into a statement:
   the working-folder root, outside both `outputFolder` and the runtime
   folder, and it is symlinked INTO the output — so an orphaned derivative
   is still served, and `find out -type f` cannot see it (that tree is
-  reached through a link; use `find -L`). `--clear` removes the folder and
-  re-derives what still has a source. An ordinary build does not: the
-  files plugin performs no delete sweep, so a source deleted from disk
-  stays in the catalog and its derivative stays with it.
+  reached through a link; use `find -L`). Every build sweeps it now: the
+  files plugin reconciles a source that is gone, and the assets plugin
+  removes the derivative that lost it. `--clear` does NOT delete
+  derivatives — they are the one derived thing that costs hours, and the
+  marker beside each one survives the cache wipe so a cleared build reuses
+  them. `--clear-assets` deletes the tree when that is really what you
+  want.
 - **A postprocess that could not run** — a stage whose external
   dependency is absent (no chrome for a PDF, no binary for a conversion)
   reports a fault naming the subsystem, and each page that wanted that
