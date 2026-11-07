@@ -1,8 +1,9 @@
 import path from 'path'
 import { cliOption } from '../cli.js'
-import { mkdir, writeFile, unlink, open } from 'fs/promises'
+import { mkdir, writeFile, open } from 'fs/promises'
 import _ from 'lodash'
 import sift from 'sift'
+import { removeOutput } from '../utils/index.js'
 
 export function data(options = {}) {
     return ({
@@ -76,9 +77,18 @@ export function data(options = {}) {
                     await mkdir(path.dirname(entityFile), { recursive: true })
                     await writeFile(entityFile, dump, 'utf8')
                 },
+                // The file save wrote, under the name save gave it. This
+                // unlinked `<name>.json`, which save never writes, and threw
+                // on the missing file — so every delete that matched an
+                // export's query failed the cycle and left the export behind.
+                // Through removeOutput because the data folder lives in the
+                // output folder, and an export nested by name empties its
+                // folders the way a page does.
                 delete: deleteEntity = async entity => {
-                    const entityFile = path.join(targetFolder, `${entity.name}.json`)
-                    await unlink(entityFile)
+                    if (!entity.name) return
+                    const entityFile = path.join(targetFolder, `${entity.name}.${entitiesName}.json`)
+                    await removeOutput(runtime.options.outputFolder,
+                        path.relative(runtime.options.outputFolder, entityFile))
                 }
             } = entitiesConfig[entitiesName]
 

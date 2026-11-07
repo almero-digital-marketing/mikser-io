@@ -2,7 +2,6 @@
 // onLoaded, and at onFinalize draining the journal, hashing what was
 // written, and committing every mutation in one transaction.
 
-import path from 'node:path'
 import runtime from '../runtime.js'
 import { OPERATION } from '../constants.js'
 import { useDatabase } from '../database/index.js'
@@ -10,7 +9,7 @@ import { useLogger } from '../engine/index.js'
 import { forgetMissingOutputs } from '../invalidation.js'
 import { useJournal } from '../journal.js'
 import { onFinalize, onLoaded } from '../lifecycle.js'
-import { unlink } from 'fs/promises'
+import { removeOutput } from '../utils/output.js'
 import { buildSnapshot, hashOutputFile, snapToRow } from './snapshot.js'
 import { renderedByDependency } from '../report.js'
 
@@ -419,11 +418,11 @@ onFinalize(async () => {
                 reason, destination, stillClaimed.map(r => r.id).join(', '))
             continue
         }
-        const filePath = path.join(runtime.options.outputFolder, destination)
-        try {
-            await unlink(filePath)
+        // A file already gone or never written is fine; the folders it would
+        // have left empty are pruned either way.
+        if (await removeOutput(runtime.options.outputFolder, destination)) {
             logger.debug('%s: unlinked %s', reason, destination)
-        } catch { /* file already gone or never existed — fine */ }
+        }
     }
 
     // 2e. Hash the rendered output files (async).

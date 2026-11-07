@@ -92,11 +92,12 @@ describe('documents plugin', () => {
         })
     })
 
-    it('onSync DELETE writes a sparse delete entry (id, collection, type)', async () => {
-        // The documents plugin passes a `format` to deleteEntity but the
-        // real lifecycle.deleteEntity (and the harness's stand-in) only
-        // forwards id/collection/type, by design — DELETE entries are
-        // intentionally sparse.
+    it('onSync DELETE names the entity by its path alone (id, collection, type)', async () => {
+        // All a vanished file can tell the plugin. The real
+        // lifecycle.deleteEntity lays this over the catalog row before
+        // journaling (see delete-entity.test.js); the harness's stand-in
+        // forwards only id/collection/type, so this pins what the PLUGIN
+        // passes, not what the journal ends up holding.
         const h = createHarness({ options: { documentsFolder: '/tmp/x' } })
         documents()(h.core)
         await h.runSync('documents', { action: 'delete', context: { relativePath: 'gone.md' } })

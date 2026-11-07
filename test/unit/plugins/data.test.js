@@ -104,6 +104,42 @@ describe('data plugin', () => {
         })
     })
 
+    it('a DELETE removes the export its CREATE wrote, and the folders it empties', async () => {
+        // The default delete unlinked `<name>.json` — a file save never
+        // writes — and threw on it, failing the cycle and keeping the export.
+        await withTempOutput(async ({ workingFolder, outputFolder }) => {
+            const page = { id: '/d/bg/aparati/new.md', collection: 'documents', name: 'bg/aparati/new', type: 'document', time: Date.now() }
+            const sibling = { ...page, id: '/d/bg/rf.md', name: 'bg/rf' }
+            const cycle = async (journal) => {
+                const h = createHarness({ options: { workingFolder, outputFolder }, journal })
+                data()(h.core)
+                await h.runHook('loaded')
+                await h.runHook('beforeRender')
+            }
+            await cycle([{ entity: page, operation: 'create' }, { entity: sibling, operation: 'create' }])
+            const exported = path.join(outputFolder, 'data', 'bg', 'aparati', 'new.document.json')
+            assert.ok(existsSync(exported), 'the create should have exported it')
+
+            await cycle([{ entity: page, operation: 'delete' }])
+            assert.equal(existsSync(exported), false, 'the export outlived its entity')
+            assert.equal(existsSync(path.join(outputFolder, 'data', 'bg', 'aparati')), false,
+                'and left its emptied folder behind')
+            assert.ok(existsSync(path.join(outputFolder, 'data', 'bg', 'rf.document.json')))
+        })
+    })
+
+    it('a DELETE of something never exported does not fail the cycle', async () => {
+        await withTempOutput(async ({ workingFolder, outputFolder }) => {
+            const h = createHarness({
+                options: { workingFolder, outputFolder },
+                journal: [{ entity: { id: '/d/gone.md', name: 'gone', type: 'document' }, operation: 'delete' }],
+            })
+            data()(h.core)
+            await h.runHook('loaded')
+            await h.runHook('beforeRender')
+        })
+    })
+
     it('writes catalog exports under <dataFolder>/<token>/ when set', async () => {
         await withTempOutput(async ({ workingFolder, outputFolder }) => {
             const documents = [

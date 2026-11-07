@@ -175,14 +175,14 @@ When any sync hook returns `true`, `process()` is scheduled to run after a 1-sec
 
 ## Cleanup on delete and rename
 
-Chokidar reports a file rename as `unlink(old)` followed by `add(new)`. The `unlink` runs through `runtime.sync({ action: DELETE })`; each collection plugin's `onSync` handler emits a sparse DELETE entry to the journal (id, collection, type).
+Chokidar reports a file rename as `unlink(old)` followed by `add(new)`. The `unlink` runs through `runtime.sync({ action: DELETE })`; each collection plugin's `onSync` handler calls `deleteEntity` with what the path tells it (id, collection, type), and the journal entry carries the entity's last catalog row under that. Pages that listed it through a query — a sitemap, an index, a feed — match the deleted entity's `meta` and re-render in the same cycle.
 
 After the next render cycle Mikser reconciles state:
 
-- The render manifest (`mikser_snapshots` table) is consulted. Every snapshot whose `id` or `parent` matches a deleted source is unlinked from disk and dropped from the table. Paginated children are caught via `parent`.
-- `mikser_entities` rows for the deleted ids are removed. `mikser_refs` cascades on the FK. There's no separate sitemap to maintain — the catalog itself is the sitemap, queried via the `meta_href` index.
+- The render manifest (`mikser_snapshots` table) is consulted. Every snapshot whose `id` or `parent` matches a deleted source is unlinked from disk and dropped from the table, along with any folder that leaves empty — a clean-URL page's own `foo/` goes with its `foo/index.html`. Paginated children are caught via `parent`.
+- `mikser_entities` rows for the deleted ids are removed. `mikser_refs` cascades on the FK.
 
-The net effect: renaming `documents/foo.md` to `documents/bar.md` in watch mode unlinks `out/foo.html` and any `out/foo.<n>.html` pages on its own. One-shot builds (no watch) don't generate DELETE events — use `--clear` to start from a clean output tree.
+The net effect: renaming `documents/foo.md` to `documents/bar.md` in watch mode unlinks `out/foo.html` and any `out/foo.<n>.html` pages on its own. A one-shot build gets the same DELETEs from its startup sweep, which compares the catalog against what is on disk.
 
 ## Cancellation
 

@@ -14,20 +14,28 @@ export async function createEntity(entity) {
     }
 }
 
-// deleteEntity accepts either a minimal { id, type, collection }
-// payload or a full entity. The full-entity form is preferred when
-// the caller has it on hand (source.sweepDeleted does — it just
-// findById'd the entity to compute the deletion), because the
-// manifest's query-affected dispatch (and any downstream sift-based
-// invalidation) can only match against the entity's actual fields.
-// A minimal {id,type,collection} still works for backwards
-// compatibility but query deps on fields not in that triple
-// (format, meta.*, name, etc.) won't fire.
+// A DELETE carries the entity as the catalog last knew it, whatever the
+// caller passed.
+//
+// Everything downstream of a DELETE judges it against a FILTER: the query
+// edges an aggregate page recorded (manifest.queryAffected schedules the page,
+// skipDecision lets it render), the api's cache eviction, the preview cache, a
+// data export's `query`. A filter names fields — meta.layout, meta.lang,
+// format, name. A caller that watched a file disappear knows only its path and
+// passes `{ id, type, collection }`, and against that no such filter matches:
+// a sitemap listing pages by `meta.layout` was neither scheduled nor allowed
+// to render when one of them was deleted under --watch, and went on listing it
+// until a restart.
+//
+// Looked up HERE because this is the last moment the row exists. The catalog
+// applies the DELETE at persist, before any consumer reads the journal, so
+// none of them can find it afterwards. What the caller passed is laid over the
+// stored row, so a caller holding a fuller or newer entity still has the last
+// word. Through runtime.catalog because catalog.js imports this module.
 export async function deleteEntity(payload) {
     const logger = useLogger()
-    const entity = payload?.id
-        ? payload   // accept full entity payload as-is
-        : { id: payload?.id, type: payload?.type, collection: payload?.collection }
+    const known = payload?.id ? runtime.catalog?.findById?.(payload.id) : null
+    const entity = { ...known, ...payload }
     const entry = { operation: OPERATION.DELETE, entity }
     if (await runtime.validate(entry)) {
         logger.debug('Delete %s entity: %s %s', entity.collection, entity.type, entity.id)

@@ -498,6 +498,11 @@ onLoaded(async () => {
         // O(N) — not for hot paths. Returns the legacy shape so
         // existing test/scenarios harnesses can assert on it.
         export: exportCatalog,
+        // For modules this one imports, which cannot import it back without
+        // closing a cycle that leaves the database's schema registry
+        // uninitialised: lifecycle.deleteEntity, which journals the row as
+        // it stood, and provenance's parent fallback for synthetic entities.
+        findById,
         // Compatibility — some legacy callers expected this. Now a
         // no-op (writes happen per-cycle via onPersist transactions).
         save: async () => {},

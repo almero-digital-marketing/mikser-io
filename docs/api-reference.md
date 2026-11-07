@@ -285,7 +285,12 @@ Validates and adds an UPDATE operation to the journal. Sets `entity.stamp` and `
 
 ### `deleteEntity({ id, collection, type })`
 
-Validates and adds a DELETE operation to the journal.
+Validates and adds a DELETE operation to the journal. The entry carries the
+entity as the catalog last held it, with what you passed laid over it, so
+`{ id }` is enough: consumers that judge a DELETE against a filter — an
+aggregate page's recorded `findEntities` query, the api and preview caches, a
+`data()` export's `query` — see its `meta`, `format` and `name` even though a
+vanished file can only report its path.
 
 ### `renderEntity(entity, options?, context?)`
 

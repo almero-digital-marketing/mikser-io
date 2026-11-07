@@ -2,7 +2,7 @@ import fm from 'front-matter'
 import path from 'path'
 import runtime from '../runtime.js'
 import yaml from 'yaml'
-import { lstat, mkdir, open, readFile, stat, unlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, open, readFile, rmdir, stat, unlink, writeFile } from 'node:fs/promises'
 
 // Read-modify-write helper for entity source files. Reads the file at
 // `entity.uri`, parses front-matter (if any), merges `patch` into the
@@ -260,6 +260,40 @@ export async function writeOutput(file, bytes) {
     // directly, so converting first would add a copy for nothing.
     await writeFile(file, bytes)
     return true
+}
+
+// Remove an output the build no longer produces, and every folder above it
+// that this leaves empty — up to, never including, the output folder.
+//
+// A clean URL gives each page a folder of its own (`aparati/rf/index.html`),
+// so unlinking the page alone left `aparati/rf/` behind, empty. A static host
+// answers that path with a directory listing or a 403 instead of the 404 the
+// deleted page should produce, and nothing short of --clear removed it.
+//
+// `rmdir`, never a recursive remove: it refuses a folder with anything in it,
+// which is what makes this safe beside a sibling page, a share, or a file
+// another tool put there. The first folder it refuses ends the walk. Pruned
+// even when the file was already gone, so a folder emptied by hand goes too.
+//
+// Returns whether there was a file to unlink.
+export async function removeOutput(outputFolder, destination) {
+    const root = path.resolve(outputFolder)
+    const file = path.join(root, destination)
+    if (!file.startsWith(root + path.sep)) return false
+    let removed = true
+    try {
+        await unlink(file)
+    } catch {
+        removed = false
+    }
+    for (let folder = path.dirname(file); folder.startsWith(root + path.sep); folder = path.dirname(folder)) {
+        try {
+            await rmdir(folder)
+        } catch {
+            break
+        }
+    }
+    return removed
 }
 
 // Which declared site root a path belongs to.
