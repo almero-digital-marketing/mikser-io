@@ -611,7 +611,15 @@ brevity.
   that meaning, for a plugin that only needs to know bytes changed; it
   carries the shared junk filter and `followSymlinks: true`, which is
   load-bearing because the files plugin serves by symlinking into the
-  output folder.
+  output folder. **A watch cycle that throws is caught in
+  `runScheduledCycle`** and reported as `cycle-failed`, with the phase that
+  threw. `callHooks` attaches the phase to the error because `runtime.phase`
+  is already cleared by the time anything can catch it. Nothing sits above a
+  timer, so this catch is the only one there is. app.js's `unhandledRejection`
+  floor is the backstop. It must read `--watch` when a rejection ARRIVES: it is
+  installed before `start()` parses the CLI, and reading it at install time
+  made every rejection fatal under the CLI. A page's own failure (a template,
+  a layouts sidecar) is a render error and never reaches either.
 - `source.js` — `useSource` codifies the folder-of-files pattern.
 - `tools.js` — tool registry. `registerTool(name, {description,
   inputSchema}, handler)` / `toolNames()` / `toolSchema()` / `invokeTool()`,

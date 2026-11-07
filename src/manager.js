@@ -59,15 +59,50 @@ runtime.hooks.cycled.push(flushPending)
 
 function scheduleProcess() {
     clearTimeout(runtime.engine.processTimeout)
-    runtime.engine.processTimeout = setTimeout(async () => {
+    runtime.engine.processTimeout = setTimeout(runScheduledCycle, 1000)
+}
+
+// A cycle that throws is caught HERE, because nothing is above a timer.
+//
+// This callback used to await runtime.process() bare, so a hook that threw
+// made a rejection with nobody holding it — and a watcher dies of those.
+// Reported from a real site: a sidecar helper saved in two steps, a rebuild
+// between them, `SHARE_IMAGE_DEFAULT is not defined` from the half-saved
+// module, and the process exited. Under pm2 that is a half-saved edit arriving
+// over WebDAV or git taking the builder down.
+//
+// The engine survives the cycle intact, which is what makes carrying on the
+// right answer rather than a hopeful one: `processing` is released in a
+// finally, the mutex with it, and the journal is only drained at onFinalized
+// — which a failed cycle never reached — so what it was carrying is carried
+// into the next one.
+async function runScheduledCycle() {
+    try {
         await warnConfigStale()
         resetReport()
         await runtime.process()
-        // A cancelled cycle runs no finalize hooks, so the flush above never
-        // fires for it and anything that arrived mid-cycle would wait for a
-        // later one that may never come.
-        await flushPending()
-    }, 1000)
+    } catch (err) {
+        reportCycleFailure(err)
+    }
+    // A cancelled cycle runs no finalize hooks, so the flush above never
+    // fires for it and anything that arrived mid-cycle would wait for a
+    // later one that may never come. Outside the try, so a cycle that threw
+    // still delivers what arrived while it ran.
+    await flushPending()
+}
+
+// Said loudly, with the stack and the phase, because the cycle stopped where
+// it threw: nothing after that phase ran, so there is no "Mikser completed"
+// line and no report for it. Coded, so it is a fault mikser_ping and the
+// build report can see rather than a line that scrolled past.
+function reportCycleFailure(err) {
+    const phase = err?.mikserPhase ?? 'unknown'
+    useLogger()?.error(
+        { code: 'cycle-failed', phase },
+        'The cycle stopped in %s and did not complete: %s\n'
+        + 'The watcher is still running — what this cycle was carrying is carried into the next one, '
+        + 'which starts on the next change.',
+        phase, err?.stack ?? err?.message ?? String(err))
 }
 
 // Editing config/*.js while watching changes nothing, and says nothing.

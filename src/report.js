@@ -345,6 +345,10 @@ export function reportRendered(entity, reason, decision = {}) {
         ...(decision.changed?.length ? { changed: decision.changed } : {}),
         ...(decision.matched ? { matched: decision.matched } : {}),
         ...(decision.dependency ? { dependency: decision.dependency } : {}),
+        // The last attempt threw. Beside the reason rather than instead of
+        // it: a retry that something else also moved is reported as what
+        // moved — see skipDecision.
+        ...(decision.failure ? { failure: decision.failure } : {}),
     })
 }
 

@@ -205,6 +205,28 @@ onRender(async (signal) => {
 })
 ```
 
+## When a cycle fails
+
+A watcher outlives the cycles that go wrong. What happens depends on what
+threw:
+
+- **One page's render** — a template that throws, a layout sidecar whose
+  import or `load()` throws. That page is a render error: it is logged with
+  where it came from, the cycle completes for every other page (`Mikser
+  completed with 1 render error`), the last good output stays on disk, and the
+  failure is recorded so the next cycle retries the page.
+- **A lifecycle hook itself** — a plugin's `onBeforeRender` throwing, say. The
+  cycle stops in that phase and is reported as `cycle-failed`, naming the phase,
+  with the stack. Nothing after that phase runs, so there is no `Mikser
+  completed` line for it. The journal is not drained, so what the cycle was
+  carrying goes into the next one, which starts on the next change.
+- **A promise nobody awaited** — reported as `Unhandled rejection (the
+  watcher is still running)`, with the stack.
+
+A one-shot build stops on all three and exits 1. A long-running process
+reports them and carries on. A half-saved edit should cost one red cycle, not
+the process.
+
 ## Scheduled Tasks
 
 In watch mode, plugins can schedule recurring tasks using cron expressions:

@@ -158,8 +158,17 @@ async function main() {
 // the ones nobody has found yet — a timer callback that rejects, a plugin's
 // detached promise — and there is no shortage of those in an engine this size.
 function guardAgainstSilentDeath() {
-    const longRunning = Boolean(runtime.options?.watch || runtime.options?.server)
     process.on('unhandledRejection', (reason) => {
+        // Read when the rejection arrives, not when the handler is installed.
+        //
+        // It is installed before start(), and the CLI is parsed INSIDE start(),
+        // at onInitialize — so read up there, `--watch` was always undefined
+        // and every rejection took the one-shot branch. The floor never once
+        // held under the CLI: a watcher met its first unhandled rejection, printed
+        // "💥 Unhandled rejection" and exited, exactly as if this did not exist.
+        // A rejection before the parse is a boot failure, and dying of it is
+        // right.
+        const longRunning = Boolean(runtime.options?.watch || runtime.options?.server)
         const logger = runtime.engine?.logger
         const detail = reason?.stack ?? reason?.message ?? String(reason)
         if (!longRunning) {

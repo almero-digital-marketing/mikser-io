@@ -104,6 +104,12 @@ export function registerRenderCycle() {
             }
         }
         let skipped = 0
+        // Renders of THIS dispatch that threw — not renderErrorCount(), which
+        // is the cycle's: a task-production plugin reports a page it could
+        // not even dispatch (a sidecar that threw, a `pages` that is not a
+        // count) into the same store, and subtracting those from jobs they
+        // never were printed `Rendered: 0` beside a page that had rendered.
+        let threw = 0
 
         await map(useJournal('Rendering', [OPERATION.RENDER], signal), async entry => {
             const { id, entity, options, context } = entry
@@ -396,6 +402,7 @@ export function registerRenderCycle() {
                     logger.debug('Rendered: [%s] %s → %s', options.renderer, entity.name || entity.id, entity.destination)
                 } catch (err) {
                     if (!signal.aborted) {
+                        threw++
                         await updateEntry({ id, output: { success: false } })
                         const context = formatErrorContext(entity, err, runtime.options)
                         logger.error('Render error: %s%s %s', entity.id, context, err.message)
@@ -435,7 +442,7 @@ export function registerRenderCycle() {
         // Jobs minus skips minus THROWS. Counting a failed render as
         // rendered is the same overstatement the report used to make.
         const failed = renderErrorCount()
-        renderJobs.size && logger.info('Rendered: %d', renderJobs.size - skipped - failed)
+        renderJobs.size && logger.info('Rendered: %d', renderJobs.size - skipped - threw)
         skipped && logger.info('Manifest skipped: %d', skipped)
         failed && logger.error('Render errors: %d', failed)
 

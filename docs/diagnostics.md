@@ -1111,6 +1111,7 @@ distinction is the whole of [Faults](#faults) above.
 
 | Code | Severity | Means |
 | --- | --- | --- |
+| `cycle-failed` | error | A watch cycle stopped because a lifecycle hook threw. Carries the `phase` it stopped in, with the stack. Nothing after that phase ran, so there is no `Mikser completed` line and no report for the cycle. The watcher keeps running, and the journal was not drained, so what the cycle was carrying goes into the next one, which starts on the next change. A page's own failure (a template, a sidecar) is a render error instead and does not stop the cycle. |
 | `instance-listen-failed` | warn | The control socket could not be opened, so other mikser commands in this folder will start their own engine instead of forwarding. |
 | `command-from-cli` | warn | A hook command was supplied on the command line. Deliberately loud: this build is running code that is not in the config. |
 | `command-hook-not-reached` | warn | A command was attached to a hook the cycle never reached. |

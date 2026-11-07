@@ -261,8 +261,8 @@ export function createManifest(db) {
             const override = bypassReason()
             if (override) return { skip: false, reason: override }
             if (entity?.meta?.cache === false) return { skip: false, reason: REASON.CACHE_DISABLED }
-            // A render whose last attempt threw must be retried, and checked
-            // before anything else: every other branch reasons about hashes,
+            // A render whose last attempt threw must be retried, even where
+            // every other branch says skip: every other branch reasons about hashes,
             // and the hashes are consistent — the entity did not change, the
             // snapshot still describes the last GOOD render. Consistency is
             // exactly why the failure is invisible without this.
@@ -274,18 +274,31 @@ export function createManifest(db) {
             // — one line per failing entity, and `since` on the report so a
             // reader can tell "broke just now" from "broken since 14:02" —
             // not backoff.
+            //
+            // Retried, but not RE-REASONED: when something did move as well,
+            // that is the reason, with the failure carried beside it. Fixing a
+            // broken template, partial or sidecar helper is itself a
+            // dependency change, and answering `retry-failed` over it hid that
+            // from the drift check — which then reported the fix as "output
+            // changed with unchanged inputs… an upgraded renderer, a changed
+            // helper", on exactly the save that repaired the page. Only when
+            // nothing else would reschedule the render is the retry the reason.
             const failure = this.failureAt(entity?.id, entity?.destination)
-            if (failure) {
-                return {
-                    skip: false,
-                    reason: 'retry-failed',
-                    failure: {
-                        error: failure.error,
-                        since: failure.firstFailedAt ?? null,
-                        attempts: failure.attempts ?? 1,
-                    },
-                }
+            const decision = this.inputDecision(entity, mutatedRefs, currentHashes, mutatedEntities)
+            if (!failure) return decision
+            const retry = {
+                error: failure.error,
+                since: failure.firstFailedAt ?? null,
+                attempts: failure.attempts ?? 1,
             }
+            if (!decision.skip) return { ...decision, failure: retry }
+            return { skip: false, reason: 'retry-failed', failure: retry }
+        },
+
+        // The part of skipDecision that reasons about what the render
+        // CONSUMES — its own inputs, its output, its recorded dependencies —
+        // as opposed to the overrides and the retry ahead of it.
+        inputDecision(entity, mutatedRefs, currentHashes, mutatedEntities) {
             const snapshot = this.lookup(entity)
             if (!snapshot?.inputHash) return { skip: false, reason: 'never-rendered' }
             if (inputHashOf(entity) !== snapshot.inputHash) {

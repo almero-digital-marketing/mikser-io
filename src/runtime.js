@@ -128,6 +128,17 @@ const runtime = {
                     this.recordPluginPhase(phaseName, hook.mikserPlugin, performance.now() - hookStarted)
                 }
             }
+        } catch (err) {
+            // The phase travels with the error, because `phase` itself is
+            // cleared in the finally below — by the time anything above can
+            // catch this, "where did the cycle stop" has already been
+            // forgotten. Innermost wins. Non-enumerable, so it does not
+            // print as `{ mikserPhase: … }` under every stack trace.
+            if (phaseName && err && typeof err === 'object'
+                && err.mikserPhase === undefined && Object.isExtensible(err)) {
+                Object.defineProperty(err, 'mikserPhase', { value: phaseName, configurable: true })
+            }
+            throw err
         } finally {
             // In `finally`, so a phase that threw still reports what it spent
             // before throwing — which is exactly the phase someone is about to
@@ -194,37 +205,44 @@ const runtime = {
         else if (this.abortController) {
             await this.cancel()
         }
-        await this.mutex.use(async () => {
-            // True for the whole cycle, including the gaps between phases —
-            // `phase` goes null between them, so it cannot answer "is a cycle
-            // running". The watcher reads this to decide whether a file event
-            // belongs to this cycle or the next one; see src/manager.js.
-            this.processing = true
-            try {
-                this.abortController = new AbortController()
-                const { signal } = this.abortController
+        try {
+            await this.mutex.use(async () => {
+                // True for the whole cycle, including the gaps between phases —
+                // `phase` goes null between them, so it cannot answer "is a cycle
+                // running". The watcher reads this to decide whether a file event
+                // belongs to this cycle or the next one; see src/manager.js.
+                this.processing = true
+                try {
+                    this.abortController = new AbortController()
+                    const { signal } = this.abortController
 
-                await this.callHooks(this.hooks.process, signal, 'process')
-                await this.callHooks(this.hooks.processed, signal, 'processed')
-                await this.callHooks(this.hooks.persist, signal, 'persist')
-                await this.callHooks(this.hooks.persisted, signal, 'persisted')
+                    await this.callHooks(this.hooks.process, signal, 'process')
+                    await this.callHooks(this.hooks.processed, signal, 'processed')
+                    await this.callHooks(this.hooks.persist, signal, 'persist')
+                    await this.callHooks(this.hooks.persisted, signal, 'persisted')
 
-                await this.render(signal)
-            } catch (e) {
-                if (e.name !== 'AbortError') throw e
-                this.phase = 'cancelled'
-                for (let hook of this.hooks.cancelled) await hook()
-                this.phase = null
-            } finally {
-                this.processing = false
-            }
-        })
-
-        // After the mutex, so `processing` is already false and a hook that
-        // starts work of its own is not told a cycle is still running. Inside
-        // the cycle — at onFinalized, say — it would be, which is exactly the
-        // mistake this placement exists to avoid.
-        for (const hook of this.hooks.cycled) await hook()
+                    await this.render(signal)
+                } catch (e) {
+                    if (e.name !== 'AbortError') throw e
+                    this.phase = 'cancelled'
+                    for (let hook of this.hooks.cancelled) await hook()
+                    this.phase = null
+                } finally {
+                    this.processing = false
+                }
+            })
+        } finally {
+            // After the mutex, so `processing` is already false and a hook that
+            // starts work of its own is not told a cycle is still running. Inside
+            // the cycle — at onFinalized, say — it would be, which is exactly the
+            // mistake this placement exists to avoid.
+            //
+            // In a finally, because a cycle that THREW has ended too. The file
+            // events deferred while it ran are delivered from here, and a
+            // forwarded rebuild has no timer of its own to flush them after —
+            // without this they waited for some unrelated later cycle.
+            for (const hook of this.hooks.cycled) await hook()
+        }
     },
 
     async render(signal) {
