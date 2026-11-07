@@ -1,7 +1,11 @@
-import { describe, it } from 'node:test'
+import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 
-import { fieldPositions, positionsForSource, positionsByProbe, registerProvenanceFormat } from '../../src/provenance.js'
+import runtime from '../../src/runtime.js'
+import { fieldPositions, positionsForSource, positionsByProbe, rawSourceOf, registerProvenanceFormat } from '../../src/provenance.js'
 
 // The shapes here are taken from real content, because the whole point of
 // recording positions is that a caller can open the file at the line reported
@@ -199,5 +203,44 @@ describe('registerProvenanceFormat', () => {
         }
         // Unregistered again, the built-in answers.
         assert.equal(positionsForSource('title: X\n', { format: 'test' }).title.line, 1)
+    })
+})
+
+describe('rawSourceOf — a synthetic entity reads its parent', () => {
+    // A csv row has no file of its own, but it was written on one line of the
+    // file its parent points at, and that line is where a person goes to edit
+    // it. The walk up to that file is what makes a row's provenance real.
+    let folder, parentUri
+    const rows = new Map()
+
+    before(async () => {
+        folder = await mkdtemp(path.join(tmpdir(), 'mikser-provenance-'))
+        parentUri = path.join(folder, 'prices.yml')
+        await writeFile(parentUri, 'title: Prices\n', 'utf8')
+        runtime.catalog = { findById: (id) => rows.get(id) ?? null }
+    })
+    after(async () => {
+        delete runtime.catalog
+        await rm(folder, { recursive: true, force: true })
+    })
+
+    it('reads the text of the file its parent points at', async () => {
+        rows.set('/csv/prices.yml', { id: '/csv/prices.yml', uri: parentUri, format: 'yml' })
+        const row = { id: '/csv/prices.yml#3', parent: '/csv/prices.yml' }
+        assert.equal(await rawSourceOf(row), 'title: Prices\n')
+    })
+
+    it('declines a chain that points back at itself', async () => {
+        rows.set('/csv/self', { id: '/csv/self', parent: '/csv/self' })
+        assert.equal(await rawSourceOf(rows.get('/csv/self')), null)
+    })
+
+    it('declines a chain that comes back round, rather than walking it forever', async () => {
+        // Nothing builds this today, but `parent` is a field any plugin may
+        // set, and recursion through a loop ends at the stack limit — in a
+        // diagnostic, which is the last thing that should take a build down.
+        rows.set('/a', { id: '/a', parent: '/b' })
+        rows.set('/b', { id: '/b', parent: '/a' })
+        assert.equal(await rawSourceOf(rows.get('/a')), null)
     })
 })

@@ -312,22 +312,32 @@ export function positionsForSource(raw, entity) {
 // person can go and edit. The generic rule is worth more than the csv-shaped
 // one, so it lives here and the csv plugin only has to say how to read a row
 // out of the text.
+//
+// The chain is WALKED, carrying every id it has already asked for, because a
+// parent that points back at one of them is a loop and recursion through it
+// ends at the stack limit. Nothing in the engine builds such a chain today —
+// a csv row's parent is the file, and a file has no parent — but `parent` is
+// a field any plugin may set, and a diagnostic is the last thing that should
+// take the process down. One id ahead is also where a cheap self-check stops
+// being enough.
 export async function rawSourceOf(entity) {
-    if (!entity) return null
-    if (entity.uri) {
-        if (!isTextEntity(entity)) return null
-        try {
-            const { content } = await readEntityContent({ ...entity, content: undefined })
-            return typeof content === 'string' ? content : null
-        } catch {
-            return null
+    const seen = new Set()
+    for (let current = entity; current; ) {
+        if (current.uri) {
+            if (!isTextEntity(current)) return null
+            try {
+                const { content } = await readEntityContent({ ...current, content: undefined })
+                return typeof content === 'string' ? content : null
+            } catch {
+                return null
+            }
         }
+        if (current.id) seen.add(current.id)
+        if (!current.parent || seen.has(current.parent)) return null
+        current = runtime.catalog?.byId?.get?.(current.parent)
+            ?? (typeof runtime.catalog?.findById === 'function' ? runtime.catalog.findById(current.parent) : null)
     }
-    if (!entity.parent) return null
-    const parent = runtime.catalog?.byId?.get?.(entity.parent)
-        ?? (typeof runtime.catalog?.findById === 'function' ? runtime.catalog.findById(entity.parent) : null)
-    if (!parent || parent.id === entity.id) return null
-    return rawSourceOf(parent)
+    return null
 }
 
 export function createProvenance(db) {
