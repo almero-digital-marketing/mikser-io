@@ -9,6 +9,18 @@ import { bearer } from '../../../src/auth.js'
 import { createHarness } from '../plugin-harness.js'
 import realRuntime from '../../../src/runtime.js'
 
+// The response cache is written fire-and-forget, after the response has gone
+// out, so a test cannot know when it lands. Waiting a fixed 30ms passed on
+// every local run and failed on a CI runner; wait for the file instead.
+async function cacheFilesOnceWritten(dir, timeoutMs = 5000) {
+    const deadline = Date.now() + timeoutMs
+    while (true) {
+        const files = await readdir(dir).catch(() => [])
+        if (files.length || Date.now() > deadline) return files
+        await new Promise(r => setTimeout(r, 10))
+    }
+}
+
 // Lightweight fake of the Express `res` object — captures enough state for
 // assertions without spinning up a server.
 function createFakeRes() {
@@ -952,11 +964,8 @@ describe('api plugin: expand-cache invalidation (ADR-0007 B9)', () => {
             const res = await fetch(`http://127.0.0.1:${port}/api/public/entities?id=/blog/launch.md&expand=author`)
             assert.equal(res.status, 200)
 
-            // Give the fire-and-forget cache write a tick to land.
-            await new Promise(r => setTimeout(r, 30))
-
             const cacheDir = path.join(tmpRoot, 'api', 'public', 'entities')
-            const filesBefore = await readdir(cacheDir).catch(() => [])
+            const filesBefore = await cacheFilesOnceWritten(cacheDir)
             assert.equal(filesBefore.length, 1, `expected exactly one cache file, got: ${JSON.stringify(filesBefore)}`)
             // Filename should be a 16-char hex sha256 prefix + .json,
             // not the raw query string (which would include `/` and
@@ -992,10 +1001,8 @@ describe('api plugin: expand-cache invalidation (ADR-0007 B9)', () => {
         try {
             const res = await fetch(`http://127.0.0.1:${port}/api/public/entities`)
             assert.equal(res.status, 200)
-            await new Promise(r => setTimeout(r, 30))
-
             const cacheDir = path.join(tmpRoot, 'api', 'public', 'entities')
-            const files = await readdir(cacheDir)
+            const files = await cacheFilesOnceWritten(cacheDir)
             assert.deepEqual(files, ['index.json'])
         } finally {
             await new Promise((r) => server.close(r))
@@ -1018,10 +1025,8 @@ describe('api plugin: expand-cache invalidation (ADR-0007 B9)', () => {
             const b = await fetch(`http://127.0.0.1:${port}/api/public/entities?expand=author&cache=deadbeef12345678`)
             assert.equal(a.status, 200)
             assert.equal(b.status, 200)
-            await new Promise(r => setTimeout(r, 30))
-
             const cacheDir = path.join(tmpRoot, 'api', 'public', 'entities')
-            const files = await readdir(cacheDir)
+            const files = await cacheFilesOnceWritten(cacheDir)
             // Exactly one cache file — the two requests share a hash
             // because the `cache` param was stripped before hashing.
             assert.equal(files.length, 1, `expected one cache file, got: ${JSON.stringify(files)}`)
@@ -1039,10 +1044,8 @@ describe('api plugin: expand-cache invalidation (ADR-0007 B9)', () => {
         try {
             const res = await fetch(`http://127.0.0.1:${port}/api/public/entities?expand=author&cache=a&cache=b`)
             assert.equal(res.status, 200)
-            await new Promise(r => setTimeout(r, 30))
-
             const cacheDir = path.join(tmpRoot, 'api', 'public', 'entities')
-            const files = await readdir(cacheDir)
+            const files = await cacheFilesOnceWritten(cacheDir)
             assert.equal(files.length, 1)
             // Same filename as the clean `?expand=author` request would
             // produce. Verified indirectly by the previous test.
@@ -1603,8 +1606,7 @@ describe('api plugin: principal-bound scope (ADR-0012)', () => {
             assert.deepEqual(afterScoped, [], 'a scoped response must leave no cache file')
 
             await listAs(port, 'open-tok')
-            await new Promise(r => setTimeout(r, 60))
-            const afterOpen = await readdir(dir).catch(() => [])
+            const afterOpen = await cacheFilesOnceWritten(dir)
             assert.ok(afterOpen.length > 0, 'an unscoped response still caches')
         } finally {
             await new Promise((r) => server.close(r))
