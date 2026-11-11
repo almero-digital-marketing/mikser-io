@@ -83,7 +83,13 @@ brevity.
   and the site served the previous day's CSS under a green build. Carrying
   the SOURCE entries is enough because everything a cycle renders descends
   from them; the derived ones were decided by the code the restart just
-  replaced.
+  replaced. **The carry keeps only the latest source entry of each kind
+  per entity**, and the catalog drain reads source operations only,
+  collapsed the same way. Without both, a crash LOOP grew the journal by a
+  catalog per restart (an interrupted rebuild re-journals everything, and
+  the carry stacked it on what the last run left) while the finalize drain
+  parsed every render row — 1.6 GB of enriched-entity JSON on a deployment
+  — and ran out of heap in the same place every time.
   Same public surface: `addEntry`/`addEntries`/`updateEntry`/
   `useJournal`/`clearJournal`. Inserts `JSON.stringify` the row body for
   snapshot isolation (replaces the prior `structuredClone`). Walks are

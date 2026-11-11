@@ -26,6 +26,8 @@ import { useLogger } from './engine/index.js'
 import { onLoaded, onPersist, onFinalize } from './lifecycle.js'
 import { useJournal } from './journal.js'
 import { OPERATION } from './constants.js'
+
+const SOURCE_OPERATIONS = [OPERATION.CREATE, OPERATION.UPDATE, OPERATION.DELETE]
 import _ from 'lodash'
 import sift from 'sift'
 import { expandEntity, projectMeta, refFilter } from './utils/index.js'
@@ -259,10 +261,31 @@ export function settleNeutralRender(id) {
 async function applyJournalMutations(phase) {
     const logger = useLogger()
     const refsIndex = useRefsIndex()
-    const mutations = []
-    for await (const { operation, entity } of useJournal('Catalog')) {
-        mutations.push({ operation, entity })
+    // Source operations only, and only the last of each kind per entity.
+    //
+    // Read unfiltered, this drain parsed every RENDER and POSTPROCESS row as
+    // well — rows the switch below ignores, each carrying the entity as the
+    // pipeline enriched it — and held all of them at once, because the
+    // transaction is sync and has to have them in hand. On a deployment a
+    // full rebuild journalled 19k renders averaging 84 KB, 1.6 GB of JSON
+    // before parsing, and the finalize drain ran the process out of heap
+    // every time it got there. Each crash then carried its sources into the
+    // next run on top of a fresh rebuild's, so the journal grew by a catalog's
+    // worth per restart and no cycle ever completed.
+    //
+    // Collapsing repeats is exact: an upsert replaces the whole row, so of
+    // several CREATEs (or UPDATEs) for an id only the last can survive the
+    // transaction. Keeping the last of EACH operation, rather than the last
+    // entry overall, leaves a DELETE between two writes in place, and with it
+    // clearFailures. Re-inserting moves the key to its latest position, so
+    // the kept entries stay in journal order.
+    const latest = new Map()
+    for await (const { operation, entity } of useJournal('Catalog', SOURCE_OPERATIONS)) {
+        const key = `${operation}\0${entity.id}`
+        latest.delete(key)
+        latest.set(key, { operation, entity })
     }
+    const mutations = [...latest.values()]
     // Ids whose neutral render finished in this cycle. Collected during the
     // pass and settled inside the same transaction, so no reader ever sees
     // the altered row.

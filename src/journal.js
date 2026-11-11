@@ -87,6 +87,7 @@ let stmtMaxSeq = null
 let stmtCount = null
 let stmtDelete = null
 let stmtDeleteDerived = null
+let stmtCollapseSources = null
 // Cache prepared chunked-SELECTs by operation-tuple so hot paths don't
 // re-prepare. Keyed by the sorted operation list; one statement per
 // distinct filter shape we see in a process.
@@ -309,6 +310,17 @@ onLoaded(async () => {
     stmtDeleteDerived = db.prepare(
         `DELETE FROM mikser_journal WHERE operation IN (`
         + DERIVED_OPERATIONS.map(() => '?').join(', ') + `)`)
+    // Every source entry but the latest of its kind for its entity. Bound
+    // twice with DERIVED_OPERATIONS, once for each NOT IN.
+    const notDerived = `operation NOT IN (${DERIVED_OPERATIONS.map(() => '?').join(', ')})`
+    stmtCollapseSources = db.prepare(`
+        DELETE FROM mikser_journal
+        WHERE ${notDerived} AND entity IS NOT NULL AND seq NOT IN (
+            SELECT MAX(seq) FROM mikser_journal
+            WHERE ${notDerived} AND entity IS NOT NULL
+            GROUP BY operation, json_extract(entity, '$.id')
+        )
+    `)
     stmtChunkAll     = db.prepare(`
         SELECT * FROM mikser_journal
         WHERE seq > ? AND seq <= ?
@@ -357,6 +369,17 @@ onLoaded(async () => {
     // anything this run journals, and the catalog drain applies in seq order,
     // so a file that moved again while mikser was down is applied last.
     //
+    // Repeats are collapsed to the latest of each kind per entity before
+    // they are carried. Without that, a crash LOOP grows the journal: each
+    // run carries what the last one left and journals its own entries on
+    // top, and a run that rebuilds everything (database/index.js, "The last
+    // rebuild did not finish") journals the whole catalog again. On a
+    // deployment that was 8.8k entities a restart — 17k, 26k, 35k, 43k, 52k
+    // source rows for the same 8.8k, every run doing the work several times
+    // over before it died in the same place. The latest entry is the one the
+    // catalog drain would keep anyway (catalog.js), and the newest copy of
+    // the entity, so dropping the older ones loses nothing.
+    //
     // Nothing here has to reason about an incompatible cache. A release that
     // changes the shape of what is stored, or a config change, unlinks the
     // database file — the journal with it — so a leftover row can only ever
@@ -368,12 +391,15 @@ onLoaded(async () => {
             logger.info('Resuming from %d journal entries left by a previous run', leftover)
         } else {
             const derived = stmtDeleteDerived.run(...DERIVED_OPERATIONS).changes
-            reportCarried(leftover - derived)
+            const repeated = stmtCollapseSources.run(...DERIVED_OPERATIONS, ...DERIVED_OPERATIONS).changes
+            const carried = leftover - derived - repeated
+            reportCarried(carried)
             logger.warn(
                 'Previous run was interrupted with %d unfinalized journal entries — '
                 + 'carrying %d unprocessed source change(s) into this cycle and re-deriving '
-                + 'the %d render task(s) they produced (--resume replays those instead)',
-                leftover, leftover - derived, derived,
+                + 'the %d render task(s) they produced (--resume replays those instead)'
+                + (repeated ? '; %d repeated source entries were dropped, only the latest of each is carried' : ''),
+                leftover, carried, derived, ...(repeated ? [repeated] : []),
             )
         }
     }
