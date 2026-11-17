@@ -1,10 +1,60 @@
 import path from 'node:path'
 import { cliOption } from '../cli.js'
-import { mkdir, symlink, unlink, lstat, realpath } from 'fs/promises'
+import { existsSync } from 'node:fs'
+import { mkdir, symlink, lstat, readlink, realpath } from 'fs/promises'
 import { globby } from 'globby'
 import pMap from 'p-map'
 import { checksumsByCollection } from '../catalog.js'
+import { isFullCycle } from '../invalidation.js'
 import { gateChecksum, sweepDeleted } from '../source.js'
+import { removeOutput } from '../utils/index.js'
+
+// Links in the output that the files folder no longer backs.
+//
+// `sweepDeleted` asks the CATALOG what disappeared, and a wipe leaves it
+// nothing to answer from: a config change unlinks the cache, and a file
+// deleted in the same delivery has no row left to be missing from, so its
+// symlink stays in the output and no later build removes it. Whatever walks
+// that output with `stat` then crashes on a link to nothing — a deploy
+// script's own scope check, twice.
+//
+// So this asks the DISK, and only about links this plugin could have made: a
+// symlink whose target is inside the files folder. A dangling one of those is
+// ours and is garbage whatever the catalog holds. A rendered page, the assets
+// tree's own symlink, a file another tool wrote — not examined, not removed.
+//
+// Through `removeOutput`, so a link takes the folders it empties with it:
+// `media/assets/fonts/x.woff2` left its own folder chain behind for a static
+// host to answer with a listing.
+export async function removeStaleLinks({ outputFolder, linkRoot, filesFolder, logger }) {
+    if (!existsSync(linkRoot)) return 0
+    const owned = path.resolve(filesFolder)
+    // objectMode for the dirent: with `followSymbolicLinks: false` it already
+    // says which entries are links, so only those are read — a walk that
+    // lstat'd every file would cost the whole output tree.
+    const entries = await globby('**/*', {
+        cwd: linkRoot,
+        onlyFiles: false,
+        followSymbolicLinks: false,
+        objectMode: true,
+        dot: true,
+    })
+    let removed = 0
+    for (const entry of entries) {
+        if (!entry.dirent.isSymbolicLink()) continue
+        const uri = path.join(linkRoot, entry.path)
+        let target
+        try {
+            target = path.resolve(path.dirname(uri), await readlink(uri))
+        } catch { continue }
+        if (target !== owned && !target.startsWith(owned + path.sep)) continue
+        if (existsSync(target)) continue
+        await removeOutput(outputFolder, path.relative(outputFolder, uri))
+        logger?.debug('files link removed (source gone): %s', entry.path)
+        removed++
+    }
+    return removed
+}
 
 export function files(options = {}) {
     return ({
@@ -61,11 +111,10 @@ export function files(options = {}) {
         async function removeLink(relativePath) {
             let uri = path.join(runtime.options.outputFolder, relativePath)
             if (options.outputFolder) uri = path.join(runtime.options.outputFolder, options.outputFolder, relativePath)
-            try {
-                await unlink(path.resolve(uri))
-            } catch (err) {
-                if (err.code !== 'ENOENT') throw err
-            }
+            // Through removeOutput, which takes the folders the link empties
+            // with it and treats a file already gone as the success it is.
+            await removeOutput(runtime.options.outputFolder,
+                path.relative(runtime.options.outputFolder, path.resolve(uri)))
         }
 
         async function link(source) {
@@ -287,14 +336,42 @@ export function files(options = {}) {
             // drive, an API — which is the accident the parameter exists to
             // prevent.
             //
-            // Skipped under --force, like every other sweep: that guard lives
-            // in sweepDeleted and is shared with documents and layouts.
+            // Runs under --force too, like every other sweep: that decision
+            // lives in sweepDeleted and is shared with documents and layouts.
+            // Nothing about --force wipes the catalog, so a row for a file
+            // that no longer exists would otherwise survive the one flag
+            // reached for exactly that.
             const deleted = await sweepDeleted(collection, scanned, async (entity) => {
                 await removeLink(path.relative(runtime.options.filesFolder, entity.uri))
                 await deleteEntity(entity)
                 logger.debug('files removed (file gone): %s', entity.name)
             }, runtime.options.filesFolder)
             if (deleted) logger.info('Files removed: %d no longer on disk', deleted)
+
+            // The same question asked of the DISK, on the cycles where the
+            // catalog cannot answer it.
+            //
+            // A wipe is the case that matters: the cache is unlinked and
+            // reopened empty, which is also what makes this a full cycle — a
+            // config change stamps `firstRun` through `upgradedFromVersion`,
+            // not through the file being absent — so a file deleted in the
+            // same delivery leaves no row for the sweep above to miss. Under
+            // --force that sweep is complete, and this still reaches what no
+            // row ever described: a link whose entity never got written.
+            //
+            // An incremental cycle pays nothing for it. The walk is the whole
+            // output tree, and the sweep it complements is already right there.
+            if (isFullCycle(runtime)) {
+                const stale = await removeStaleLinks({
+                    outputFolder: runtime.options.outputFolder,
+                    linkRoot: options.outputFolder
+                        ? path.join(runtime.options.outputFolder, options.outputFolder)
+                        : runtime.options.outputFolder,
+                    filesFolder: runtime.options.filesFolder,
+                    logger,
+                })
+                if (stale) logger.info('Files links removed: %d pointing at nothing', stale)
+            }
         })
 
         return {

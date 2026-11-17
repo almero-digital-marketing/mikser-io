@@ -230,6 +230,24 @@ could not fix what it is reached for — nothing about `--force` wipes the
 catalog (that is `--clear`), so a row for a file that no longer exists simply
 survived. Only `--clear` cleaned up.
 
+**A wipe is the one case the catalog cannot answer.** A config change unlinks
+the cache, so a file deleted in the same delivery has no row left to be
+missing from: the scan finds nothing absent, and the symlink it published
+stays in the output for good, pointing at nothing. Seen twice — pages served
+200 after a config-changing deploy, and `.woff2` links that a deploy script
+then crashed on with `statSync`.
+
+On a full cycle — a wipe, or `--force` — the same question is asked of the
+**disk** instead. (A wipe is a full cycle: the cache is unlinked and reopened
+empty, which stamps `firstRun`.) A symlink under the output folder whose
+target is inside the
+files folder and does not exist is this plugin's, and is removed with every
+folder it empties. Nothing else is examined, so a rendered page, the assets
+tree's own symlink and a file another tool wrote are never touched. It says
+`Files links removed: N pointing at nothing` when it acts. An incremental
+cycle pays nothing for it: the walk is of the whole output tree, and the sweep
+above is already correct there.
+
 The matching cleanup for derivatives lives in `assets` — see below.
 
 ---

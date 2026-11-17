@@ -1,10 +1,11 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile, rm, mkdir, readlink } from 'node:fs/promises'
+import { mkdtemp, writeFile, rm, mkdir, readlink, symlink } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import { files } from '../../../src/plugins/files.js'
+import { files, removeStaleLinks } from '../../../src/plugins/files.js'
 import { createHarness } from '../plugin-harness.js'
 
 async function withTempWorking(fn) {
@@ -117,5 +118,90 @@ describe('files plugin', () => {
         const h = createHarness()
         files()(h.core)
         assert.equal(await h.runSync('files', { action: 'create', context: {} }), false)
+    })
+})
+
+// A link the catalog can no longer speak for.
+//
+// The sweep in onImport reads the catalog, and a wipe leaves it empty: a file
+// deleted in the same delivery as a config change has no row to be missing
+// from, so nothing removes its symlink and a consumer walking out/ with stat
+// crashes on it. This is the same question asked of the disk.
+describe('removeStaleLinks', () => {
+    async function withOutput(fn) {
+        const root = await mkdtemp(path.join(tmpdir(), 'mikser-stale-links-'))
+        const outputFolder = path.join(root, 'out')
+        const filesFolder = path.join(root, 'files')
+        await mkdir(path.join(filesFolder, 'media'), { recursive: true })
+        await mkdir(outputFolder, { recursive: true })
+        try { return await fn({ root, outputFolder, filesFolder }) }
+        finally { await rm(root, { recursive: true, force: true }) }
+    }
+
+    const deploy = async (outputFolder, filesFolder, relative) => {
+        const uri = path.join(outputFolder, relative)
+        await mkdir(path.dirname(uri), { recursive: true })
+        await symlink(path.join(filesFolder, relative), uri, 'file')
+        return uri
+    }
+
+    it('removes a link whose source is gone, with the folders it empties', async () => {
+        await withOutput(async ({ outputFolder, filesFolder }) => {
+            // The reported shape: the .woff2 was deleted while nothing watched.
+            const link = await deploy(outputFolder, filesFolder, 'media/assets/fonts/x.woff2')
+            assert.equal(await removeStaleLinks({ outputFolder, linkRoot: outputFolder, filesFolder }), 1)
+            assert.equal(existsSync(link), false)
+            assert.equal(existsSync(path.join(outputFolder, 'media')), false,
+                'the folder chain it left empty stayed behind')
+            assert.ok(existsSync(outputFolder), 'the output folder itself is never removed')
+        })
+    })
+
+    it('keeps a link whose source is still there', async () => {
+        await withOutput(async ({ outputFolder, filesFolder }) => {
+            await writeFile(path.join(filesFolder, 'media', 'logo.svg'), '<svg/>')
+            const link = await deploy(outputFolder, filesFolder, 'media/logo.svg')
+            assert.equal(await removeStaleLinks({ outputFolder, linkRoot: outputFolder, filesFolder }), 0)
+            assert.ok(existsSync(link))
+        })
+    })
+
+    it('leaves a dangling link that points outside the files folder', async () => {
+        await withOutput(async ({ root, outputFolder, filesFolder }) => {
+            // Another plugin's, or an operator's. Only links into the folder
+            // this plugin deploys from are ours to remove.
+            const foreign = path.join(outputFolder, 'assets')
+            await symlink(path.join(root, 'derived'), foreign, 'dir')
+            assert.equal(await removeStaleLinks({ outputFolder, linkRoot: outputFolder, filesFolder }), 0)
+            assert.equal(await readlink(foreign), path.join(root, 'derived'))
+        })
+    })
+
+    it('leaves rendered output alone', async () => {
+        await withOutput(async ({ outputFolder, filesFolder }) => {
+            await mkdir(path.join(outputFolder, 'bg'), { recursive: true })
+            await writeFile(path.join(outputFolder, 'bg', 'index.html'), '<html></html>')
+            assert.equal(await removeStaleLinks({ outputFolder, linkRoot: outputFolder, filesFolder }), 0)
+            assert.ok(existsSync(path.join(outputFolder, 'bg', 'index.html')))
+        })
+    })
+
+    it('finds the links where files({ outputFolder }) puts them', async () => {
+        await withOutput(async ({ outputFolder, filesFolder }) => {
+            const linkRoot = path.join(outputFolder, 'static')
+            const uri = path.join(linkRoot, 'fonts', 'x.woff2')
+            await mkdir(path.dirname(uri), { recursive: true })
+            await symlink(path.join(filesFolder, 'fonts', 'x.woff2'), uri, 'file')
+            assert.equal(await removeStaleLinks({ outputFolder, linkRoot, filesFolder }), 1)
+            assert.equal(existsSync(uri), false)
+        })
+    })
+
+    it('says nothing happened when the output folder is not there yet', async () => {
+        await withOutput(async ({ root, outputFolder, filesFolder }) => {
+            assert.equal(await removeStaleLinks({
+                outputFolder, linkRoot: path.join(root, 'never-built'), filesFolder,
+            }), 0)
+        })
     })
 })

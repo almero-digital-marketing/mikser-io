@@ -761,7 +761,12 @@ substrate.
 ## Plugin map (`src/plugins/`)
 
 - `documents` — file→entity sync for the documents collection
-- `files` — file→entity sync for the files collection
+- `files` — file→entity sync for the files collection. Publishes by
+  symlinking the source into the output, so its deletes have TWO
+  reconciliations: `sweepDeleted` against the catalog every import, and
+  `removeStaleLinks` against the DISK on a full cycle — because a wipe is
+  exactly when the catalog cannot answer, and a file deleted in the same
+  delivery as a config change left a dangling link no later build removed
 - `resources` — resource references
 - `front-matter` — YAML frontmatter extraction (HTML/MD files)
 - `yaml` — YAML format support (.yml/.yaml entities)
