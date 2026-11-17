@@ -114,7 +114,7 @@ export async function runReportOnly(request = {}) {
             logger.error('Verify: no manifest available — nothing to check against')
             return 2
         }
-        const { verdict, missing, mismatched, unverifiable, orphaned, collisions } =
+        const { verdict, missing, mismatched, unverifiable, orphaned, broken, collisions } =
             await runtime.manifest.auditOutput()
         const total = runtime.manifest.size()
 
@@ -138,9 +138,10 @@ export async function runReportOnly(request = {}) {
                     mismatched: mismatched.length,
                     unverifiable: unverifiable.length,
                     orphaned: orphaned.length,
+                    broken: broken.length,
                     collisions: collisions.length,
                 },
-                missing, mismatched, unverifiable, orphaned, collisions,
+                missing, mismatched, unverifiable, orphaned, broken, collisions,
             }, null, 2) + '\n')
             return verdict === 'FAIL' ? 2 : 0
         }
@@ -150,6 +151,9 @@ export async function runReportOnly(request = {}) {
             e.writtenBy ? ` — the bytes on disk are ${e.writtenBy}'s` : '')
         for (const e of unverifiable) logger.warn('No hash:    %s (entity %s)', e.destination, e.id)
         for (const e of orphaned)     logger.warn('Orphan:     %s', e.path)
+        // A link, not a file: it names a path that resolves to nothing, which
+        // is a 404 to a browser and a throw to anything that stats it.
+        for (const e of broken)       logger.warn('Broken link: %s', e.path)
         // Named per destination: "two entities write here" is only actionable
         // if you know which two.
         for (const c of collisions)   logger.warn('Collision:  %s ← %s', c.destination, c.entities.join(', '))
@@ -160,8 +164,10 @@ export async function runReportOnly(request = {}) {
         // reads as success at a glance even though the exit code is right.
         const report = verdict === 'FAIL' ? logger.error : verdict === 'WARN' ? logger.warn : logger.notice
         report.call(logger,
-            'Audit %s: %d snapshots, %d missing, %d mismatched, %d unverifiable, %d orphaned, %d collisions',
-            verdict, total, missing.length, mismatched.length, unverifiable.length, orphaned.length, collisions.length)
+            'Audit %s: %d snapshots, %d missing, %d mismatched, %d unverifiable, %d orphaned, '
+            + '%d broken links, %d collisions',
+            verdict, total, missing.length, mismatched.length, unverifiable.length, orphaned.length,
+            broken.length, collisions.length)
 
         // Say what a pass means, because the name promises more than the check
         // can deliver.

@@ -22,7 +22,7 @@
 
 import { describe, it, before, after, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, mkdir, writeFile, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import crypto from 'node:crypto'
@@ -147,6 +147,50 @@ describe('manifest.auditOutput()', () => {
         await writeFile(path.join(outputFolder, 'stray.html'), 'nobody claims this')
         const diff = await manifest.auditOutput({ outputFolder })
         assert.deepEqual(diff.orphaned.map(o => o.path), ['stray.html'])
+    })
+
+    // A symlink is neither a render nor an orphan.
+    //
+    // files() publishes by linking its source into the output, so the claim
+    // question has no answer for one — nothing rendered it, and asking would
+    // report every static file on the site. What a link can be asked is
+    // whether it still points at anything.
+    it('reports a link that resolves to nothing', async () => {
+        const gone = path.join(outputFolder, 'media', 'fonts', 'x.woff2')
+        await mkdir(path.dirname(gone), { recursive: true })
+        await symlink(path.join(root, 'files', 'media', 'fonts', 'x.woff2'), gone, 'file')
+
+        const diff = await manifest.auditOutput({ outputFolder })
+        assert.deepEqual(diff.broken.map(b => b.path), ['media/fonts/x.woff2'])
+        assert.equal(diff.verdict, 'WARN', 'a link to nothing must not read as OK')
+        assert.deepEqual(diff.orphaned, [],
+            'a link is not an orphan — nothing was ever supposed to claim it')
+    })
+
+    it('says nothing about a link that resolves', async () => {
+        // The flood this check has to avoid: every file a site serves is one
+        // of these, and none of them is a finding.
+        const source = path.join(root, 'files', 'logo.svg')
+        await mkdir(path.dirname(source), { recursive: true })
+        await writeFile(source, '<svg/>')
+        await symlink(source, path.join(outputFolder, 'logo.svg'), 'file')
+
+        const diff = await manifest.auditOutput({ outputFolder })
+        assert.deepEqual(diff.broken, [])
+        assert.deepEqual(diff.orphaned, [])
+        assert.equal(diff.verdict, 'OK')
+    })
+
+    it('does not report a folder as an orphan', async () => {
+        // The walk stopped being files-only to see links at all, so every
+        // directory now arrives with them.
+        await mkdir(path.join(outputFolder, 'bg', 'aparati'), { recursive: true })
+        const page = path.join(outputFolder, 'bg', 'aparati', 'index.html')
+        await writeFile(page, 'page bytes')
+        record('/documents/bg/aparati.md', '/bg/aparati/index.html', 'page bytes')
+
+        const diff = await manifest.auditOutput({ outputFolder })
+        assert.deepEqual(diff.orphaned, [])
     })
 
     it('mixes both shapes in one run without either interfering', async () => {

@@ -510,7 +510,13 @@ brevity.
   ABSOLUTE paths; keyed relative to `outputFolder` it silently claimed
   nothing for any destination outside it. Roots nested inside an
   already-walked one are skipped, or `--assets out/derived` lists every file
-  twice. **The dispatch is at `import`, not the engine's `onLoaded`** — same
+  twice. **A symlink is judged on whether it RESOLVES, never on whether a
+  snapshot claims it** (`broken`, a warning). The walk was files-only and a
+  link is not a file, so it returned neither a live one nor a dangling one and
+  read `0 orphaned` over a tree of links to deleted sources — found when a
+  consumer's own `stat` walk crashed on them instead. Claiming is the wrong
+  question for a link: nothing renders one, `files()` publishes every static
+  file that way, so asking it would report the whole site. **The dispatch is at `import`, not the engine's `onLoaded`** — same
   reason `--tool`/`--tools` moved there: the engine's own onLoaded is
   registered during setup(), ahead of every plugin's, so an audit dispatched
   from it asked which trees hold outputs before a single plugin had answered,

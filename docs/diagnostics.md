@@ -357,7 +357,7 @@ their trees on `runtime.options.auditRoots` as `{ path, ignore }`, which is
 also how a plugin states what is bookkeeping rather than output — a `.md5`
 beside every derivative would otherwise be one orphan per derivative.
 
-Five categories, and the split matters:
+Six categories, and the split matters:
 
 | Category | Meaning | Severity |
 | --- | --- | --- |
@@ -365,7 +365,24 @@ Five categories, and the split matters:
 | `Mismatched` | the file's bytes differ from the recorded `outputHash` | error |
 | `No hash` | a snapshot with no recorded hash — nothing to compare | warning |
 | `Orphan` | a file on disk that no snapshot claims | warning |
+| `Broken link` | a symlink in the output that resolves to nothing | warning |
 | `Collision` | two or more entities record snapshots for the same destination | warning |
+
+`Broken link` is asked of symlinks only, and it is a different question
+from `Orphan`. Nothing renders a symlink — `files()` publishes by linking
+its source into the output — so no snapshot ever claims one, and asking the
+orphan question of a link would report every static file on the site. What a
+link can be asked is whether it still points at anything. A link that
+resolves is somebody's deployment and not this check's business; one that
+does not is a 404 wearing a file's name.
+
+It was invisible until 11.28.0: the walk was files-only, and a symlink is not
+a file, so a tree of links to deleted sources read `0 orphaned`. That is the
+state a deploy script's own `stat` walk crashed on — the audit should have
+been what said so. It is a warning rather than an error because this walk
+cannot tell it from an operator's deliberate link to a path that exists only
+on the deploy host, and because every site carrying one carries it from
+before anything could see it.
 
 `Collision` is the one that does not show up as drift. Every render
 hashes the file *after* writing it, so when two entities write the same
@@ -734,7 +751,7 @@ What was rendered and whether it needs redoing.
 | `sourcesBehind(snapshot)` | the source entities that fed one render, each with `via` naming HOW it got there (layout, partial, ref, or the recorded query it matched) |
 | `sourcesOf(destination)` | the same across every entity claiming a destination, unioned — what `mikser_which` answers from |
 | `affectedBy(entity)` | which destinations would re-render if this entity changed, each with the same `reason` the build report uses |
-| `verify({outputFolder})` | `{ verdict, missing, mismatched, unverifiable, orphaned, collisions }` — what `--audit-output` reports; pure, no mutations |
+| `verify({outputFolder})` | `{ verdict, missing, mismatched, unverifiable, orphaned, broken, collisions }` — what `--audit-output` reports; pure, no mutations |
 | `collisions()` | destinations claimed by more than one entity, with the ids claiming each |
 | `writerOf(destination, outputHash)` | which of several claimants wrote the bytes now on disk, when the hashes can tell them apart |
 | `size()` | snapshot count |

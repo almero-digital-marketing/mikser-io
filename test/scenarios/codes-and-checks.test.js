@@ -101,7 +101,7 @@ describe('--audit-output as a document', () => {
     it('carries the counts and the entries behind them', async () => {
         const { stdout } = await runMikser(workdir, ['--audit-output', '--json'])
         const report = JSON.parse(stdout)
-        for (const key of ['missing', 'mismatched', 'unverifiable', 'orphaned', 'collisions']) {
+        for (const key of ['missing', 'mismatched', 'unverifiable', 'orphaned', 'broken', 'collisions']) {
             assert.equal(typeof report.summary[key], 'number', key)
             assert.ok(Array.isArray(report[key]), `${key} should list what it counted`)
         }

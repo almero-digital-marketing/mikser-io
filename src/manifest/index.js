@@ -843,23 +843,53 @@ export function createManifest(db) {
                 walked.push({ resolved, ignore: root.ignore ?? [] })
             }
             const orphaned = []
+            // Entries in the output that resolve to nothing.
+            //
+            // A symlink was invisible to this walk: `onlyFiles` is asked of
+            // the entry itself and a link is not a file, so neither a live one
+            // nor a dangling one came back. The check whose whole job is "what
+            // is on disk that mikser did not record" therefore read
+            // `0 orphaned` over a tree of links to deleted sources — the state
+            // a consumer's own `stat` walk then crashed on, which is how it
+            // was found rather than here.
+            //
+            // Judged on whether they RESOLVE, never on whether a snapshot
+            // claims them, because nothing renders a symlink: `files()`
+            // publishes by linking its source into the output, so asking the
+            // claim question of a link would report every static file on the
+            // site. One that resolves is somebody's deployment and not this
+            // check's business. One that resolves to nothing is a 404 wearing
+            // a file's name, whoever made it.
+            const broken = []
             for (const { resolved, ignore } of walked) {
+                // objectMode for the dirent: with `followSymbolicLinks: false`
+                // the walk already knows what each entry is, so nothing has to
+                // be stat'd twice to tell a link from a file.
                 const onDisk = await globby('**/*', {
                     cwd: resolved,
-                    onlyFiles: true,
+                    onlyFiles: false,
                     followSymbolicLinks: false,
+                    objectMode: true,
                     ignore,
                 })
-                for (const rel of onDisk) {
-                    if (claimed.has(path.join(resolved, rel))) continue
+                for (const entry of onDisk) {
+                    const file = path.join(resolved, entry.path)
                     // Relative to the output folder for the output folder, as
                     // before; relative to the working folder for anything
                     // else, because `web/media/x.jpg` alone does not say which
                     // tree it is in.
                     const isOutput = resolved === path.resolve(outputFolder)
                     const display = isOutput
-                        ? rel
-                        : path.relative(runtime.options.workingFolder ?? resolved, path.join(resolved, rel))
+                        ? entry.path
+                        : path.relative(runtime.options.workingFolder ?? resolved, file)
+                    if (entry.dirent.isSymbolicLink()) {
+                        if (!existsSync(file)) broken.push({ path: display, root: resolved })
+                        continue
+                    }
+                    // Folders arrive now that the walk is not files-only, and
+                    // a folder is not an output.
+                    if (!entry.dirent.isFile()) continue
+                    if (claimed.has(file)) continue
                     orphaned.push({ path: display, root: resolved })
                 }
             }
@@ -880,11 +910,19 @@ export function createManifest(db) {
             // It is also pre-existing on any site that already has one, so
             // failing the gate outright would break pipelines on upgrade for
             // a condition that was always there.
+            //
+            // A broken link is a warning for both of those reasons at once.
+            // It is indistinguishable from an operator's deliberate link to a
+            // path that exists only on the deploy host — this walk cannot ask
+            // who made it — and every site carrying one carries it today,
+            // from before anything could see it. The point is that it is
+            // SEEN; turning the next deploy red for a state that predates the
+            // check is a different decision, and not this one's to make.
             const errors = missing.length + mismatched.length
-            const warnings = orphaned.length + unverifiable.length + collisions.length
+            const warnings = orphaned.length + broken.length + unverifiable.length + collisions.length
             return {
                 verdict: errors > 0 ? 'FAIL' : warnings > 0 ? 'WARN' : 'OK',
-                missing, mismatched, unverifiable, orphaned, collisions,
+                missing, mismatched, unverifiable, orphaned, broken, collisions,
             }
         },
 
