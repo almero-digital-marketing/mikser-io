@@ -164,6 +164,11 @@ onImported(async () => {
 - `assets`: loads preset JS modules from the presets folder
 - `resources`: scans entities for CDN URLs and provisions local copies
 
+The engine itself uses `onImported` to settle the journal before anything
+drains it: a source entry carried from an interrupted run is dropped once this
+run's own scan has journalled the same entity, so every phase after this one
+sees one source entry per entity rather than two.
+
 ---
 
 ### Process / Processed

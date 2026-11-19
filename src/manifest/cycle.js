@@ -70,7 +70,11 @@ onFinalize(async () => {
     // the file ops below need to be async, and the DB transaction
     // below needs to be sync. Stage everything, then commit.
     const deletedIds = []          // entity ids to drop from manifest
-    const renderedEntries = []     // RENDER entries to record
+    // The snapshots this cycle's renders earned, already built — NOT the
+    // journal entries they were built from. See buildSnapshot: holding the
+    // entities is what ran a 4 GB heap out, and everything below asks these
+    // for an id, a parent and a destination, which a snapshot carries.
+    const renderedSnapshots = []
     const newDestinationsByParent = new Map()   // parent → dispatcher → destinations
     const lostPagination = new Map()            // id → dispatchers
 
@@ -120,7 +124,7 @@ onFinalize(async () => {
     // Every destination claimed by a render task this cycle — whether it
     // succeeded, was skipped as current, or failed.
     //
-    // This is deliberately WIDER than renderedEntries, and the width is the
+    // This is deliberately WIDER than renderedSnapshots, and the width is the
     // safety. The staleness test below asks "is this row's destination one its
     // entity still claims", and all three outcomes answer yes:
     //
@@ -166,8 +170,8 @@ onFinalize(async () => {
         // reuse and nothing to verify.
         if (entity?.options?.neutral) continue
         if (output?.success && !output.skipped) {
-            renderedEntries.push({ entity, deps, metaReads: output.metaReads,
-                                   consumedReads: output.consumedReads, dispatcher })
+            renderedSnapshots.push(buildSnapshot(
+                entity, deps, output.metaReads, output.consumedReads, dispatcher))
             if (entity.pages > 1) {
                 const parentId = entity.parent ?? entity.id
                 slot(newDestinationsByParent, parentId, dispatcher, () => new Set()).add(entity.destination)
@@ -211,11 +215,11 @@ onFinalize(async () => {
     // Recorded snapshots only describe PRIOR cycles. An entity rendered and
     // deleted within the same cycle has no row to look its destination up in —
     // on a first build there is no row at all — so the file it just wrote would
-    // survive both the entity and its snapshot. Take the destination from this
-    // cycle's render entries instead.
-    for (const { entity } of renderedEntries) {
-        if (deleted.has(entity.id) || (entity.parent && deleted.has(entity.parent))) {
-            stageUnlink(entity.destination)
+    // survive both the entity and its snapshot. Take the destination from the
+    // snapshots this cycle's renders produced instead.
+    for (const snapshot of renderedSnapshots) {
+        if (deleted.has(snapshot.id) || (snapshot.parent && deleted.has(snapshot.parent))) {
+            stageUnlink(snapshot.destination)
         }
     }
 
@@ -377,9 +381,9 @@ onFinalize(async () => {
     // it. Only --audit-output ever said so, and renaming an extension is the most
     // common action there is during a migration.
     const claimedByThisCycle = new Set()
-    for (const { entity } of renderedEntries) {
-        if (deleted.has(entity.id) || (entity.parent && deleted.has(entity.parent))) continue
-        if (entity.destination) claimedByThisCycle.add(entity.destination)
+    for (const snapshot of renderedSnapshots) {
+        if (deleted.has(snapshot.id) || (snapshot.parent && deleted.has(snapshot.parent))) continue
+        if (snapshot.destination) claimedByThisCycle.add(snapshot.destination)
     }
 
     for (const { destination, reason } of filesToUnlink) {
@@ -441,10 +445,14 @@ onFinalize(async () => {
     // Entities whose output moved while their inputs did not — collected
     // inside the transaction, reported by the caller once it commits.
     const drifted = []
-    for (const { entity, deps, metaReads, consumedReads, dispatcher } of renderedEntries) {
-        if (deleted.has(entity.id) || (entity.parent && deleted.has(entity.parent))) continue
-        const outputHash = await hashOutputFile(entity.destination)
-        recordedSnapshots.push(buildSnapshot(entity, deps, outputHash, metaReads, consumedReads, dispatcher))
+    for (const snapshot of renderedSnapshots) {
+        if (deleted.has(snapshot.id) || (snapshot.parent && deleted.has(snapshot.parent))) continue
+        // The one field the drain could not fill. Assigned rather than
+        // rebuilt: a snapshot without it is presence-checked only, so an
+        // unreadable output must leave the key absent, not null.
+        const outputHash = await hashOutputFile(snapshot.destination)
+        if (outputHash) snapshot.outputHash = outputHash
+        recordedSnapshots.push(snapshot)
     }
 
     // Apply all DB mutations atomically.

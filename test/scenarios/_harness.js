@@ -133,7 +133,11 @@ export async function setupFixture(workdir, files) {
 // Run mikser one-shot against workdir with optional extra args. Returns
 // { code, stdout, stderr } once the process exits. 30s safety timeout
 // catches hung child processes.
-export function runMikser(workdir, args = []) {
+// `options.env` adds to the child's environment, and `options.timeout`
+// replaces the kill deadline. Both exist for one case: a run whose point is
+// the SIZE of the heap it needs, which has to state a cap the parent is not
+// under and is slower for being capped.
+export function runMikser(workdir, args = [], options = {}) {
     return new Promise((resolve, reject) => {
         // NODE_PATH makes `import 'mikser-io'` resolve from inside the
         // temp working folder's mikser.config.js. The config file lives
@@ -149,12 +153,13 @@ export function runMikser(workdir, args = []) {
                 ...process.env,
                 NO_COLOR: '1',
                 NODE_PATH: path.dirname(MIKSER_ROOT),
+                ...options.env,
             },
         })
         let stdout = '', stderr = ''
         p.stdout.on('data', d => stdout += d.toString())
         p.stderr.on('data', d => stderr += d.toString())
-        const timer = setTimeout(() => p.kill('SIGKILL'), 30_000)
+        const timer = setTimeout(() => p.kill('SIGKILL'), options.timeout ?? 30_000)
         p.on('close', code => {
             clearTimeout(timer)
             resolve({ code, stdout, stderr, combined: stripAnsi(stdout + stderr) })

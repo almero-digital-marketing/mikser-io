@@ -9,7 +9,7 @@
 // same 8.8k entities — and each run died in the same place, the finalize
 // catalog drain, which read every one of them and every render entry besides.
 //
-// Two fixes, and the test holds both:
+// Three fixes, and the test holds all of them:
 //
 //   1. the carry keeps only the latest source entry of each kind per entity,
 //      so a run inherits at most one catalog's worth however many died before
@@ -17,6 +17,12 @@
 //   2. the catalog drain reads source operations only and collapses repeats,
 //      so render entries — which carry the enriched entity and were 1.6 GB of
 //      JSON on that deployment — are never held in memory (catalog.js)
+//   3. the carried entries are collapsed a second time once this cycle has
+//      imported, against what it journalled for itself (journal.js,
+//      onImported). Without it the inheriting run holds TWO entries per
+//      entity — the carried one and its own — and every source drain parses
+//      and processes both. Measured on the retry after an OOM: 19,644
+//      entries walked for 9,834 entities.
 //
 // The kill is simulated at onBeforeRender, after the dispatcher has journalled
 // this cycle's render tasks: the process dies holding source entries and
@@ -31,12 +37,18 @@ import Database from 'better-sqlite3'
 import { setupFixture, runMikser, cleanup, freshWorkdir } from './_harness.js'
 
 const CONFIG = `
-import { documents, frontMatter, renderHbs, onBeforeRender } from 'mikser-io'
+import { documents, frontMatter, renderHbs, onImport, onBeforeRender } from 'mikser-io'
 import { layouts } from 'mikser-io-layouts'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 
 const killMidCycle = () => () => {
+    // Last in the plugin list, so this runs after every source has scanned.
+    // Dying HERE is the one case the post-import collapse cannot cover: the
+    // run leaves both what it carried and what it had just journalled.
+    onImport(async () => {
+        if (existsSync(path.join(import.meta.dirname, 'KILL_IMPORT'))) process.exit(8)
+    })
     onBeforeRender(async () => {
         if (existsSync(path.join(import.meta.dirname, 'KILL'))) process.exit(7)
     })
@@ -120,16 +132,39 @@ describe('a crash loop after an interrupted rebuild', () => {
         const counts = runs.slice(1).map(run => carried(run.combined))
         assert.deepEqual(counts, counts.map(() => entities),
             `carried per attempt: ${counts.join(', ')}`)
-        assert.match(runs.at(-1).combined, /repeated source entries were dropped/,
-            'and says it dropped the repeats')
     })
 
-    it('never leaves more than this run\'s entries and one carried copy per entity', () => {
+    it('finds nothing for the bootstrap collapse to do, because the cycle before it collapsed', () => {
+        // The two collapses are the same rule at two moments, and this loop
+        // only ever reaches the second: a run that dies after its import
+        // leaves one entry per entity, so the run that inherits them has no
+        // repeats to drop at startup. The bootstrap collapse is for the
+        // narrower case below — a run that died DURING its import.
+        for (const { combined } of runs) {
+            assert.doesNotMatch(combined, /repeated source entries were dropped/, combined)
+        }
+    })
+
+    it('leaves exactly one source entry per entity, carried or its own', () => {
         for (const [attempt, { rows }] of runs.entries()) {
             assert.equal(rows.length, entities, `attempt ${attempt}: every entity, once each`)
             for (const { id, n } of rows) {
-                assert.ok(n <= 2, `attempt ${attempt}: ${id} has ${n} source rows`)
+                // Two is what it was: the entry this run carried and the one
+                // its own rescan journalled for the same file. Both reached
+                // every drain, and the cheapest of them parses the entity.
+                assert.equal(n, 1, `attempt ${attempt}: ${id} has ${n} source rows`)
             }
+        }
+    })
+
+    it('says it dropped the carried copies its own import superseded', () => {
+        // Attempt 0 inherits nothing — it is the run that starts the loop —
+        // so the line belongs to the ones that carry.
+        assert.doesNotMatch(runs[0].combined, /carried source entry/, runs[0].combined)
+        for (const { combined } of runs.slice(1)) {
+            assert.match(combined,
+                new RegExp(`${entities} carried source entry\\(s\\) superseded by this cycle's own import`),
+                combined)
         }
     })
 
@@ -151,5 +186,45 @@ describe('a crash loop after an interrupted rebuild', () => {
         assert.equal(quiet.code, 0, quiet.combined)
         assert.doesNotMatch(quiet.combined, /last rebuild did not finish|Previous run was interrupted/)
         assert.doesNotMatch(quiet.combined, /Rendered:/, 'nothing changed, so nothing renders')
+    })
+})
+
+
+describe('a run that dies during its own import', () => {
+    // The post-import collapse never ran, so this run leaves BOTH what it
+    // carried and what it had journalled for itself — the repeats the
+    // bootstrap collapse exists for. Separate from the loop above because
+    // that one can no longer produce them, and a fix with a production story
+    // behind it should not lose its test to another fix.
+    const workdir = freshWorkdir('crash-loop-journal-import')
+    after(() => cleanup(workdir))
+
+    const marker = (name) => path.join(workdir, name)
+    let inheritor
+
+    before(async () => {
+        await setupFixture(workdir, FIXTURE)
+        assert.equal((await runMikser(workdir)).code, 0)
+        await rm(path.join(workdir, 'runtime', 'mikser.sqlite'), { force: true })
+
+        // One death after the import, so there is something to carry; then
+        // one DURING it, which carries that and adds its own.
+        await writeFile(marker('KILL'), '')
+        assert.equal((await runMikser(workdir)).code, 7)
+        await rm(marker('KILL'))
+        await writeFile(marker('KILL_IMPORT'), '')
+        assert.equal((await runMikser(workdir)).code, 8)
+        await rm(marker('KILL_IMPORT'))
+
+        inheritor = await runMikser(workdir)
+    })
+
+    it('leaves repeats, and the next run drops them at startup', () => {
+        assert.equal(inheritor.code, 0, inheritor.combined)
+        assert.match(inheritor.combined, /repeated source entries were dropped/, inheritor.combined)
+    })
+
+    it('and builds the site from them', async () => {
+        assert.match(await readFile(path.join(workdir, 'out', 'index.html'), 'utf8'), /INDEX/)
     })
 })

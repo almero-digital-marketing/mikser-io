@@ -185,8 +185,18 @@ Converted output files
   catalog/refs/manifest commit their per-cycle transaction; journal is
   cleared with DELETE FROM mikser_journal. Anything left when the
   process exits is carried by the next run — its source entries into
-  the first cycle, its render tasks derived again.
+  the first cycle, its render tasks derived again. A carried entry that
+  the new run's own import supersedes is dropped once the import ends,
+  so every drain sees one source entry per entity.
 ```
+
+Journal walks hold a chunk at a time and nothing from the chunks before it.
+That is a memory bound the phases have to honour too: a phase that keeps the
+journal entry it was handed keeps the whole corpus, so the manifest's finalize
+drain builds each render's snapshot as it reads and keeps that instead — a few
+hundred bytes against an enriched entity that can be any size at all. Between
+chunks a walk yields to the event loop, so a long drain does not starve the
+watcher, the dev server or live reload for its whole length.
 
 ## Plugin Architecture
 

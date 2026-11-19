@@ -82,7 +82,23 @@ export function buildRefClosure(entity, deps) {
     return closure
 }
 
-export function buildSnapshot(entity, deps, outputHash, metaReads, consumedReads, dispatcher) {
+// Everything a snapshot records except `outputHash`, which cannot be known
+// until the file has been written and read back.
+//
+// Built the moment the render entry is drained, and that is the point. What
+// it replaces is the render's whole ENTITY, and a cycle that keeps one of
+// those per render keeps the corpus: on a full rebuild of 19k renders whose
+// journal rows averaged 84 KB, the finalize drain held ~1.6 GB of parsed
+// entities through an output-hashing pass that wanted a path from each of
+// them, and died there on a 4 GB heap (gpointpremium.com, 19.11.2026).
+// Everything a snapshot holds is derived below, and once it is derived the
+// entity it came from is nobody's business.
+//
+// Safe to derive this early because the one thing it looks outside itself for
+// — buildRefClosure resolving $-refs through the catalog — reads state that
+// is already settled: catalog.js's finalize drain is registered before the
+// manifest's and has committed by the time this runs.
+export function buildSnapshot(entity, deps, metaReads, consumedReads, dispatcher) {
     const snapshot = {
         id: entity.id,
         destination: entity.destination,
@@ -100,7 +116,6 @@ export function buildSnapshot(entity, deps, outputHash, metaReads, consumedReads
     if (metaReads?.length) snapshot.metaReads = [...new Set(metaReads)].sort()
     if (consumedReads?.length) snapshot.consumedReads = consumedReads
     if (entity.parent) snapshot.parent = entity.parent
-    if (outputHash) snapshot.outputHash = outputHash
     if (dispatcher) snapshot.dispatcher = dispatcher
     return snapshot
 }

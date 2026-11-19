@@ -572,7 +572,7 @@ export function createManifest(db) {
 
         // Record a successful render. Single INSERT OR REPLACE.
         record(entity, deps, metaReads, consumedReads, dispatcher) {
-            stmtUpsert.run(snapToRow(buildSnapshot(entity, deps, undefined, metaReads, consumedReads, dispatcher)))
+            stmtUpsert.run(snapToRow(buildSnapshot(entity, deps, metaReads, consumedReads, dispatcher)))
         },
 
         // Return the set of entity ids whose recorded snapshots have a

@@ -90,6 +90,14 @@ brevity.
   the carry stacked it on what the last run left) while the finalize drain
   parsed every render row — 1.6 GB of enriched-entity JSON on a deployment
   — and ran out of heap in the same place every time.
+  **The carried entries are collapsed again at `onImported`**, against what
+  this cycle journalled for itself, and only ever downwards: the subquery
+  reads the whole table but the delete is bounded by the seq the previous
+  run stopped at, so a carried entry can be superseded and this cycle's own
+  cannot. Without it the inheriting run holds two entries per entity — the
+  carried one and its own rescan's, since an interrupted rebuild opens the
+  source gate for every file — and every source drain parses and processes
+  both: 19,644 entries walked for 9,834 entities on the retry after an OOM.
   Same public surface: `addEntry`/`addEntries`/`updateEntry`/
   `useJournal`/`clearJournal`. Inserts `JSON.stringify` the row body for
   snapshot isolation (replaces the prior `structuredClone`). Walks are
@@ -226,6 +234,16 @@ brevity.
   `sharedDb`/`sharedManifest` live in `cycle.js`, the only place either is
   assigned, and `createManifest` is passed IN to `registerManifestHooks`
   rather than imported, so the two files do not import each other.
+  **The finalize drain keeps SNAPSHOTS, not journal entries.** `buildSnapshot`
+  is called as each RENDER entry is read and `outputHash` — the one field that
+  needs the file — is attached by the later pass; everything between asks the
+  snapshot for an id, a parent and a destination. Keeping the entries instead
+  held the whole corpus as parsed entities through an async filesystem walk:
+  on a rebuild of 19k renders averaging 84 KB a row that was ~1.6 GB, and the
+  process died there on a 4 GB heap with `Output: 21001/21520` as its last
+  line. Deriving the snapshot early is safe because the only thing it looks
+  outside itself for — `buildRefClosure` resolving $-refs through the catalog
+  — reads state catalog.js's own finalize drain has already committed.
 - The manifest itself — render snapshots in `mikser_snapshots` table
   (PK `(id, destination)`, `refClosure` as JSON, partial index on
   `parent`). `recordedHashes` aggregates dep hashes via
@@ -1037,6 +1055,14 @@ There is **no `--mcp` CLI flag**. Activation is plugin-presence only.
   author/category/related, longer body — ~7KB per catalog entry
   instead of ~3KB). Add `task: worker` to a layout's frontmatter to
   dispatch its renders + postprocess through Piscina.
+  `SIZE=heavy` (knob: `HEAVY_BYTES`, default 80KB of body per post) is for
+  measuring what a cycle RETAINS rather than what it computes — at that
+  weight the journal row dominates and a phase that holds one per render is
+  the peak of the whole build. That is the corpus the finalize drain's OOM
+  reproduces on: 4,000 posts, cold `--clear`, peak heap across the drain and
+  the output-hash pass 1857MB before the fix and 576MB after (mean 898MB →
+  284MB), for the same cycle time — the snapshot building moved out of the
+  hash pass and into the drain, so the two swapped durations.
 - Current honest numbers (Apple Silicon, 4-thread default, INLINE
   dispatch; see ADR-0009 for the substrate the numbers below run on):
   - 14k realistic cold (--clear):   33s,    RSS 1.4GB peak

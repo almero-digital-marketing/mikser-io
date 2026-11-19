@@ -26,6 +26,7 @@
 import {
     onInitialize,
     onLoaded,
+    onImported,
     onCancelled,
     onFinalized,
 } from './lifecycle.js'
@@ -88,6 +89,11 @@ let stmtCount = null
 let stmtDelete = null
 let stmtDeleteDerived = null
 let stmtCollapseSources = null
+// The highest seq a PREVIOUS cycle left behind, or 0 when this cycle started
+// with an empty journal. The boundary between what was carried and what this
+// cycle journalled for itself, and the only thing the post-import collapse is
+// allowed to touch — see onImported below.
+let carriedThrough = 0
 // Cache prepared chunked-SELECTs by operation-tuple so hot paths don't
 // re-prepare. Keyed by the sorted operation list; one statement per
 // distinct filter shape we see in a process.
@@ -275,6 +281,25 @@ export async function* useJournal(name, operations, signal) {
 
         lastSeq = rows[rows.length - 1].seq
         if (rows.length < CHUNK_SIZE) return // last chunk
+
+        // Let the event loop reach its timer and poll phases between chunks.
+        //
+        // Nothing in a walk awaits anything real: sqlite reads are sync and a
+        // consumer that only computes resolves its promise in the microtask
+        // queue, so a drain of any length is ONE turn of the loop. Timers,
+        // the HTTP server, the watcher and live reload are all starved for
+        // it, and a full rebuild's drains are tens of seconds each.
+        //
+        // Noticed when the manifest's Output drain took over the snapshot
+        // building that used to happen in a later pass — which awaited a file
+        // read per entry and so breathed by accident. The work is the same
+        // either way; where it leaves the loop breathing should not be an
+        // accident.
+        //
+        // Once per CHUNK_SIZE entries, so the cost is one macrotask per 500
+        // and the block is bounded by what 500 of them cost rather than by
+        // the corpus.
+        await new Promise(resolve => setImmediate(resolve))
     }
 }
 
@@ -310,12 +335,20 @@ onLoaded(async () => {
     stmtDeleteDerived = db.prepare(
         `DELETE FROM mikser_journal WHERE operation IN (`
         + DERIVED_OPERATIONS.map(() => '?').join(', ') + `)`)
-    // Every source entry but the latest of its kind for its entity. Bound
-    // twice with DERIVED_OPERATIONS, once for each NOT IN.
+    // Carried source entries that a LATER entry of the same kind supersedes.
+    // Bound with the carried boundary and then twice with DERIVED_OPERATIONS,
+    // once for each NOT IN.
+    //
+    // `seq <= ?` is the outer clause only, and the asymmetry is the whole
+    // design: the subquery looks at the WHOLE table, so a carried entry can
+    // be superseded by one this cycle journalled, while nothing this cycle
+    // journalled can be deleted. Run at bootstrap the bound covers every row
+    // there is, which collapses the carried entries among themselves; run
+    // again after import it collapses them against this cycle's own.
     const notDerived = `operation NOT IN (${DERIVED_OPERATIONS.map(() => '?').join(', ')})`
     stmtCollapseSources = db.prepare(`
         DELETE FROM mikser_journal
-        WHERE ${notDerived} AND entity IS NOT NULL AND seq NOT IN (
+        WHERE seq <= ? AND ${notDerived} AND entity IS NOT NULL AND seq NOT IN (
             SELECT MAX(seq) FROM mikser_journal
             WHERE ${notDerived} AND entity IS NOT NULL
             GROUP BY operation, json_extract(entity, '$.id')
@@ -384,14 +417,23 @@ onLoaded(async () => {
     // changes the shape of what is stored, or a config change, unlinks the
     // database file — the journal with it — so a leftover row can only ever
     // come from a run of the same shape.
+
+    // Whatever a previous handle left this at describes rows that are not in
+    // the table this one just opened. Only the branch below may set it.
+    carriedThrough = 0
     const leftover = stmtCount.get().n
     if (leftover > 0) {
         const logger = useLogger()
         if (runtime.options.resume) {
             logger.info('Resuming from %d journal entries left by a previous run', leftover)
         } else {
+            // Everything in the table at this moment came from the run that
+            // died. Taken before the deletes below, so the boundary stands
+            // even if the highest row is a derived one they remove.
+            carriedThrough = stmtMaxSeq.get().maxSeq ?? 0
             const derived = stmtDeleteDerived.run(...DERIVED_OPERATIONS).changes
-            const repeated = stmtCollapseSources.run(...DERIVED_OPERATIONS, ...DERIVED_OPERATIONS).changes
+            const repeated = stmtCollapseSources.run(
+                carriedThrough, ...DERIVED_OPERATIONS, ...DERIVED_OPERATIONS).changes
             const carried = leftover - derived - repeated
             reportCarried(carried)
             logger.warn(
@@ -402,6 +444,46 @@ onLoaded(async () => {
                 leftover, carried, derived, ...(repeated ? [repeated] : []),
             )
         }
+    }
+})
+
+// One entity, one source entry per cycle — carried ones included.
+//
+// The bootstrap collapse runs before this cycle has journalled anything, so
+// all it can do is collapse the carried entries against EACH OTHER. It leaves
+// the case that actually follows a crash: the cycle that inherits those
+// entries has no cache stamp either, so REBUILD_INTERRUPTED opens the source
+// gate for every file and the scan journals a second entry for every entity
+// the carried ones already describe. Both then reach every source drain —
+// front matter, yaml, refs, the dispatchers — which parse and process the
+// entity twice, on a corpus that is already big enough to have crashed once.
+// Measured on the retry after an OOM: 9,834 carried plus 9,834 scanned, and
+// 19,644 entries walked for 9,834 entities.
+//
+// Dropping the carried copy loses nothing. The one that supersedes it is this
+// cycle's own read of the same file, and the catalog drain would keep only
+// that one anyway — this moves the same decision upstream of the five other
+// drains that were paying for it. Nothing this cycle journalled is touched,
+// whatever repeats it contains: those are entries that something deliberately
+// wrote, and the drains that care about their order are the manifest's, which
+// resolves CREATE-then-DELETE by seq.
+//
+// Registered here, at module scope, which puts it ahead of every plugin's
+// onImported — the hooks run in registration order and journal.js is core.
+//
+// `--resume` never reaches this: the bootstrap leaves the boundary at 0 for
+// a replay, which is meant to be exact rather than tidy.
+onImported(async () => {
+    if (!carriedThrough || !db?.isOpen) return
+    const superseded = stmtCollapseSources.run(
+        carriedThrough, ...DERIVED_OPERATIONS, ...DERIVED_OPERATIONS).changes
+    // One cycle's worth. A later one re-reads the boundary from whatever it
+    // actually inherits — see onCancelled.
+    carriedThrough = 0
+    if (superseded) {
+        useLogger()?.info(
+            '%d carried source entry(s) superseded by this cycle\'s own import — dropped, so each '
+            + 'entity is processed once', superseded)
     }
 })
 
@@ -435,6 +517,11 @@ onCancelled(async () => {
     // finish clears the lot.
     const carried = stmtCount.get().n
     if (carried > 0) {
+        // The next cycle inherits these, and may re-journal the same entities
+        // — a cancelled cycle is restarted by a config or watch event that
+        // can perfectly well be a --force or a full one. Moving the boundary
+        // lets its onImported collapse them the same way a crash's are.
+        carriedThrough = stmtMaxSeq.get().maxSeq ?? 0
         useLogger()?.debug('Restart: carrying %d unprocessed journal entries into the next cycle', carried)
     }
 })

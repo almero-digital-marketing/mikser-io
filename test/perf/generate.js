@@ -15,6 +15,14 @@
 //                  to author/category/related, ~10-20 paragraph body.
 //                  ~12-18KB per catalog entry. Closer to a real CMS
 //                  blog post.
+//   - `heavy`     — the realistic frontmatter with a body sized by BYTES
+//                  (HEAVY_BYTES, default 80KB) instead of by paragraph
+//                  count. For measuring what a cycle RETAINS rather than
+//                  what it computes: at this weight the journal row is the
+//                  dominant cost, and a phase that holds one per render is
+//                  the peak of the whole build. Modelled on the corpus
+//                  whose rows averaged 84KB and ran a 4GB heap out
+//                  (gpointpremium.com, 19.11.2026).
 
 import { mkdir, writeFile, rm } from 'node:fs/promises'
 import path from 'node:path'
@@ -22,6 +30,10 @@ import { fileURLToPath } from 'node:url'
 
 const COUNT = Number(process.argv[2]) || 10_000
 const SIZE  = process.env.SIZE || 'light'
+// Only read for SIZE=heavy. Bytes of body per post, because the weight of
+// one entity is the variable under study — paragraph count is not, and
+// PARAGRAPHS has only fifteen entries to draw on without repeating.
+const HEAVY_BYTES = Number(process.env.HEAVY_BYTES) || 80 * 1024
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const OUT  = path.join(HERE, 'documents', 'posts')
 
@@ -97,6 +109,20 @@ function makeDate(i) {
 }
 
 function makeBody(i) {
+    if (SIZE === 'heavy') {
+        // Cycles through the pool rather than picking from it: pickN
+        // dedupes, so it cannot return more than PARAGRAPHS.length. The
+        // index is in the markup so no two paragraphs are the same string
+        // — a corpus of repeated literals is a corpus V8 can share, which
+        // is the one thing a memory measurement must not let it do.
+        const paragraphs = []
+        for (let bytes = 0, k = 0; bytes < HEAVY_BYTES; k++) {
+            const paragraph = `<p data-paragraph="${i}-${k}">${PARAGRAPHS[(i + k) % PARAGRAPHS.length]}</p>`
+            paragraphs.push(paragraph)
+            bytes += paragraph.length + 2
+        }
+        return paragraphs.join('\n\n')
+    }
     const n = SIZE === 'realistic' ? (10 + (i % 11)) : (3 + (i % 5))
     const paras = pickN(PARAGRAPHS, n, i + 1)
     return paras.map(p => `<p>${p}</p>`).join('\n\n')
@@ -225,7 +251,7 @@ async function main() {
         const body = makeBody(i)
 
         let fm
-        if (SIZE === 'realistic') {
+        if (SIZE === 'realistic' || SIZE === 'heavy') {
             const extras = makeRealisticMeta(i, tags)
             const extrasYaml = Object.entries(extras)
                 .map(([k, v]) => `${yamlKey(k)}: ${yamlValue(v, 2)}`)
