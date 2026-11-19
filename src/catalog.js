@@ -110,45 +110,91 @@ function recordQuery(filter) {
     ctx.track.query(normalizeFilter(filter))
 }
 
-// LRU cache for findById hot path. Bounded; evicts oldest on overflow.
-// Invalidates per-id on entity mutation.
+// LRU cache for findById hot path. Invalidated per-id on entity mutation,
+// and bounded on BOTH counts: how many entries it holds and how many bytes
+// they came from.
 //
-// Sized to comfortably cover small-to-mid corpora and the hot working
-// set of larger ones. At 10k corpus: full cache, 100% hit rate. At
-// 100k corpus: ~10% holds the hot working set (refs BFS revisits,
-// manifest collectEdges hashing). Memory cost is bounded — 10k
-// entries × ~7KB average = ~70MB cache footprint, still much less
-// than the prior in-memory Map that held the entire catalog in heap.
+// The entry cap alone bounds a number nobody chose. It was sized against
+// light entities — 10k × ~7KB ≈ 70MB — and the same 10k entries over a
+// catalog of 88KB rows is 1.7GB. Measured on 4,000 of those: 693MB live
+// across the render AND postprocess phases, three quarters of everything
+// that survived the build, and gone only because the finalize drain
+// invalidates every id it writes. Nothing leaks; the cache does exactly what
+// it was told, for a corpus ten times heavier than the one the number was
+// chosen for.
 //
-// Bigger workloads can tune via `runtime.config.catalog.cache.size`
-// (handled at onLoaded).
+// So the byte budget is the real bound and the entry cap is the cheap one.
+// Accounted in the bytes of the stored ROW, because that is the size the
+// source hands us and the only one knowable without walking the parsed
+// graph — which occupies roughly twice it.
+//
+// 128MB leaves the case the entry cap was designed for entirely inside the
+// budget, and stops a heavy one at a working set instead of a catalog: the
+// hot set is what gets revisited (refs BFS, a snapshot hashing its ref
+// targets), not the corpus. Either bound is tunable —
+// `runtime.config.catalog.cache.size` / `.bytes`, handled at onLoaded.
 const DEFAULT_LRU_SIZE = 10000
+const DEFAULT_LRU_BYTES = 128 * 1024 * 1024
 let lruSize = DEFAULT_LRU_SIZE
+let lruBytes = DEFAULT_LRU_BYTES
+// id → { entity, bytes }. Wrapped because a cached MISS is `entity: null`
+// and has to stay distinguishable from no entry at all.
 const findByIdCache = new Map()
+let cachedBytes = 0
 
 function cacheGet(id) {
-    if (!findByIdCache.has(id)) return undefined
-    // Touch — move to end so LRU eviction picks the oldest.
-    const v = findByIdCache.get(id)
+    const hit = findByIdCache.get(id)
+    if (hit === undefined) return undefined
+    // Touch — move to end so eviction picks the oldest.
     findByIdCache.delete(id)
-    findByIdCache.set(id, v)
-    return v
+    findByIdCache.set(id, hit)
+    return hit
 }
 
-function cacheSet(id, entity) {
-    if (findByIdCache.size >= lruSize && !findByIdCache.has(id)) {
-        const oldest = findByIdCache.keys().next().value
+function cacheSet(id, entity, bytes) {
+    const prior = findByIdCache.get(id)
+    if (prior !== undefined) {
+        cachedBytes -= prior.bytes
+        // Deleted rather than overwritten: `set` on a key a Map already has
+        // leaves it where it was, and the loop below terminates on finding
+        // the entry it just wrote. Overwritten in place, a key near the front
+        // would end the eviction early and leave the cache over budget.
+        findByIdCache.delete(id)
+    }
+    findByIdCache.set(id, { entity, bytes })
+    cachedBytes += bytes
+    // Oldest first, until both bounds hold. Deliberately stops at the entry
+    // just inserted: an entity bigger than the whole budget would otherwise
+    // empty the cache on arrival and still not be in it for the next lookup,
+    // so the ceiling is the budget plus one entity rather than a cache that
+    // thrashes itself to nothing.
+    for (const oldest of findByIdCache.keys()) {
+        if (findByIdCache.size <= lruSize && cachedBytes <= lruBytes) break
+        if (oldest === id) break
+        cachedBytes -= findByIdCache.get(oldest).bytes
         findByIdCache.delete(oldest)
     }
-    findByIdCache.set(id, entity)
 }
 
 function cacheEvict(id) {
+    const prior = findByIdCache.get(id)
+    if (prior === undefined) return
+    cachedBytes -= prior.bytes
     findByIdCache.delete(id)
 }
 
 function cacheClear() {
     findByIdCache.clear()
+    cachedBytes = 0
+}
+
+// What the cache is holding, for tests and diagnostics. Entries alone never
+// said anything about the memory, which is how the bound above came to be
+// missing. Published on `runtime.catalog`, not as a package export — it is
+// engine state, and `cacheStats` is too generic a name to put in a namespace
+// eighteen modules star-re-export into.
+function cacheStats() {
+    return { entries: findByIdCache.size, bytes: cachedBytes, maxEntries: lruSize, maxBytes: lruBytes }
 }
 
 // Prepared statements + lifecycle handle. Set at onLoaded; persists
@@ -502,6 +548,10 @@ onLoaded(async () => {
     lruSize = Number.isInteger(configured) && configured > 0
         ? configured
         : DEFAULT_LRU_SIZE
+    const configuredBytes = runtime.config?.catalog?.cache?.bytes
+    lruBytes = Number.isInteger(configuredBytes) && configuredBytes > 0
+        ? configuredBytes
+        : DEFAULT_LRU_BYTES
     cacheClear()
 
     // Expose the engine-side handle plugins might want. Matches the
@@ -526,6 +576,8 @@ onLoaded(async () => {
         // uninitialised: lifecycle.deleteEntity, which journals the row as
         // it stood, and provenance's parent fallback for synthetic entities.
         findById,
+        // What findById's LRU currently holds, against both its bounds.
+        cacheStats,
         // Compatibility — some legacy callers expected this. Now a
         // no-op (writes happen per-cycle via onPersist transactions).
         save: async () => {},
@@ -612,10 +664,12 @@ export function findById(id) {
 
     if (db?.isOpen) {
         const cached = cacheGet(id)
-        if (cached !== undefined) return cached
+        if (cached !== undefined) return cached.entity
         const row = stmtGet.get(id)
         const entity = row ? JSON.parse(row.data) : null
-        cacheSet(id, entity)
+        // The row's own bytes. A lookup that found nothing still takes an
+        // entry, so it is charged against the entry cap and nothing else.
+        cacheSet(id, entity, row ? row.data.length : 0)
         return entity
     }
 

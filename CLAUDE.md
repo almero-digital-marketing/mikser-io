@@ -112,8 +112,20 @@ brevity.
 - `catalog.js` — entity persistence in the `mikser_entities` table of
   `runtime/mikser.sqlite`. Indexed columns: id (PK), collection,
   type, format, name, meta_href, meta_layout, meta_lang, meta_cache,
-  time, uri. Full entity body in `data` (JSON TEXT). 10k-entry LRU
-  cache in front of `findById`. Public ops: `findEntity`,
+  time, uri. Full entity body in `data` (JSON TEXT). **The `findById` LRU
+  is bounded by BYTES as well as entries** (10k entries / 128MB of stored
+  rows, `catalog.cache.size` / `.bytes`), and `runtime.catalog.cacheStats()`
+  says what it holds against both. The entry cap alone bounds a number
+  nobody chose: it was sized against ~7KB entities — "10k × ~7KB ≈ 70MB" —
+  and the same 10k entries over a catalog of 88KB rows is 1.7GB. Measured
+  with a forced collection at every lifecycle boundary over 4,000 such
+  entities: 693MB live across the render AND postprocess phases, three
+  quarters of everything that survived the build, released only because the
+  finalize drain invalidates every id it writes. Nothing leaked — the cache
+  did what it was told for a corpus ten times heavier than the number
+  assumed. The ceiling is the budget plus one entity on purpose: an entity
+  larger than the whole budget would otherwise be evicted on arrival and
+  never be there for the next lookup. Public ops: `findEntity`,
   `findEntities`, `iterateEntities` (streaming async generator over the
   same query shape, seek-paginated — use it when results may be
   corpus-scale and the caller doesn't need an array), `queryEntities`,

@@ -127,11 +127,25 @@ export default {
 
 ### `catalog`
 
+The entry cap alone bounds a number, not an amount: it was sized against
+~7KB entities (10k × 7KB ≈ 70MB), and the same 10k entries over a catalog of
+88KB rows is 1.7GB held for the length of a build. Raise `bytes` if your
+corpus is light and you want a larger working set; lower it if entities are
+heavy and the build is memory-bound. Accounted in the bytes of the stored
+row, which is what the source hands the cache — the parsed object occupies
+roughly twice it.
+
 ```js
 export default {
   catalog: {
     cache: {
-      size: 10000  // findById LRU size. Default 10000.
+      size: 10000,            // findById LRU, in entries. Default 10000.
+      bytes: 134217728        // ...and in bytes of the rows it holds.
+                              // Default 128MB. Whichever bound is reached
+                              // first evicts; the ceiling is the budget plus
+                              // one entity, so an entity larger than the
+                              // whole budget is still cached rather than
+                              // evicted on arrival.
     },
     expand: {       // Caps for $-ref expansion (ADR-0007)
       maxDepth: 5,
